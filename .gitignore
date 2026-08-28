@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# env files
+.env
+.env.*
+!.env.example
+
+# vercel
+.vercel
+
+# runtime artifacts
+uploads/
+backups/
+*.log
+npm-debug.log*
+
+# os
+.DS_Store
+Thumbs.db
