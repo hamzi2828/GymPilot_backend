@@ -4,9 +4,120 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/user');
 const { getUserFromToken } = require('../helper/helper');
+const crypto = require('crypto');
+const { sendEmail } = require('../services/emailService');
+
+/** Generates a readable but strong temporary password. */
+function generatePassword(length = 14) {
+  // Ambiguous glyphs (0/O, 1/l/I) omitted so the password survives being read
+  // out of an email and retyped.
+  const upper = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%^&*';
+  const all = upper + lower + digits + symbols;
+  const pick = (set) => set[crypto.randomInt(0, set.length)];
+  // Guarantee one of each class, then fill and shuffle.
+  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
+  while (chars.length < length) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
+
+function welcomeEmailHtml({ firstName, email, password, siteName, loginUrl }) {
+  return `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
+    <h2 style="margin:0 0 16px;font-size:20px">Welcome to ${siteName}, ${firstName}</h2>
+    <p style="margin:0 0 16px;line-height:1.6">An account has been created for you. Use these details to sign in:</p>
+    <table style="width:100%;border-collapse:collapse;background:#fafafa;border:1px solid #e4e4e7;border-radius:8px;margin-bottom:16px">
+      <tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Email</td>
+          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${email}</td></tr>
+      <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
+          <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${password}</td></tr>
+    </table>
+    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.</p>
+    <a href="${loginUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
+    <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
+  </div>`;
+}
 
 const userController = {
 
+
+    // POST /admin/users - Admin creates a user and emails them their password
+    adminCreateUser: async (req, res) => {
+        try {
+            const { firstName, lastName, email, role, phone } = req.body;
+
+            if (!firstName || !lastName || !email) {
+                return res.status(400).json({ message: 'First name, last name and email are required' });
+            }
+
+            const normalisedEmail = String(email).toLowerCase().trim();
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalisedEmail)) {
+                return res.status(400).json({ message: 'Please provide a valid email address' });
+            }
+
+            const existing = await User.findOne({ email: normalisedEmail });
+            if (existing) {
+                return res.status(409).json({ message: 'Email already in use' });
+            }
+
+            const allowedRoles = ['user', 'admin', 'moderator'];
+            const assignedRole = allowedRoles.includes(role) ? role : 'user';
+
+            // Generated server-side so a plaintext password is never accepted
+            // over the wire or persisted anywhere but the outbound email.
+            const password = generatePassword();
+            const salt = await bcrypt.genSalt(10);
+            const hashed = await bcrypt.hash(password, salt);
+
+            const user = await User.create({
+                firstName: String(firstName).trim(),
+                lastName: String(lastName).trim(),
+                email: normalisedEmail,
+                password: hashed,
+                role: assignedRole,
+                phone: phone ? String(phone).trim() : null,
+            });
+
+            // The account exists regardless of whether the email lands, so a
+            // send failure is reported rather than failing the whole request.
+            let emailed = false;
+            let emailError = null;
+            try {
+                const siteName = process.env.SITE_NAME || 'The Jymor';
+                const loginUrl = `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/authentication`;
+                const result = await sendEmail(
+                    normalisedEmail,
+                    `Your ${siteName} account`,
+                    welcomeEmailHtml({ firstName: user.firstName, email: normalisedEmail, password, siteName, loginUrl })
+                );
+                emailed = !!result.success;
+                if (!result.success) emailError = result.error;
+            } catch (err) {
+                emailError = err.message;
+            }
+
+            const { password: _pw, ...safe } = user.toObject();
+            return res.status(201).json({
+                message: emailed
+                    ? 'User created and credentials emailed'
+                    : 'User created, but the credentials email could not be sent',
+                emailed,
+                emailError,
+                data: safe,
+            });
+        } catch (error) {
+            if (error && error.code === 11000) {
+                return res.status(409).json({ message: 'Email already in use' });
+            }
+            return res.status(400).json({ message: 'Error creating user', error: error.message });
+        }
+    },
 
     // POST /user - Create a new user
     createUser: async (req, res) => {

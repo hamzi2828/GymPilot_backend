@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controller/userController');
 const auth = require('../middleware/auth');
+const requireAdmin = require('../middleware/requireAdmin');
 const categoryController = require('../controller/categoryController');
 const productController = require('../controller/productController');
 const blogController = require('../controller/blogController');
@@ -22,16 +23,17 @@ router.post('/user/google-login', userController.googleLoginUser);
 router.put('/update/user', auth, userController.updateUser);
 router.delete('/user', auth, userController.deleteUser);
 router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile);
-router.get('/get/allUsers', auth, userController.getAllUsers);
+router.get('/get/allUsers', auth, requireAdmin, userController.getAllUsers);
+router.post('/admin/users', auth, requireAdmin, userController.adminCreateUser);
 
 // Google OAuth 2.0 redirect flow
 router.get('/auth/google', userController.startGoogleOAuth);
 router.get('/auth/google/callback', userController.googleOAuthCallback);
 
 // Admin operations by ID
-router.put('/update/status/:id', auth, userController.updateUserStatusById);
-router.put('/update/role/:id', auth, userController.updateUserRoleById);
-router.delete('/delete/:id', auth, userController.deleteUserById);
+router.put('/update/status/:id', auth, requireAdmin, userController.updateUserStatusById);
+router.put('/update/role/:id', auth, requireAdmin, userController.updateUserRoleById);
+router.delete('/delete/:id', auth, requireAdmin, userController.deleteUserById);
 
 // User Address routes
 router.get('/user/addresses', auth, userController.getUserAddresses);

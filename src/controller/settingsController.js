@@ -20,6 +20,7 @@ const settingsController = {
       // Return only public-safe settings
       const publicSettings = {
         siteName: settings.siteName,
+        theme: settings.theme || 'midnight-ember',
         siteUrl: settings.siteUrl,
         logoUrl: settings.logoUrl,
         logoWidth: settings.logoWidth || 160,
@@ -101,13 +102,15 @@ const settingsController = {
         facebookUrl,
         instagramUrl,
         twitterUrl,
-        tiktokUrl
+        tiktokUrl,
+        theme
       } = req.body;
 
       // Prepare update data with only provided fields
       const updateData = {};
 
       // Update only provided fields
+      if (theme !== undefined) updateData.theme = String(theme).trim();
       if (siteName !== undefined) updateData.siteName = siteName.trim();
       if (siteUrl !== undefined) updateData.siteUrl = siteUrl.trim();
       if (mobileNumber !== undefined) updateData.mobileNumber = mobileNumber.trim();

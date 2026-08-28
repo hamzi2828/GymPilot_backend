@@ -156,6 +156,14 @@ const settingsSchema = new mongoose.Schema(
     },
 
     // Additional metadata
+    // Site colour scheme. Stores a preset key; the frontend maps it to CSS
+    // custom properties so the whole site recolours from one value.
+    theme: {
+      type: String,
+      default: 'midnight-ember',
+      trim: true
+    },
+
     isActive: { 
       type: Boolean, 
       default: true 
