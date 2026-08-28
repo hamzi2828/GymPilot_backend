@@ -181,7 +181,7 @@ const settingsSchema = new mongoose.Schema(
     // custom properties so the whole site recolours from one value.
     theme: {
       type: String,
-      default: 'midnight-ember',
+      default: 'electric-lime',
       trim: true
     },
 

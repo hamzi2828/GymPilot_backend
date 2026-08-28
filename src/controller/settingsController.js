@@ -19,6 +19,31 @@ function isMasked(value) {
   return typeof value === 'string' && value.includes(MASK_CHAR);
 }
 
+// Every response that returns the settings document must go through this.
+// Logo upload/remove and reset all echo the document back, and without this
+// they leaked the SMTP password and Stripe secrets in cleartext.
+function sanitizeSettings(doc) {
+  if (!doc) return doc;
+  const data = doc.toObject ? doc.toObject() : { ...doc };
+  if (data.stripe) {
+    data.stripe = {
+      ...data.stripe,
+      secretKey: maskSecret(data.stripe.secretKey),
+      webhookSecret: maskSecret(data.stripe.webhookSecret),
+      secretKeySet: !!data.stripe.secretKey,
+      webhookSecretSet: !!data.stripe.webhookSecret,
+    };
+  }
+  if (data.smtp) {
+    data.smtp = {
+      ...data.smtp,
+      pass: maskSecret(data.smtp.pass),
+      passSet: !!data.smtp.pass,
+    };
+  }
+  return data;
+}
+
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -36,7 +61,7 @@ const settingsController = {
       // Return only public-safe settings
       const publicSettings = {
         siteName: settings.siteName,
-        theme: settings.theme || 'midnight-ember',
+        theme: settings.theme || 'electric-lime',
         // Publishable key only — the secret and webhook values must never
         // leave the server through a public endpoint.
         stripePublishableKey: settings.stripe?.enabled ? (settings.stripe?.publishableKey || '') : '',
@@ -96,25 +121,7 @@ const settingsController = {
   getSettings: async (req, res) => {
     try {
       const settings = await Settings.getSettings();
-      const data = settings.toObject ? settings.toObject() : { ...settings };
-
-      // Never return stored secrets in full, even to an authenticated admin.
-      if (data.stripe) {
-        data.stripe = {
-          ...data.stripe,
-          secretKey: maskSecret(data.stripe.secretKey),
-          webhookSecret: maskSecret(data.stripe.webhookSecret),
-          secretKeySet: !!data.stripe.secretKey,
-          webhookSecretSet: !!data.stripe.webhookSecret,
-        };
-      }
-      if (data.smtp) {
-        data.smtp = {
-          ...data.smtp,
-          pass: maskSecret(data.smtp.pass),
-          passSet: !!data.smtp.pass,
-        };
-      }
+      const data = sanitizeSettings(settings);
 
       return res.status(200).json({
         success: true,
@@ -255,7 +262,7 @@ const settingsController = {
       return res.status(200).json({
         success: true,
         message: 'Settings updated successfully',
-        data: updatedSettings
+        data: sanitizeSettings(updatedSettings)
       });
     } catch (error) {
       console.error('Update settings error:', error);
@@ -340,7 +347,7 @@ const settingsController = {
         message: 'Logo uploaded successfully',
         data: {
           logoUrl,
-          settings: updatedSettings
+          settings: sanitizeSettings(updatedSettings)
         }
       });
     } catch (error) {
@@ -409,7 +416,7 @@ const settingsController = {
         message: 'Footer logo uploaded successfully',
         data: {
           footerLogoUrl,
-          settings: updatedSettings
+          settings: sanitizeSettings(updatedSettings)
         }
       });
     } catch (error) {
@@ -443,7 +450,7 @@ const settingsController = {
       return res.status(200).json({
         success: true,
         message: 'Footer logo removed successfully',
-        data: updatedSettings
+        data: sanitizeSettings(updatedSettings)
       });
     } catch (error) {
       console.error('Remove footer logo error:', error);
@@ -482,7 +489,7 @@ const settingsController = {
       return res.status(200).json({
         success: true,
         message: 'Logo reset to default successfully',
-        data: updatedSettings
+        data: sanitizeSettings(updatedSettings)
       });
     } catch (error) {
       console.error('Remove logo error:', error);
@@ -541,7 +548,7 @@ const settingsController = {
       return res.status(200).json({
         success: true,
         message: 'Settings reset to default successfully',
-        data: resetSettings
+        data: sanitizeSettings(resetSettings)
       });
     } catch (error) {
       console.error('Reset settings error:', error);

@@ -2,8 +2,102 @@
 
 const gymfolioPaymentService = require('../../services/gymfolioPaymentService');
 const stripe = require('../../config/stripe');
+const PackageOrder = require('../models/packageOrderModel');
+const Package = require('../models/packageModel');
+const User = require('../../models/user');
+
+/** Adds one billing period to a date, for a manually granted subscription. */
+function addPeriod(from, period) {
+  const d = new Date(from);
+  const p = String(period || 'month').toLowerCase();
+  if (p.includes('year')) d.setFullYear(d.getFullYear() + 1);
+  else if (p.includes('week')) d.setDate(d.getDate() + 7);
+  else if (p.includes('day')) d.setDate(d.getDate() + 1);
+  else d.setMonth(d.getMonth() + 1);
+  return d;
+}
 
 const gymfolioPaymentController = {
+  /**
+   * Assign a package to an existing member directly from the admin panel,
+   * bypassing checkout. Used for cash/bank payments taken in person and for
+   * comping a membership.
+   */
+  async assignPackageToUser(req, res) {
+    try {
+      const { userId, packageId, paymentMethod = 'cash', markPaid = true, notes, durationMonths } = req.body;
+
+      if (!userId || !packageId) {
+        return res.status(400).json({ success: false, message: 'userId and packageId are required' });
+      }
+
+      const [user, pkg] = await Promise.all([
+        User.findById(userId).select('firstName lastName email phone'),
+        Package.findById(packageId),
+      ]);
+
+      if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+      if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
+
+      const start = new Date();
+      let end = addPeriod(start, pkg.period);
+      const months = Number(durationMonths);
+      if (Number.isFinite(months) && months > 0) {
+        end = new Date(start);
+        end.setMonth(end.getMonth() + months);
+      }
+
+      const orderNumber = await PackageOrder.generateOrderNumber();
+      const paid = markPaid !== false;
+
+      const order = await PackageOrder.create({
+        orderNumber,
+        userId: user._id,
+        packageId: pkg._id,
+        packageDetails: {
+          name: pkg.name,
+          price: String(pkg.price),
+          currency: pkg.currency || 'GBP',
+          period: pkg.period || 'month',
+          features: Array.isArray(pkg.features) ? pkg.features : [],
+        },
+        customerInfo: {
+          fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
+          email: user.email,
+          // The schema requires these; admin assignment has no checkout form to
+          // collect them, so fall back to placeholders the admin can edit later.
+          phone: user.phone || 'N/A',
+          country: 'N/A',
+        },
+        payment: {
+          method: ['stripe', 'card', 'bank_transfer', 'cash'].includes(paymentMethod) ? paymentMethod : 'cash',
+          amount: Number(pkg.price) || 0,
+          currency: (pkg.currency || 'GBP').toLowerCase(),
+          status: paid ? 'paid' : 'pending',
+          paidAt: paid ? new Date() : undefined,
+        },
+        subscription: {
+          startDate: start,
+          endDate: end,
+          isActive: paid,
+          autoRenew: false,
+          renewalDate: end,
+        },
+        status: paid ? 'active' : 'pending',
+        notes: notes || `Assigned from the admin panel by ${req.user?.email || 'an administrator'}`,
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: `${pkg.name} assigned to ${user.email}`,
+        data: order,
+      });
+    } catch (error) {
+      console.error('Assign package error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to assign package', error: error.message });
+    }
+  },
+
   /**
    * Create package checkout session
    */

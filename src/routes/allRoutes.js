@@ -168,6 +168,8 @@ router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Publi
 router.get('/hero-slides', auth, heroSlideController.getAllSlides);
 router.get('/hero-slides/:id', auth, heroSlideController.getSlideById);
 router.post('/hero-slides', auth, uploadSingle('image'), heroSlideController.createSlide);
+// Must precede '/hero-slides/:id' or Express matches 'reorder' as an id.
+router.put('/hero-slides/reorder', auth, requireAdmin, heroSlideController.reorderSlides);
 router.put('/hero-slides/:id', auth, uploadSingle('image'), heroSlideController.updateSlide);
 router.patch('/hero-slides/:id/status', auth, heroSlideController.toggleSlideStatus);
 router.patch('/hero-slides/:id/order', auth, heroSlideController.updateSlideOrder);

@@ -293,6 +293,45 @@ const toggleSlideStatus = async (req, res) => {
 };
 
 // Update hero slide order
+// PUT /hero-slides/reorder - persist a whole drag-and-drop ordering at once.
+// One bulkWrite avoids the burst of PATCHes a per-slide endpoint would need,
+// and keeps the list from being half-reordered if a later request failed.
+const reorderSlides = async (req, res) => {
+  try {
+    const { order } = req.body; // [{ id, order }] or ["id1","id2",...]
+
+    if (!Array.isArray(order) || order.length === 0) {
+      return res.status(400).json({ success: false, message: 'order must be a non-empty array' });
+    }
+
+    const ops = order.map((entry, index) => {
+      const id = typeof entry === 'string' ? entry : entry.id || entry._id;
+      const position = typeof entry === 'string' ? index : Number(entry.order ?? index);
+      return {
+        updateOne: {
+          filter: { _id: id },
+          update: { $set: { order: position } },
+        },
+      };
+    });
+
+    if (ops.some((op) => !op.updateOne.filter._id)) {
+      return res.status(400).json({ success: false, message: 'Every entry needs an id' });
+    }
+
+    const result = await HeroSlide.bulkWrite(ops);
+    const slides = await HeroSlide.find().sort({ order: 1, createdAt: 1 });
+
+    return res.status(200).json({
+      success: true,
+      message: `Reordered ${result.modifiedCount} slide(s)`,
+      data: slides,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to reorder slides', error: error.message });
+  }
+};
+
 const updateSlideOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -371,6 +410,7 @@ const deleteSlide = async (req, res) => {
 };
 
 module.exports = {
+  reorderSlides,
   getActiveSlides,
   getAllSlides,
   getSlideById,

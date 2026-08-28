@@ -5,6 +5,7 @@ const express = require('express');
 const router = express.Router();
 
 const auth = require('../../middleware/auth');
+const requireAdmin = require('../../middleware/requireAdmin');
 const optionalAuth = require('../../middleware/optionalAuth');
 const { uploadSingle, uploadArray, uploadFields } = require('../../helper/upload');
 
@@ -104,6 +105,7 @@ router.post('/payment/verify/:sessionId', optionalAuth, gymfolioPaymentControlle
 router.post('/payment/webhook', gymfolioPaymentController.handleWebhook);
 
 // Package orders (admin)
+router.post('/package-orders/assign', auth, requireAdmin, gymfolioPaymentController.assignPackageToUser);
 router.get('/package-orders', auth, gymfolioPaymentController.getAllOrders);
 router.get('/package-orders/me', auth, gymfolioPaymentController.getUserOrders);
 router.get('/package-orders/:id', auth, gymfolioPaymentController.getOrderById);
