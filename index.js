@@ -7,7 +7,6 @@ const app = express();
 const port = process.env.PORT || 4000;
 const allRoutes = require('./src/routes/allRoutes');
 
-const dashboardRoutes = require('./src/routes/dashboardRoutes');
 const gymfolioRoutes = require('./src/gymfolio/routes/gymfolioRoutes');
 
 // CORS: allow frontend to access backend
@@ -48,19 +47,6 @@ app.use('/api', async (req, res, next) => {
 });
 
 
-// Dashboard routes (authentication required)
-app.use('/dashboard', async (req, res, next) => {
-  try {
-    await ensureConnection();
-    next();
-  } catch (error) {
-    console.error('Failed to ensure MongoDB connection:', error);
-    res.status(503).json({
-      error: 'Database connection failed',
-      message: 'Please try again in a moment'
-    });
-  }
-}, dashboardRoutes);
 
 // Gymfolio routes (classes, trainers, packages, package orders/registrations, payments)
 app.use('/api/gymfolio', async (req, res, next) => {
