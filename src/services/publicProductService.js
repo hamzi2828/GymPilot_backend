@@ -554,7 +554,7 @@ const publicProductService = {
     try {
       const products = await Product.find({ 
         status: 'published', displayOn: { $ne: 'pos' },
-        isFeatured: true 
+        featured: true 
       })
         .sort({ createdAt: -1 })
         .limit(parseInt(limit))
