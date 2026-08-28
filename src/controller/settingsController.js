@@ -4,6 +4,22 @@ const Settings = require('../models/settings');
 const fs = require('fs').promises;
 const path = require('path');
 
+// Secrets are stored so the admin UI can manage them, but they must never be
+// echoed back in full: a masked preview is enough to confirm what is saved.
+const MASK_CHAR = '•';
+function maskSecret(value) {
+  if (!value) return '';
+  const str = String(value);
+  if (str.length <= 4) return MASK_CHAR.repeat(str.length);
+  return MASK_CHAR.repeat(8) + str.slice(-4);
+}
+// A value the admin never edited comes back containing mask characters; writing
+// it through would replace the real secret with dots.
+function isMasked(value) {
+  return typeof value === 'string' && value.includes(MASK_CHAR);
+}
+
+
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 let blobUpload;
@@ -21,6 +37,10 @@ const settingsController = {
       const publicSettings = {
         siteName: settings.siteName,
         theme: settings.theme || 'midnight-ember',
+        // Publishable key only — the secret and webhook values must never
+        // leave the server through a public endpoint.
+        stripePublishableKey: settings.stripe?.enabled ? (settings.stripe?.publishableKey || '') : '',
+        stripeEnabled: !!settings.stripe?.enabled,
         siteUrl: settings.siteUrl,
         logoUrl: settings.logoUrl,
         logoWidth: settings.logoWidth || 160,
@@ -55,14 +75,51 @@ const settingsController = {
   },
 
   // GET /settings - Get current settings
+  // POST /settings/test-smtp - verify the saved mail credentials actually work
+  testSmtp: async (req, res) => {
+    try {
+      const { verifyConnection } = require('../services/emailService');
+      const result = await verifyConnection();
+      if (result && result.ok) {
+        return res.status(200).json({ success: true, message: 'SMTP connection verified' });
+      }
+      return res.status(400).json({
+        success: false,
+        message: 'SMTP connection failed',
+        error: (result && result.error) || 'Unknown error',
+      });
+    } catch (error) {
+      return res.status(500).json({ success: false, message: 'SMTP test failed', error: error.message });
+    }
+  },
+
   getSettings: async (req, res) => {
     try {
       const settings = await Settings.getSettings();
-      
+      const data = settings.toObject ? settings.toObject() : { ...settings };
+
+      // Never return stored secrets in full, even to an authenticated admin.
+      if (data.stripe) {
+        data.stripe = {
+          ...data.stripe,
+          secretKey: maskSecret(data.stripe.secretKey),
+          webhookSecret: maskSecret(data.stripe.webhookSecret),
+          secretKeySet: !!data.stripe.secretKey,
+          webhookSecretSet: !!data.stripe.webhookSecret,
+        };
+      }
+      if (data.smtp) {
+        data.smtp = {
+          ...data.smtp,
+          pass: maskSecret(data.smtp.pass),
+          passSet: !!data.smtp.pass,
+        };
+      }
+
       return res.status(200).json({
         success: true,
         message: 'Settings retrieved successfully',
-        data: settings
+        data
       });
     } catch (error) {
       console.error('Get settings error:', error);
@@ -103,7 +160,9 @@ const settingsController = {
         instagramUrl,
         twitterUrl,
         tiktokUrl,
-        theme
+        theme,
+        stripe,
+        smtp
       } = req.body;
 
       // Prepare update data with only provided fields
@@ -111,6 +170,45 @@ const settingsController = {
 
       // Update only provided fields
       if (theme !== undefined) updateData.theme = String(theme).trim();
+
+      // Nested credential groups are merged field by field so that a masked
+      // value (one the admin never retyped) leaves the stored secret intact.
+      if (stripe && typeof stripe === 'object') {
+        const current = await Settings.getSettings();
+        const existing = current.stripe || {};
+        updateData.stripe = {
+          publishableKey:
+            stripe.publishableKey !== undefined
+              ? String(stripe.publishableKey).trim()
+              : existing.publishableKey || '',
+          secretKey:
+            stripe.secretKey !== undefined && !isMasked(stripe.secretKey)
+              ? String(stripe.secretKey).trim()
+              : existing.secretKey || '',
+          webhookSecret:
+            stripe.webhookSecret !== undefined && !isMasked(stripe.webhookSecret)
+              ? String(stripe.webhookSecret).trim()
+              : existing.webhookSecret || '',
+          enabled: stripe.enabled !== undefined ? Boolean(stripe.enabled) : !!existing.enabled,
+        };
+      }
+
+      if (smtp && typeof smtp === 'object') {
+        const current = await Settings.getSettings();
+        const existing = current.smtp || {};
+        updateData.smtp = {
+          host: smtp.host !== undefined ? String(smtp.host).trim() : existing.host || '',
+          port: smtp.port !== undefined ? Number(smtp.port) || 587 : existing.port || 587,
+          secure: smtp.secure !== undefined ? Boolean(smtp.secure) : !!existing.secure,
+          user: smtp.user !== undefined ? String(smtp.user).trim() : existing.user || '',
+          pass:
+            smtp.pass !== undefined && !isMasked(smtp.pass)
+              ? String(smtp.pass)
+              : existing.pass || '',
+          fromName: smtp.fromName !== undefined ? String(smtp.fromName).trim() : existing.fromName || '',
+          fromEmail: smtp.fromEmail !== undefined ? String(smtp.fromEmail).trim() : existing.fromEmail || '',
+        };
+      }
       if (siteName !== undefined) updateData.siteName = siteName.trim();
       if (siteUrl !== undefined) updateData.siteUrl = siteUrl.trim();
       if (mobileNumber !== undefined) updateData.mobileNumber = mobileNumber.trim();

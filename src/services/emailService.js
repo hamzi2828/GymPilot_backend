@@ -3,24 +3,63 @@ const emailTemplates = require('../templates/emailTemplates');
 
 // Create reusable transporter
 let transporter = null;
+// Fingerprint of the config the cached transporter was built from, so a
+// credential change in the admin panel takes effect without a redeploy.
+let transporterKey = null;
+
+/**
+ * Resolves SMTP config, preferring the admin-managed settings document and
+ * falling back to environment variables when it has not been configured.
+ */
+async function resolveSmtpConfig() {
+  try {
+    const Settings = require('../models/settings');
+    const settings = await Settings.getSettings();
+    const s = settings && settings.smtp;
+    if (s && s.host && s.user && s.pass) {
+      return {
+        host: s.host,
+        port: Number(s.port) || 587,
+        secure: s.secure !== undefined ? !!s.secure : Number(s.port) === 465,
+        user: s.user,
+        pass: s.pass,
+        from:
+          s.fromEmail
+            ? `"${s.fromName || 'The Jymor'}" <${s.fromEmail}>`
+            : null,
+      };
+    }
+  } catch {
+    // Settings unavailable (e.g. no DB connection yet) — fall back to env.
+  }
+  return {
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_PORT === '465',
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+    from: process.env.EMAIL_FROM || null,
+  };
+}
 
 /**
  * Initialize the email transporter
  */
-function initTransporter() {
-  if (transporter) return transporter;
+async function initTransporter() {
+  const cfg = await resolveSmtpConfig();
+  const key = `${cfg.host}|${cfg.port}|${cfg.secure}|${cfg.user}|${cfg.pass}`;
+
+  if (transporter && transporterKey === key) return { transport: transporter, cfg };
 
   transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT) || 587,
-    secure: process.env.SMTP_PORT === '465', // true for 465, false for other ports
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS
-    }
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    auth: { user: cfg.user, pass: cfg.pass },
   });
+  transporterKey = key;
 
-  return transporter;
+  return { transport: transporter, cfg };
 }
 
 /**
@@ -32,10 +71,10 @@ function initTransporter() {
  */
 async function sendEmail(to, subject, html) {
   try {
-    const transport = initTransporter();
+    const { transport, cfg } = await initTransporter();
 
     const mailOptions = {
-      from: process.env.EMAIL_FROM || `"The Jymor" <${process.env.SMTP_USER}>`,
+      from: cfg.from || `"The Jymor" <${cfg.user}>`,
       to,
       subject,
       html
@@ -113,13 +152,13 @@ async function sendReturnEmail(returnOrder, order, templateType) {
  */
 async function verifyConnection() {
   try {
-    const transport = initTransporter();
+    const { transport } = await initTransporter();
     await transport.verify();
     console.log('✅ SMTP connection verified');
-    return true;
+    return { ok: true };
   } catch (error) {
     console.error('❌ SMTP connection failed:', error.message);
-    return false;
+    return { ok: false, error: error.message };
   }
 }
 

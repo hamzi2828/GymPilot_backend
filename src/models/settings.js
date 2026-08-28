@@ -156,6 +156,27 @@ const settingsSchema = new mongoose.Schema(
     },
 
     // Additional metadata
+    // Payment gateway credentials. The secret and webhook values are never
+    // returned by the public settings endpoint and are masked in the admin
+    // response — see settingsController.maskSecret.
+    stripe: {
+      publishableKey: { type: String, default: '', trim: true },
+      secretKey: { type: String, default: '', trim: true },
+      webhookSecret: { type: String, default: '', trim: true },
+      enabled: { type: Boolean, default: false }
+    },
+
+    // Outbound mail configuration, used for member credential emails.
+    smtp: {
+      host: { type: String, default: '', trim: true },
+      port: { type: Number, default: 587 },
+      secure: { type: Boolean, default: false },
+      user: { type: String, default: '', trim: true },
+      pass: { type: String, default: '', trim: true },
+      fromName: { type: String, default: '', trim: true },
+      fromEmail: { type: String, default: '', trim: true }
+    },
+
     // Site colour scheme. Stores a preset key; the frontend maps it to CSS
     // custom properties so the whole site recolours from one value.
     theme: {

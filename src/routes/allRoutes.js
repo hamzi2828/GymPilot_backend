@@ -141,13 +141,27 @@ router.post('/blog-hero/upload-image', auth, heroUploadFields([{ name: 'image', 
 
 // Settings routes
 router.get('/settings/public', settingsController.getPublicSettings); // Public route - no auth
-router.get('/settings', auth, settingsController.getSettings);
-router.put('/settings', auth, settingsController.updateSettings);
-router.post('/settings/logo', auth, uploadFields([{ name: 'logo', maxCount: 1 }]), settingsController.uploadLogo);
-router.delete('/settings/logo', auth, settingsController.removeLogo);
-router.post('/settings/footer-logo', auth, uploadFields([{ name: 'footerLogo', maxCount: 1 }]), settingsController.uploadFooterLogo);
-router.delete('/settings/footer-logo', auth, settingsController.removeFooterLogo);
-router.post('/settings/reset', auth, settingsController.resetSettings);
+router.get('/settings', auth, requireAdmin, settingsController.getSettings);
+router.put('/settings', auth, requireAdmin, settingsController.updateSettings);
+router.post('/settings/logo', auth, requireAdmin, uploadFields([{ name: 'logo', maxCount: 1 }]), settingsController.uploadLogo);
+router.delete('/settings/logo', auth, requireAdmin, settingsController.removeLogo);
+router.post('/settings/footer-logo', auth, requireAdmin, uploadFields([{ name: 'footerLogo', maxCount: 1 }]), settingsController.uploadFooterLogo);
+router.delete('/settings/footer-logo', auth, requireAdmin, settingsController.removeFooterLogo);
+router.post('/settings/reset', auth, requireAdmin, settingsController.resetSettings);
+
+// Banks (admin-managed payment accounts, each with an optional barcode image)
+const bankController = require('../controller/bankController');
+router.get('/banks', auth, requireAdmin, bankController.getAllBanks);
+router.get('/banks/:id', auth, requireAdmin, bankController.getBankById);
+router.post('/banks', auth, requireAdmin, bankController.createBank);
+router.put('/banks/:id', auth, requireAdmin, bankController.updateBank);
+router.put('/banks/:id/status', auth, requireAdmin, bankController.updateBankStatus);
+router.put('/banks/:id/restore', auth, requireAdmin, bankController.restoreBank);
+router.delete('/banks/:id', auth, requireAdmin, bankController.deleteBank);
+router.post('/banks/:id/qr-code', auth, requireAdmin, uploadFields([{ name: 'qrCode', maxCount: 1 }]), bankController.uploadQrCode);
+router.delete('/banks/:id/qr-code', auth, requireAdmin, bankController.removeQrCode);
+
+router.post('/settings/test-smtp', auth, requireAdmin, settingsController.testSmtp);
 
 // Hero Slide routes
 router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Public route
