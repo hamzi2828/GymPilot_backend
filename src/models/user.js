@@ -79,11 +79,43 @@ const userSchema = new mongoose.Schema({
     addresses: [addressSchema],
     affiliate: { type: affiliateSchema, default: () => ({}) },
 
+    // ---- Front-desk attendance app (GymPilot_desktopApp) ----
+    //
+    // Two independent grants, both defaulting to No, so the migration to
+    // this feature gives nobody anything: an admin turns each on deliberately
+    // for the accounts that need it.
+
+    // Without this, correct credentials still fail to sign the desktop app
+    // in. Re-checked on every request, so revoking it drops the front-desk PC
+    // back to the login screen immediately.
+    allowAttendanceApp: { type: Boolean, default: false },
+
+    // Gates the app's "Enroll finger" button AND the enroll endpoint behind
+    // it. Requires allowAttendanceApp; on its own it grants nothing.
+    allowFingerprintEnrollment: { type: Boolean, default: false },
+
+    // Which branch this account's punches are filed under, shown on the punch
+    // receipt so the desk can see where the record is landing.
+    attendanceLocation: { type: String, default: '', trim: true },
+
+    // Short human-readable ID the front desk can search by ("GP-0184"), for
+    // the days the fingerprint reader is unplugged or the finger won't read.
+    // Assigned on demand -- see ensureMemberCode() in peopleDirectory.js.
+    memberCode: { type: String, default: null, trim: true },
+
 }, { timestamps: true });
 
 userSchema.index(
     { 'affiliate.code': 1 },
     { unique: true, partialFilterExpression: { 'affiliate.code': { $type: 'string' } } }
+);
+
+// Partial, for the same reason as the affiliate code above: memberCode is
+// null on every account that has never been near the front desk, and a plain
+// unique index would reject all but the first of them.
+userSchema.index(
+    { memberCode: 1 },
+    { unique: true, partialFilterExpression: { memberCode: { $type: 'string' } } }
 );
 
 module.exports = mongoose.models.User || mongoose.model('User', userSchema);

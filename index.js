@@ -8,6 +8,7 @@ const port = process.env.PORT || 4000;
 const allRoutes = require('./src/routes/allRoutes');
 
 const gymfolioRoutes = require('./src/gymfolio/routes/gymfolioRoutes');
+const desktopRoutes = require('./src/attendance/routes/desktopRoutes');
 
 // CORS: allow frontend to access backend
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
@@ -61,6 +62,21 @@ app.use('/api/gymfolio', async (req, res, next) => {
     });
   }
 }, gymfolioRoutes);
+
+// Front-desk attendance app (GymPilot_desktopApp). Native Windows client, so
+// no CORS entry is needed -- it is not a browser.
+app.use('/api/desktop', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({
+      success: false,
+      message: 'Database connection failed. Please try again in a moment.'
+    });
+  }
+}, desktopRoutes);
 
 // Add the same middleware for other routes that need database
 app.use('/', async (req, res, next) => {

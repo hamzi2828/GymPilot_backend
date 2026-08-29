@@ -65,6 +65,14 @@ const trainerSchema = new mongoose.Schema({
     startTime: String,
     endTime: String
   }],
+  // Short human-readable staff ID the front desk can search by ("TR-004"),
+  // used by the attendance app when the fingerprint reader is unavailable.
+  // Assigned on demand -- see ensureStaffCode() in peopleDirectory.js.
+  staffCode: {
+    type: String,
+    default: null,
+    trim: true
+  },
   isActive: {
     type: Boolean,
     default: true
@@ -99,6 +107,12 @@ const trainerSchema = new mongoose.Schema({
 trainerSchema.index({ isActive: 1, order: 1 });
 trainerSchema.index({ slug: 1 });
 trainerSchema.index({ isFeatured: 1 });
+// Partial: staffCode is null until the attendance app first needs one, and a
+// plain unique index would reject every trainer after the first.
+trainerSchema.index(
+  { staffCode: 1 },
+  { unique: true, partialFilterExpression: { staffCode: { $type: 'string' } } }
+);
 
 // Auto-generate slug from name
 trainerSchema.pre('save', function(next) {
