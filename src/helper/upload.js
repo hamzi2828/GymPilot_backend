@@ -42,6 +42,16 @@ const MAX_FILE_BYTES = Math.max(1, MAX_FILE_MB) * 1024 * 1024;
 const MAX_HERO_FILE_MB = 20;
 const MAX_HERO_FILE_BYTES = MAX_HERO_FILE_MB * 1024 * 1024;
 
+// Video uploads (homepage videos section)
+const ALLOWED_VIDEO_MIME_TYPES = new Set([
+  'video/mp4',
+  'video/webm',
+  'video/ogg',
+  'video/quicktime',
+]);
+const MAX_VIDEO_FILE_MB = Number(process.env.UPLOAD_MAX_VIDEO_SIZE_MB || 100);
+const MAX_VIDEO_FILE_BYTES = Math.max(1, MAX_VIDEO_FILE_MB) * 1024 * 1024;
+
 // Use memory storage for Vercel Blob, disk storage for local
 const storage = USE_BLOB_STORAGE
   ? multer.memoryStorage()
@@ -68,6 +78,17 @@ const upload = multer({ storage, fileFilter, limits: { fileSize: MAX_FILE_BYTES 
 // Hero upload with larger file size limit
 const heroUpload = multer({ storage, fileFilter, limits: { fileSize: MAX_HERO_FILE_BYTES } });
 
+// Video upload (separate filter + much larger limit)
+const videoFileFilter = (req, file, cb) => {
+  if (ALLOWED_VIDEO_MIME_TYPES.has(file.mimetype)) return cb(null, true);
+  cb(new Error('Only video files are allowed (mp4, webm, ogg, mov)'));
+};
+const videoUpload = multer({
+  storage,
+  fileFilter: videoFileFilter,
+  limits: { fileSize: MAX_VIDEO_FILE_BYTES },
+});
+
 // Convenience wrappers
 const uploadSingle = (fieldName) => upload.single(fieldName);
 const uploadArray = (fieldName, maxCount) => upload.array(fieldName, maxCount);
@@ -76,6 +97,9 @@ const uploadFields = (fields) => upload.fields(fields);
 // Hero upload wrappers
 const heroUploadSingle = (fieldName) => heroUpload.single(fieldName);
 const heroUploadFields = (fields) => heroUpload.fields(fields);
+
+// Video upload wrapper
+const videoUploadSingle = (fieldName) => videoUpload.single(fieldName);
 
 // Helper to build public URL path (as served by Express static middleware)
 function toPublicPath(filename) {
@@ -90,8 +114,10 @@ module.exports = {
   uploadFields,
   heroUploadSingle,
   heroUploadFields,
+  videoUploadSingle,
   ensureUploadsDir,
   toPublicPath,
   UPLOADS_DIR,
   ALLOWED_IMAGE_MIME_TYPES,
+  ALLOWED_VIDEO_MIME_TYPES,
 };

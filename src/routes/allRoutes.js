@@ -14,7 +14,7 @@ const blogHeroController = require('../controller/blogHeroController');
 const contactController = require('../controller/contactController');
 const orderController = require('../controller/orderController');
 const optionalAuth = require('../middleware/optionalAuth');
-const { uploadSingle, uploadArray, uploadFields, heroUploadFields, toPublicPath } = require('../helper/upload');
+const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, toPublicPath } = require('../helper/upload');
 
 // Map each HTTP method to the corresponding controller function
 router.post('/user/login', userController.loginUser);
@@ -218,11 +218,31 @@ router.get('/api/public/products/:slug', publicProductController.getProductBySlu
 // above so existing pages are untouched.
 // ---------------------------------------------------------------------------
 
-// Homepage blocks — public read, authenticated write.
-
+// Homepage blocks — public read, admin write. Everything below the hero
+// banner is driven by these sections (order, visibility, copy, images).
+const homeSectionController = require('../controller/homeSectionController');
+router.get('/home-sections/public', homeSectionController.getPublicSections);
+router.get('/home-sections', auth, requireAdmin, homeSectionController.getAllSections);
+// Must precede '/home-sections/:key' or Express matches 'reorder' as a key.
+router.put('/home-sections/reorder', auth, requireAdmin, homeSectionController.reorderSections);
 // Generic admin media upload. Home-section tiles, and anything else that needs
 // an image URL without owning a model of its own, post here and get back the
 // public path to store.
+router.post('/home-sections/upload', auth, requireAdmin, uploadSingle('image'), homeSectionController.uploadImage);
+router.post('/home-sections/upload-video', auth, requireAdmin, videoUploadSingle('video'), homeSectionController.uploadVideo);
+router.put('/home-sections/:key', auth, requireAdmin, homeSectionController.updateSection);
+router.patch('/home-sections/:key/status', auth, requireAdmin, homeSectionController.toggleSection);
+
+// Testimonials — member reviews rendered by the homepage testimonials section.
+const testimonialController = require('../controller/testimonialController');
+router.get('/testimonials/active', testimonialController.getActiveTestimonials);
+router.get('/testimonials', auth, requireAdmin, testimonialController.getAllTestimonials);
+// Must precede '/testimonials/:id' or Express matches 'reorder' as an id.
+router.put('/testimonials/reorder', auth, requireAdmin, testimonialController.reorderTestimonials);
+router.post('/testimonials', auth, requireAdmin, uploadSingle('image'), testimonialController.createTestimonial);
+router.put('/testimonials/:id', auth, requireAdmin, uploadSingle('image'), testimonialController.updateTestimonial);
+router.patch('/testimonials/:id/status', auth, requireAdmin, testimonialController.toggleTestimonialStatus);
+router.delete('/testimonials/:id', auth, requireAdmin, testimonialController.deleteTestimonial);
 
 // Newsletter routes
 router.post('/api/newsletter/subscribe', newsletterController.subscribe);
