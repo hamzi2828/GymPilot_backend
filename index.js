@@ -9,6 +9,7 @@ const allRoutes = require('./src/routes/allRoutes');
 
 const gymfolioRoutes = require('./src/gymfolio/routes/gymfolioRoutes');
 const desktopRoutes = require('./src/attendance/routes/desktopRoutes');
+const attendanceAdminRoutes = require('./src/attendance/routes/adminRoutes');
 
 // CORS: allow frontend to access backend
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
@@ -77,6 +78,22 @@ app.use('/api/desktop', async (req, res, next) => {
     });
   }
 }, desktopRoutes);
+
+// Admin panel's read-only view of the same attendance data. Browser client,
+// so it goes through the CORS list above and an admin JWT rather than a
+// desktop token.
+app.use('/api/attendance', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({
+      success: false,
+      message: 'Database connection failed. Please try again in a moment.'
+    });
+  }
+}, attendanceAdminRoutes);
 
 // Add the same middleware for other routes that need database
 app.use('/', async (req, res, next) => {

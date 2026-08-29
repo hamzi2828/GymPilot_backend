@@ -449,4 +449,15 @@ function membershipWarningFor(record) {
   }
 }
 
-module.exports = { recordPunch, MIN_PUNCH_GAP_SECONDS };
+// The verdict helpers are exported alongside recordPunch so anything that has
+// to write an attendance row WITHOUT going through a live punch -- the seeder,
+// or a future backfill -- reaches the same verdict this does. Duplicating the
+// late/expired rules elsewhere is how the desk and the office start disagreeing.
+module.exports = {
+  recordPunch,
+  MIN_PUNCH_GAP_SECONDS,
+  membershipVerdict,
+  scheduleFor,
+  arrivalVerdict,
+  departureVerdict
+};

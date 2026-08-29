@@ -66,8 +66,17 @@ const userController = {
                 return res.status(409).json({ message: 'Email already in use' });
             }
 
-            const allowedRoles = ['user', 'admin', 'moderator'];
-            const assignedRole = allowedRoles.includes(role) ? role : 'user';
+            // Any live role may be assigned here, not just the three that
+            // used to be hardcoded -- a gym can invent its own. Anything
+            // unrecognised falls back to an ordinary member.
+            const RoleModel = require('../models/roleModel');
+            const { ensureDefaultRoles: ensureRoles } = require('../services/roleService');
+            await ensureRoles();
+            const requestedRole = await RoleModel.findOne({
+                slug: String(role || '').toLowerCase().trim(),
+                isActive: true
+            });
+            const assignedRole = requestedRole ? requestedRole.slug : 'user';
 
             // Generated server-side so a plaintext password is never accepted
             // over the wire or persisted anywhere but the outbound email.
@@ -82,6 +91,10 @@ const userController = {
                 password: hashed,
                 role: assignedRole,
                 phone: phone ? String(phone).trim() : null,
+                // Creating someone straight into a staff role should make them
+                // staff, or they would be invisible on the Staff tab that
+                // manages their payroll and roster.
+                employment: { isStaff: !!(requestedRole && requestedRole.isStaff) },
             });
 
             // The account exists regardless of whether the email lands, so a
@@ -589,14 +602,46 @@ const userController = {
 
             const { id } = req.params;
             const { role } = req.body;
-            const allowed = ['user', 'admin', 'moderator'];
-            if (!allowed.includes(role)) {
-                return res.status(400).json({ message: `role must be one of: ${allowed.join(', ')}` });
+
+            // Roles are documents now, not a hardcoded list, so the check is
+            // "does this role exist and is it live" rather than "is it one of
+            // these three". See src/models/roleModel.js.
+            const Role = require('../models/roleModel');
+            const { ensureDefaultRoles } = require('../services/roleService');
+            await ensureDefaultRoles();
+
+            const target = await Role.findOne({ slug: String(role || '').toLowerCase().trim(), isActive: true });
+            if (!target) {
+                const available = await Role.find({ isActive: true }).select('slug').lean();
+                return res.status(400).json({
+                    message: `Unknown role. Available roles: ${available.map((r) => r.slug).join(', ')}`
+                });
             }
+
+            // Losing the last administrator would leave nobody able to hand the
+            // role back out.
+            if (target.slug !== 'admin') {
+                const current = await User.findById(id).select('role').lean();
+                if (current && current.role === 'admin') {
+                    const admins = await User.countDocuments({ role: 'admin', isActive: true });
+                    if (admins <= 1) {
+                        return res.status(400).json({
+                            message: 'This is the last administrator. Promote someone else first.'
+                        });
+                    }
+                }
+            }
+
+            // A staff role brings employment with it; a member role ends it.
+            // Without this the roster and the sidebar would disagree about who
+            // works here after a promotion from the Users tab.
+            const employmentPatch = target.isStaff
+                ? { 'employment.isStaff': true, 'employment.endedAt': null }
+                : { 'employment.isStaff': false };
 
             const updated = await User.findByIdAndUpdate(
                 id,
-                { $set: { role } },
+                { $set: { role: target.slug, ...employmentPatch } },
                 { new: true, runValidators: true }
             );
 

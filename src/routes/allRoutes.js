@@ -4,7 +4,9 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controller/userController');
 const auth = require('../middleware/auth');
-const requireAdmin = require('../middleware/requireAdmin');
+const requirePermission = require('../middleware/requirePermission');
+const roleController = require('../controller/roleController');
+const staffController = require('../controller/staffController');
 const categoryController = require('../controller/categoryController');
 const productController = require('../controller/productController');
 const blogController = require('../controller/blogController');
@@ -23,17 +25,41 @@ router.post('/user/google-login', userController.googleLoginUser);
 router.put('/update/user', auth, userController.updateUser);
 router.delete('/user', auth, userController.deleteUser);
 router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile);
-router.get('/get/allUsers', auth, requireAdmin, userController.getAllUsers);
-router.post('/admin/users', auth, requireAdmin, userController.adminCreateUser);
+router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
+router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
+
+// ---------------------------------------------------------------------------
+// Roles and access
+//
+// /roles/me is the odd one out: it is NOT permission-gated, because every
+// signed-in account must be able to ask what it may do. The admin shell calls
+// it before it renders anything, and gating it behind a permission would mean
+// needing permission to find out you have none.
+// ---------------------------------------------------------------------------
+router.get('/roles/me', auth, roleController.me);
+router.get('/roles/catalog', auth, requirePermission('roles'), roleController.catalog);
+router.get('/roles', auth, requirePermission('roles'), roleController.list);
+router.post('/roles', auth, requirePermission('roles', 'manage'), roleController.create);
+router.put('/roles/:id', auth, requirePermission('roles', 'manage'), roleController.update);
+router.delete('/roles/:id', auth, requirePermission('roles', 'manage'), roleController.remove);
+
+// ---------------------------------------------------------------------------
+// Staff
+// ---------------------------------------------------------------------------
+router.get('/staff', auth, requirePermission('staff'), staffController.list);
+router.post('/staff', auth, requirePermission('staff', 'manage'), staffController.create);
+router.put('/staff/:id', auth, requirePermission('staff', 'manage'), staffController.update);
+router.patch('/staff/:id/status', auth, requirePermission('staff', 'manage'), staffController.setStatus);
+router.delete('/staff/:id', auth, requirePermission('staff', 'manage'), staffController.remove);
 
 // Google OAuth 2.0 redirect flow
 router.get('/auth/google', userController.startGoogleOAuth);
 router.get('/auth/google/callback', userController.googleOAuthCallback);
 
 // Admin operations by ID
-router.put('/update/status/:id', auth, requireAdmin, userController.updateUserStatusById);
-router.put('/update/role/:id', auth, requireAdmin, userController.updateUserRoleById);
-router.delete('/delete/:id', auth, requireAdmin, userController.deleteUserById);
+router.put('/update/status/:id', auth, requirePermission('users'), userController.updateUserStatusById);
+router.put('/update/role/:id', auth, requirePermission('users'), userController.updateUserRoleById);
+router.delete('/delete/:id', auth, requirePermission('users'), userController.deleteUserById);
 
 // User Address routes
 router.get('/user/addresses', auth, userController.getUserAddresses);
@@ -105,7 +131,7 @@ router.get('/blogs/slug/:slug', blogController.getBlogBySlug);
 router.get('/blogs/:id', blogController.getBlogById);
 router.post(
   '/blogs',
-  auth,
+  auth, requirePermission('blogs'),
   uploadFields([
     { name: 'image', maxCount: 1 },      // Cover image (required)
     { name: 'thumbnail', maxCount: 1 }   // Thumbnail (optional)
@@ -114,66 +140,66 @@ router.post(
 );
 router.put(
   '/blogs/:id',
-  auth,
+  auth, requirePermission('blogs'),
   uploadFields([
     { name: 'image', maxCount: 1 },
     { name: 'thumbnail', maxCount: 1 }
   ]),
   blogController.updateBlog
 );
-router.delete('/blogs/:id', auth, blogController.deleteBlog);
+router.delete('/blogs/:id', auth, requirePermission('blogs'), blogController.deleteBlog);
 router.patch('/blogs/:id/views', blogController.incrementViews);
-router.patch('/blogs/:id/featured', auth, blogController.toggleFeatured);
-router.patch('/blogs/:id/status', auth, blogController.toggleStatus);
+router.patch('/blogs/:id/featured', auth, requirePermission('blogs'), blogController.toggleFeatured);
+router.patch('/blogs/:id/status', auth, requirePermission('blogs'), blogController.toggleStatus);
 router.get('/categories/:categoryId/blogs', blogController.getBlogsByCategory);
 
 // Author routes
 
 // Blog Hero routes
 router.get('/blog-hero/active', blogHeroController.getActiveHero); // Public route
-router.get('/blog-hero', auth, blogHeroController.getAllHeroes);
-router.get('/blog-hero/:id', auth, blogHeroController.getHeroById);
-router.post('/blog-hero', auth, heroUploadFields([{ name: 'backgroundImage', maxCount: 1 }]), blogHeroController.createHero);
-router.put('/blog-hero/:id', auth, heroUploadFields([{ name: 'backgroundImage', maxCount: 1 }]), blogHeroController.updateHero);
-router.delete('/blog-hero/:id', auth, blogHeroController.deleteHero);
-router.patch('/blog-hero/:id/toggle-active', auth, blogHeroController.toggleActiveStatus);
-router.post('/blog-hero/upload-image', auth, heroUploadFields([{ name: 'image', maxCount: 1 }]), blogHeroController.uploadImage);
+router.get('/blog-hero', auth, requirePermission('blog-settings'), blogHeroController.getAllHeroes);
+router.get('/blog-hero/:id', auth, requirePermission('blog-settings'), blogHeroController.getHeroById);
+router.post('/blog-hero', auth, requirePermission('blog-settings'), heroUploadFields([{ name: 'backgroundImage', maxCount: 1 }]), blogHeroController.createHero);
+router.put('/blog-hero/:id', auth, requirePermission('blog-settings'), heroUploadFields([{ name: 'backgroundImage', maxCount: 1 }]), blogHeroController.updateHero);
+router.delete('/blog-hero/:id', auth, requirePermission('blog-settings'), blogHeroController.deleteHero);
+router.patch('/blog-hero/:id/toggle-active', auth, requirePermission('blog-settings'), blogHeroController.toggleActiveStatus);
+router.post('/blog-hero/upload-image', auth, requirePermission('blog-settings'), heroUploadFields([{ name: 'image', maxCount: 1 }]), blogHeroController.uploadImage);
 
 // Settings routes
 router.get('/settings/public', settingsController.getPublicSettings); // Public route - no auth
-router.get('/settings', auth, requireAdmin, settingsController.getSettings);
-router.put('/settings', auth, requireAdmin, settingsController.updateSettings);
-router.post('/settings/logo', auth, requireAdmin, uploadFields([{ name: 'logo', maxCount: 1 }]), settingsController.uploadLogo);
-router.delete('/settings/logo', auth, requireAdmin, settingsController.removeLogo);
-router.post('/settings/footer-logo', auth, requireAdmin, uploadFields([{ name: 'footerLogo', maxCount: 1 }]), settingsController.uploadFooterLogo);
-router.delete('/settings/footer-logo', auth, requireAdmin, settingsController.removeFooterLogo);
-router.post('/settings/reset', auth, requireAdmin, settingsController.resetSettings);
+router.get('/settings', auth, requirePermission('settings'), settingsController.getSettings);
+router.put('/settings', auth, requirePermission('settings'), settingsController.updateSettings);
+router.post('/settings/logo', auth, requirePermission('settings'), uploadFields([{ name: 'logo', maxCount: 1 }]), settingsController.uploadLogo);
+router.delete('/settings/logo', auth, requirePermission('settings'), settingsController.removeLogo);
+router.post('/settings/footer-logo', auth, requirePermission('settings'), uploadFields([{ name: 'footerLogo', maxCount: 1 }]), settingsController.uploadFooterLogo);
+router.delete('/settings/footer-logo', auth, requirePermission('settings'), settingsController.removeFooterLogo);
+router.post('/settings/reset', auth, requirePermission('settings'), settingsController.resetSettings);
 
 // Banks (admin-managed payment accounts, each with an optional barcode image)
 const bankController = require('../controller/bankController');
-router.get('/banks', auth, requireAdmin, bankController.getAllBanks);
-router.get('/banks/:id', auth, requireAdmin, bankController.getBankById);
-router.post('/banks', auth, requireAdmin, bankController.createBank);
-router.put('/banks/:id', auth, requireAdmin, bankController.updateBank);
-router.put('/banks/:id/status', auth, requireAdmin, bankController.updateBankStatus);
-router.put('/banks/:id/restore', auth, requireAdmin, bankController.restoreBank);
-router.delete('/banks/:id', auth, requireAdmin, bankController.deleteBank);
-router.post('/banks/:id/qr-code', auth, requireAdmin, uploadFields([{ name: 'qrCode', maxCount: 1 }]), bankController.uploadQrCode);
-router.delete('/banks/:id/qr-code', auth, requireAdmin, bankController.removeQrCode);
+router.get('/banks', auth, requirePermission('settings'), bankController.getAllBanks);
+router.get('/banks/:id', auth, requirePermission('settings'), bankController.getBankById);
+router.post('/banks', auth, requirePermission('settings'), bankController.createBank);
+router.put('/banks/:id', auth, requirePermission('settings'), bankController.updateBank);
+router.put('/banks/:id/status', auth, requirePermission('settings'), bankController.updateBankStatus);
+router.put('/banks/:id/restore', auth, requirePermission('settings'), bankController.restoreBank);
+router.delete('/banks/:id', auth, requirePermission('settings'), bankController.deleteBank);
+router.post('/banks/:id/qr-code', auth, requirePermission('settings'), uploadFields([{ name: 'qrCode', maxCount: 1 }]), bankController.uploadQrCode);
+router.delete('/banks/:id/qr-code', auth, requirePermission('settings'), bankController.removeQrCode);
 
-router.post('/settings/test-smtp', auth, requireAdmin, settingsController.testSmtp);
+router.post('/settings/test-smtp', auth, requirePermission('settings'), settingsController.testSmtp);
 
 // Hero Slide routes
 router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Public route
-router.get('/hero-slides', auth, heroSlideController.getAllSlides);
-router.get('/hero-slides/:id', auth, heroSlideController.getSlideById);
-router.post('/hero-slides', auth, uploadSingle('image'), heroSlideController.createSlide);
+router.get('/hero-slides', auth, requirePermission('hero-slides'), heroSlideController.getAllSlides);
+router.get('/hero-slides/:id', auth, requirePermission('hero-slides'), heroSlideController.getSlideById);
+router.post('/hero-slides', auth, requirePermission('hero-slides'), uploadSingle('image'), heroSlideController.createSlide);
 // Must precede '/hero-slides/:id' or Express matches 'reorder' as an id.
-router.put('/hero-slides/reorder', auth, requireAdmin, heroSlideController.reorderSlides);
-router.put('/hero-slides/:id', auth, uploadSingle('image'), heroSlideController.updateSlide);
-router.patch('/hero-slides/:id/status', auth, heroSlideController.toggleSlideStatus);
-router.patch('/hero-slides/:id/order', auth, heroSlideController.updateSlideOrder);
-router.delete('/hero-slides/:id', auth, heroSlideController.deleteSlide);
+router.put('/hero-slides/reorder', auth, requirePermission('hero-slides'), heroSlideController.reorderSlides);
+router.put('/hero-slides/:id', auth, requirePermission('hero-slides'), uploadSingle('image'), heroSlideController.updateSlide);
+router.patch('/hero-slides/:id/status', auth, requirePermission('hero-slides'), heroSlideController.toggleSlideStatus);
+router.patch('/hero-slides/:id/order', auth, requirePermission('hero-slides'), heroSlideController.updateSlideOrder);
+router.delete('/hero-slides/:id', auth, requirePermission('hero-slides'), heroSlideController.deleteSlide);
 
 // Product Detail routes (Public - No authentication required)
 
@@ -222,27 +248,27 @@ router.get('/api/public/products/:slug', publicProductController.getProductBySlu
 // banner is driven by these sections (order, visibility, copy, images).
 const homeSectionController = require('../controller/homeSectionController');
 router.get('/home-sections/public', homeSectionController.getPublicSections);
-router.get('/home-sections', auth, requireAdmin, homeSectionController.getAllSections);
+router.get('/home-sections', auth, requirePermission('homepage'), homeSectionController.getAllSections);
 // Must precede '/home-sections/:key' or Express matches 'reorder' as a key.
-router.put('/home-sections/reorder', auth, requireAdmin, homeSectionController.reorderSections);
+router.put('/home-sections/reorder', auth, requirePermission('homepage'), homeSectionController.reorderSections);
 // Generic admin media upload. Home-section tiles, and anything else that needs
 // an image URL without owning a model of its own, post here and get back the
 // public path to store.
-router.post('/home-sections/upload', auth, requireAdmin, uploadSingle('image'), homeSectionController.uploadImage);
-router.post('/home-sections/upload-video', auth, requireAdmin, videoUploadSingle('video'), homeSectionController.uploadVideo);
-router.put('/home-sections/:key', auth, requireAdmin, homeSectionController.updateSection);
-router.patch('/home-sections/:key/status', auth, requireAdmin, homeSectionController.toggleSection);
+router.post('/home-sections/upload', auth, requirePermission('homepage'), uploadSingle('image'), homeSectionController.uploadImage);
+router.post('/home-sections/upload-video', auth, requirePermission('homepage'), videoUploadSingle('video'), homeSectionController.uploadVideo);
+router.put('/home-sections/:key', auth, requirePermission('homepage'), homeSectionController.updateSection);
+router.patch('/home-sections/:key/status', auth, requirePermission('homepage'), homeSectionController.toggleSection);
 
 // Testimonials — member reviews rendered by the homepage testimonials section.
 const testimonialController = require('../controller/testimonialController');
 router.get('/testimonials/active', testimonialController.getActiveTestimonials);
-router.get('/testimonials', auth, requireAdmin, testimonialController.getAllTestimonials);
+router.get('/testimonials', auth, requirePermission('testimonials'), testimonialController.getAllTestimonials);
 // Must precede '/testimonials/:id' or Express matches 'reorder' as an id.
-router.put('/testimonials/reorder', auth, requireAdmin, testimonialController.reorderTestimonials);
-router.post('/testimonials', auth, requireAdmin, uploadSingle('image'), testimonialController.createTestimonial);
-router.put('/testimonials/:id', auth, requireAdmin, uploadSingle('image'), testimonialController.updateTestimonial);
-router.patch('/testimonials/:id/status', auth, requireAdmin, testimonialController.toggleTestimonialStatus);
-router.delete('/testimonials/:id', auth, requireAdmin, testimonialController.deleteTestimonial);
+router.put('/testimonials/reorder', auth, requirePermission('testimonials'), testimonialController.reorderTestimonials);
+router.post('/testimonials', auth, requirePermission('testimonials'), uploadSingle('image'), testimonialController.createTestimonial);
+router.put('/testimonials/:id', auth, requirePermission('testimonials'), uploadSingle('image'), testimonialController.updateTestimonial);
+router.patch('/testimonials/:id/status', auth, requirePermission('testimonials'), testimonialController.toggleTestimonialStatus);
+router.delete('/testimonials/:id', auth, requirePermission('testimonials'), testimonialController.deleteTestimonial);
 
 // Newsletter routes
 router.post('/api/newsletter/subscribe', newsletterController.subscribe);
@@ -252,15 +278,15 @@ router.get('/api/newsletter/subscribers', auth, newsletterController.getAllSubsc
 
 // Contact routes
 router.post('/api/contact/submit', contactController.submitContact); // Public route
-router.get('/api/contact', auth, contactController.getAllContacts); // Admin only
-router.get('/api/contact/stats', auth, contactController.getContactStats); // Admin only
-router.get('/api/contact/:id', auth, contactController.getContactById); // Admin only
-router.put('/api/contact/:id/status', auth, contactController.updateContactStatus); // Admin only
-router.put('/api/contact/:id/priority', auth, contactController.updateContactPriority); // Admin only
-router.post('/api/contact/:id/note', auth, contactController.addAdminNote); // Admin only
-router.put('/api/contact/:id/assign', auth, contactController.assignContact); // Admin only
-router.put('/api/contact/:id/response-sent', auth, contactController.markResponseSent); // Admin only
-router.delete('/api/contact/:id', auth, contactController.deleteContact); // Admin only
+router.get('/api/contact', auth, requirePermission('contact-queries'), contactController.getAllContacts); // Admin only
+router.get('/api/contact/stats', auth, requirePermission('contact-queries'), contactController.getContactStats); // Admin only
+router.get('/api/contact/:id', auth, requirePermission('contact-queries'), contactController.getContactById); // Admin only
+router.put('/api/contact/:id/status', auth, requirePermission('contact-queries'), contactController.updateContactStatus); // Admin only
+router.put('/api/contact/:id/priority', auth, requirePermission('contact-queries'), contactController.updateContactPriority); // Admin only
+router.post('/api/contact/:id/note', auth, requirePermission('contact-queries'), contactController.addAdminNote); // Admin only
+router.put('/api/contact/:id/assign', auth, requirePermission('contact-queries'), contactController.assignContact); // Admin only
+router.put('/api/contact/:id/response-sent', auth, requirePermission('contact-queries'), contactController.markResponseSent); // Admin only
+router.delete('/api/contact/:id', auth, requirePermission('contact-queries'), contactController.deleteContact); // Admin only
 
 // Review routes
 

@@ -62,6 +62,66 @@ const affiliateSchema = new mongoose.Schema({
     commissions: { type: [affiliateCommissionEntrySchema], default: [] }
 }, { _id: false });
 
+// ---------------------------------------------------------------------------
+// Employment
+//
+// What a person is owed and when they are expected, for accounts that work
+// here rather than train here.
+//
+// `schedule` is the same {day, startTime, endTime} shape a trainer's
+// availability uses, and for the same reason: the attendance verdicts
+// (on time / late / overtime) already read that shape, so a cleaner's shift
+// is judged by exactly the code that judges a trainer's.
+// ---------------------------------------------------------------------------
+
+const shiftSchema = new mongoose.Schema({
+    day: {
+        type: String,
+        enum: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+        required: true
+    },
+    startTime: { type: String, default: '' },   // 'HH:MM', 24-hour
+    endTime: { type: String, default: '' }
+}, { _id: false });
+
+const payrollSchema = new mongoose.Schema({
+    // salaried -> `salary` per cycle; hourly -> `hourlyRate` x hours worked,
+    // which the attendance log already totals.
+    basis: { type: String, enum: ['salaried', 'hourly'], default: 'salaried' },
+    salary: { type: Number, default: 0, min: 0 },
+    hourlyRate: { type: Number, default: 0, min: 0 },
+    currency: { type: String, default: 'PKR', trim: true },
+    cycle: { type: String, enum: ['monthly', 'biweekly', 'weekly'], default: 'monthly' },
+    contractHoursPerWeek: { type: Number, default: 0, min: 0 },
+    // Where the money goes. Kept alongside the rate because payroll is run
+    // from one screen and chasing bank details across two is how a payment
+    // ends up in the wrong account.
+    bankName: { type: String, default: '', trim: true },
+    accountTitle: { type: String, default: '', trim: true },
+    accountNumber: { type: String, default: '', trim: true },
+    notes: { type: String, default: '', trim: true }
+}, { _id: false });
+
+const employmentSchema = new mongoose.Schema({
+    isStaff: { type: Boolean, default: false, index: true },
+    jobTitle: { type: String, default: '', trim: true },
+    department: { type: String, default: '', trim: true },
+    employmentType: {
+        type: String,
+        enum: ['full_time', 'part_time', 'contract', 'intern', 'casual'],
+        default: 'full_time'
+    },
+    joinedAt: { type: Date, default: null },
+    endedAt: { type: Date, default: null },
+    payroll: { type: payrollSchema, default: () => ({}) },
+    schedule: { type: [shiftSchema], default: [] },
+    emergencyContact: {
+        name: { type: String, default: '', trim: true },
+        phone: { type: String, default: '', trim: true },
+        relationship: { type: String, default: '', trim: true }
+    }
+}, { _id: false });
+
 const userSchema = new mongoose.Schema({
     firstName: { type: String, required: true, trim: true },
     lastName: { type: String, required: true, trim: true },
@@ -73,7 +133,11 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, default: null },
     dateOfBirth: { type: Date, default: null },
     gender: { type: String, default: null },
-    role: { type: String, enum: ['user', 'admin', 'moderator'], default: 'user' },
+    // The slug of a Role document, not a fixed list: a gym can invent
+    // "Night Duty Manager" without a schema change. Two slugs are reserved --
+    // 'user' is every gym member and 'admin' is all-access in code -- and both
+    // are seeded as system roles that cannot be deleted.
+    role: { type: String, default: 'user', trim: true, lowercase: true, index: true },
     isActive: { type: Boolean, default: true },
     lastLogin: { type: Date, default: null },
     addresses: [addressSchema],
@@ -103,6 +167,17 @@ const userSchema = new mongoose.Schema({
     // Assigned on demand -- see ensureMemberCode() in peopleDirectory.js.
     memberCode: { type: String, default: null, trim: true },
 
+    // ---- Employment -------------------------------------------------------
+    //
+    // Present only on accounts holding a staff role. A gym member's document
+    // never grows this block, so "is this person staff" is one field, not a
+    // join, and the answer travels with the account they already sign in with.
+    employment: { type: employmentSchema, default: () => ({}) },
+
+    // The staff equivalent of memberCode ("TR-0007"), so a cleaner can be
+    // found at the desk the same way a member can.
+    staffCode: { type: String, default: null, trim: true },
+
 }, { timestamps: true });
 
 userSchema.index(
@@ -116,6 +191,12 @@ userSchema.index(
 userSchema.index(
     { memberCode: 1 },
     { unique: true, partialFilterExpression: { memberCode: { $type: 'string' } } }
+);
+
+// Same partial treatment for the staff code: null on every member account.
+userSchema.index(
+    { staffCode: 1 },
+    { unique: true, partialFilterExpression: { staffCode: { $type: 'string' } } }
 );
 
 module.exports = mongoose.models.User || mongoose.model('User', userSchema);

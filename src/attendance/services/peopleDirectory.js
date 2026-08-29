@@ -65,14 +65,49 @@ async function ensureMemberCode(user) {
   return '';
 }
 
+// Trainers and staff accounts share ONE TR- series. Scanning only the trainer
+// collection would hand a trainer a code a receptionist already has, and the
+// front desk would have two people answering to "TR-0002".
+async function highestStaffSequence() {
+  const [fromTrainers, fromUsers] = await Promise.all([
+    Trainer.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) }).sort({ staffCode: -1 }).select('staffCode').lean(),
+    User.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) }).sort({ staffCode: -1 }).select('staffCode').lean()
+  ]);
+
+  return [fromTrainers, fromUsers].reduce((max, row) => {
+    if (!row || !row.staffCode) return max;
+    const value = parseInt(String(row.staffCode).slice(STAFF_PREFIX.length), 10);
+    return Number.isNaN(value) ? max : Math.max(max, value);
+  }, 0);
+}
+
 async function ensureStaffCode(trainer) {
   if (trainer.staffCode) return trainer.staffCode;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const code = await nextSequentialCode(Trainer, 'staffCode', STAFF_PREFIX);
+    const code = STAFF_PREFIX + String((await highestStaffSequence()) + 1).padStart(4, '0');
     try {
       await Trainer.updateOne({ _id: trainer._id, staffCode: null }, { $set: { staffCode: code } });
       const saved = await Trainer.findById(trainer._id).select('staffCode').lean();
+      if (saved && saved.staffCode) return saved.staffCode;
+    } catch (err) {
+      if (err.code !== 11000) throw err;
+    }
+  }
+  return '';
+}
+
+// The staff-code twin of ensureMemberCode, for staff who are User accounts
+// rather than Trainer records. Both draw from the same TR- series so two
+// people can never be handed the same code to read out at the desk.
+async function ensureUserStaffCode(user) {
+  if (user.staffCode) return user.staffCode;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const code = STAFF_PREFIX + String((await highestStaffSequence()) + 1).padStart(4, '0');
+    try {
+      await User.updateOne({ _id: user._id, staffCode: null }, { $set: { staffCode: code } });
+      const saved = await User.findById(user._id).select('staffCode').lean();
       if (saved && saved.staffCode) return saved.staffCode;
     } catch (err) {
       if (err.code !== 11000) throw err;
@@ -153,7 +188,14 @@ async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
     trainerFilter.$or = [{ name: rx }, { email: rx }, { phone: rx }, { staffCode: rx }];
   }
 
-  const [users, trainers] = await Promise.all([
+  // Staff accounts are Users holding a staff role, and they punch on the same
+  // reader as the trainers do. Their filter is the member one minus the staff
+  // flag, so nobody appears in both lists.
+  const staffUserFilter = { isActive: true, 'employment.isStaff': true };
+  if (rx) staffUserFilter.$or = [...userFilter.$or || [], { staffCode: rx }, { 'employment.jobTitle': rx }];
+  userFilter['employment.isStaff'] = { $ne: true };
+
+  const [users, trainers, staffUsers] = await Promise.all([
     User.find(userFilter)
       .select('firstName lastName email phone memberCode')
       .sort({ firstName: 1, lastName: 1 })
@@ -162,6 +204,11 @@ async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
     Trainer.find(trainerFilter)
       .select('name email phone staffCode role')
       .sort({ name: 1 })
+      .limit(limit)
+      .lean(),
+    User.find(staffUserFilter)
+      .select('firstName lastName email phone staffCode employment.jobTitle')
+      .sort({ firstName: 1, lastName: 1 })
       .limit(limit)
       .lean()
   ]);
@@ -174,13 +221,24 @@ async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
     meta: user.phone || user.email || ''
   }));
 
-  const staff = trainers.map((trainer) => ({
-    person_type: 'staff',
-    id: String(trainer._id),
-    name: trainer.name,
-    code: trainer.staffCode || '',
-    meta: trainer.role || trainer.phone || trainer.email || ''
-  }));
+  const staff = trainers
+    .map((trainer) => ({
+      person_type: 'staff',
+      id: String(trainer._id),
+      name: trainer.name,
+      code: trainer.staffCode || '',
+      meta: trainer.role || trainer.phone || trainer.email || ''
+    }))
+    .concat(
+      staffUsers.map((user) => ({
+        person_type: 'staff',
+        id: String(user._id),
+        name: fullName(user),
+        code: user.staffCode || '',
+        meta: (user.employment && user.employment.jobTitle) || user.phone || user.email || ''
+      }))
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   return { members, staff };
 }
@@ -205,14 +263,39 @@ async function resolvePerson(personType, personId) {
 
   if (personType === 'staff') {
     const trainer = await Trainer.findById(personId);
-    if (!trainer || !trainer.isActive) return null;
+    if (trainer) {
+      if (!trainer.isActive) return null;
+      return {
+        personType: 'staff',
+        id: trainer._id,
+        name: trainer.name,
+        code: await ensureStaffCode(trainer),
+        record: trainer
+      };
+    }
+
+    // Not a trainer, so it is one of the other people who work here -- a
+    // receptionist, a cleaner, a manager. Their roster lives on
+    // employment.schedule; it is surfaced here as `availability` so the shift
+    // verdicts in punchService read one shape and never learn there are two
+    // kinds of staff.
+    const user = await User.findById(personId);
+    if (!user || !user.isActive || !user.employment || !user.employment.isStaff) return null;
+
+    const record = user.toObject();
+    record.availability = (user.employment.schedule || []).map((shift) => ({
+      day: shift.day,
+      startTime: shift.startTime,
+      endTime: shift.endTime
+    }));
+    record.role = user.employment.jobTitle || user.role;
 
     return {
       personType: 'staff',
-      id: trainer._id,
-      name: trainer.name,
-      code: await ensureStaffCode(trainer),
-      record: trainer
+      id: user._id,
+      name: fullName(user),
+      code: await ensureUserStaffCode(user),
+      record
     };
   }
 
@@ -223,6 +306,7 @@ module.exports = {
   fullName,
   ensureMemberCode,
   ensureStaffCode,
+  ensureUserStaffCode,
   membershipFor,
   listPeople,
   resolvePerson
