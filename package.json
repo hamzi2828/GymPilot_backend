@@ -10,6 +10,7 @@
     "build": "echo 'Build complete'",
     "seed:trainers": "node Seeder/createTrainers.js",
     "seed:attendance": "node Seeder/createAttendance.js",
+    "seed:accounts": "node Seeder/createAccounts.js",
     "seed:classes": "node Seeder/createGymClasses.js",
     "seed:categories": "node src/seeds/seedCategories.js",
     "seed:pages": "node src/seeds/seedPages.js",

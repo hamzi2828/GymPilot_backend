@@ -75,6 +75,7 @@ const DEFAULT_ROLES = [
       'package-orders': 'manage',
       registrations: 'manage',
       attendance: 'manage',
+      accounts: 'manage',
       staff: 'manage',
       roles: 'view',
       users: 'manage',
@@ -137,6 +138,7 @@ const DEFAULT_ROLES = [
       'package-orders': 'view',
       registrations: 'view',
       attendance: 'view',
+      accounts: 'manage',
       staff: 'view',
       packages: 'view'
     })

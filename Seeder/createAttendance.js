@@ -232,19 +232,54 @@ async function seedMembers() {
   return users;
 }
 
+// The term a package actually runs for. Mirrors addPeriod() in
+// gymfolioPaymentController, which is what a real purchase uses -- a seeded
+// membership that ignored the package period would show a monthly package with
+// eight months left on it, which is nonsense on the member's own screen.
+function addPeriod(from, period) {
+  const d = new Date(from);
+  const p = String(period || 'month').toLowerCase();
+  if (p.includes('year')) d.setFullYear(d.getFullYear() + 1);
+  else if (p.includes('week')) d.setDate(d.getDate() + 7);
+  else if (p.includes('day')) d.setDate(d.getDate() + 1);
+  else d.setMonth(d.getMonth() + 1);
+  return d;
+}
+
+function termDays(period) {
+  const start = new Date();
+  return Math.max(1, Math.round((addPeriod(start, period) - start) / 86400000));
+}
+
 // The four membership states the desk can meet, so every verdict branch has
 // something behind it: in date, about to lapse, lapsed, never bought one.
-function subscriptionWindow(standing) {
+//
+// Every window is START + one package term. Only the start date moves, which is
+// what decides how much of the term is left -- so a monthly package can never
+// come out with 235 days on it.
+function subscriptionWindow(standing, period) {
   const day = 86400000;
   const now = Date.now();
+  const term = termDays(period);
 
+  // Bought partway through the term, with a comfortable slice still to run.
   if (standing === 'active') {
-    return { start: new Date(now - randomInt(20, 90) * day), end: new Date(now + randomInt(25, 240) * day) };
+    const elapsed = randomInt(Math.round(term * 0.1), Math.max(1, Math.round(term * 0.6)));
+    const start = new Date(now - elapsed * day);
+    return { start, end: addPeriod(start, period) };
   }
+
+  // Down to the last few days -- the renewal conversation the desk wants.
   if (standing === 'expiring') {
-    return { start: new Date(now - randomInt(150, 330) * day), end: new Date(now + randomInt(1, 6) * day) };
+    const left = randomInt(1, Math.min(6, Math.max(1, term - 1)));
+    const start = new Date(now - (term - left) * day);
+    return { start, end: addPeriod(start, period) };
   }
-  return { start: new Date(now - randomInt(200, 400) * day), end: new Date(now - randomInt(3, 60) * day) };
+
+  // Already lapsed, somewhere between a few days and a couple of months ago.
+  const lapsed = randomInt(3, 60);
+  const start = new Date(now - (term + lapsed) * day);
+  return { start, end: addPeriod(start, period) };
 }
 
 async function seedMemberships(members) {
@@ -263,7 +298,7 @@ async function seedMemberships(members) {
     if (existing) continue;
 
     const pkg = packages.find((p) => p.name === template.plan) || packages[0];
-    const window = subscriptionWindow(template.standing);
+    const window = subscriptionWindow(template.standing, pkg.period);
     const live = window.end.getTime() >= Date.now();
 
     await PackageOrder.create({

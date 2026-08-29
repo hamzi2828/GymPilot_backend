@@ -29,6 +29,7 @@ const PERMISSION_TABS = [
   { key: 'registrations',  label: 'Registrations',   group: 'Sales',     path: '/admin/package-registrations' },
 
   { key: 'attendance',     label: 'Attendance',      group: 'Operations', path: '/admin/attendance' },
+  { key: 'accounts',       label: 'Accounts',        group: 'Operations', path: '/admin/accounts' },
   { key: 'staff',          label: 'Staff',           group: 'Operations', path: '/admin/staff' },
   { key: 'roles',          label: 'Roles & Access',  group: 'Operations', path: '/admin/roles' },
 

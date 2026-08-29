@@ -10,6 +10,7 @@ const allRoutes = require('./src/routes/allRoutes');
 const gymfolioRoutes = require('./src/gymfolio/routes/gymfolioRoutes');
 const desktopRoutes = require('./src/attendance/routes/desktopRoutes');
 const attendanceAdminRoutes = require('./src/attendance/routes/adminRoutes');
+const accountsRoutes = require('./src/accounts/routes/accountsRoutes');
 
 // CORS: allow frontend to access backend
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
@@ -94,6 +95,20 @@ app.use('/api/attendance', async (req, res, next) => {
     });
   }
 }, attendanceAdminRoutes);
+
+// Books: sales reports, expenses and the asset register.
+app.use('/api/accounts', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({
+      success: false,
+      message: 'Database connection failed. Please try again in a moment.'
+    });
+  }
+}, accountsRoutes);
 
 // Add the same middleware for other routes that need database
 app.use('/', async (req, res, next) => {
