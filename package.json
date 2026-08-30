@@ -13,25 +13,20 @@
     "seed:trainers": "node Seeder/createTrainers.js",
     "seed:attendance": "node Seeder/createAttendance.js",
     "seed:accounts": "node Seeder/createAccounts.js",
-    "seed:classes": "node Seeder/createGymClasses.js",
-    "seed:categories": "node src/seeds/seedCategories.js",
-    "seed:pages": "node src/seeds/seedPages.js",
-    "seed:blog-content": "node src/seeds/seedBlogContent.js",
-    "seed:seo-blogs": "node src/seeds/seedSEOBlogs.js",
-    "seed:pakistan-locations": "node src/seeds/seedPakistanLocations.js"
+    "seed:classes": "node Seeder/createGymClasses.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hamzi2828/inkedwear_backend.git"
+    "url": "git+https://github.com/hamzi2828/GymPilot_backend.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/hamzi2828/inkedwear_backend/issues"
+    "url": "https://github.com/hamzi2828/GymPilot_backend/issues"
   },
-  "homepage": "https://github.com/hamzi2828/inkedwear_backend#readme",
+  "homepage": "https://github.com/hamzi2828/GymPilot_backend#readme",
   "dependencies": {
     "@vercel/blob": "^0.23.4",
     "bcryptjs": "^3.0.2",
@@ -45,6 +40,7 @@
     "mongoose": "^8.17.1",
     "multer": "^2.0.2",
     "nodemailer": "^8.0.1",
+    "sanitize-html": "^2.17.7",
     "stripe": "^18.5.0"
   },
   "devDependencies": {

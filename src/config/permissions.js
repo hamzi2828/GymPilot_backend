@@ -42,6 +42,7 @@ const PERMISSION_TABS = [
   { key: 'testimonials',   label: 'Testimonials',    group: 'Content',   path: '/admin/testimonials' },
   { key: 'blogs',          label: 'Blogs',           group: 'Content',   path: '/admin/blogs' },
   { key: 'blog-settings',  label: 'Blog Settings',   group: 'Content',   path: '/admin/blog-settings' },
+  { key: 'pages',          label: 'Pages',           group: 'Content',   path: '/admin/pages' },
 
   { key: 'settings',       label: 'Settings',        group: 'System',    path: '/admin/settings' }
 ];

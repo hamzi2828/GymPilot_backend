@@ -9,13 +9,13 @@ const settingsSchema = new mongoose.Schema(
       type: String, 
       required: true, 
       trim: true, 
-      default: 'The Jymor' 
+      default: 'GymPilot' 
     },
     siteUrl: { 
       type: String, 
       required: true, 
       trim: true, 
-      default: 'https://www.inkedwearpk.com' 
+      default: '' 
     },
     logoUrl: {
       type: String,
@@ -210,8 +210,8 @@ settingsSchema.statics.getSettings = async function() {
   if (!settings) {
     // Create default settings if none exist
     settings = await this.create({
-      siteName: 'The Jymor',
-      siteUrl: 'https://www.inkedwearpk.com',
+      siteName: 'GymPilot',
+      siteUrl: '',
       logoUrl: '/images/logo.png',
       timezone: 'UTC+05:00',
       dateFormat: 'MM/DD/YYYY',

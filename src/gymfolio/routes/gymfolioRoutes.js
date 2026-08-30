@@ -140,7 +140,14 @@ router.get('/payment/stripe-public-key', gymfolioPaymentController.getPublicKey)
 router.post('/payment/create-package-checkout-session', optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);
 router.get('/payment/verify/:sessionId', optionalAuth, gymfolioPaymentController.verifyPackagePayment);
 router.post('/payment/verify/:sessionId', optionalAuth, gymfolioPaymentController.verifyPackagePayment);
-router.post('/payment/webhook', gymfolioPaymentController.handleWebhook);
+// express.raw, because Stripe signs the exact bytes it sent and
+// constructEvent() cannot verify a parsed object. index.js skips its JSON
+// parser for this exact path so the stream is still unread when we get here.
+router.post(
+  '/payment/webhook',
+  express.raw({ type: 'application/json' }),
+  gymfolioPaymentController.handleWebhook
+);
 
 // Package orders (admin)
 router.post('/package-orders/assign', auth, requirePermission('package-orders'), gymfolioPaymentController.assignPackageToUser);

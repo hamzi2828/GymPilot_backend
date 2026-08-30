@@ -191,11 +191,11 @@ const generateDefaultSchema = (title, content, imageUrl) => {
     "dateModified": new Date().toISOString(),
     "author": {
       "@type": "Organization",
-      "name": "The Jymor"
+      "name": process.env.SITE_NAME || "GymPilot"
     },
     "publisher": {
       "@type": "Organization",
-      "name": "The Jymor",
+      "name": process.env.SITE_NAME || "GymPilot",
       "logo": {
         "@type": "ImageObject",
         "url": "/images/logo.png"

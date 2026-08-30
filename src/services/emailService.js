@@ -1,5 +1,4 @@
 const nodemailer = require('nodemailer');
-const emailTemplates = require('../templates/emailTemplates');
 
 // Create reusable transporter
 let transporter = null;
@@ -25,7 +24,7 @@ async function resolveSmtpConfig() {
         pass: s.pass,
         from:
           s.fromEmail
-            ? `"${s.fromName || 'The Jymor'}" <${s.fromEmail}>`
+            ? `"${s.fromName || process.env.SITE_NAME || 'GymPilot'}" <${s.fromEmail}>`
             : null,
       };
     }
@@ -74,7 +73,7 @@ async function sendEmail(to, subject, html) {
     const { transport, cfg } = await initTransporter();
 
     const mailOptions = {
-      from: cfg.from || `"The Jymor" <${cfg.user}>`,
+      from: cfg.from || `"${process.env.SITE_NAME || 'GymPilot'}" <${cfg.user}>`,
       to,
       subject,
       html
@@ -89,62 +88,12 @@ async function sendEmail(to, subject, html) {
   }
 }
 
-/**
- * Send order-related email
- * @param {object} order - The order object (should be populated)
- * @param {string} templateType - Type of email template to use
- * @returns {Promise<object>} - Send result
- */
-async function sendOrderEmail(order, templateType) {
-  try {
-    const email = order.shippingAddress?.email;
-    if (!email) {
-      console.warn('⚠️ No email address found for order:', order.orderNumber);
-      return { success: false, error: 'No email address found' };
-    }
-
-    const templateFn = emailTemplates[templateType];
-    if (!templateFn) {
-      console.error(`❌ Unknown email template: ${templateType}`);
-      return { success: false, error: `Unknown template: ${templateType}` };
-    }
-
-    const { subject, html } = templateFn(order);
-    return await sendEmail(email, subject, html);
-  } catch (error) {
-    console.error(`❌ Error sending order email (${templateType}):`, error.message);
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Send return-related email
- * @param {object} returnOrder - The return order object (should be populated with order)
- * @param {object} order - The original order object
- * @param {string} templateType - Type of email template to use
- * @returns {Promise<object>} - Send result
- */
-async function sendReturnEmail(returnOrder, order, templateType) {
-  try {
-    const email = order?.shippingAddress?.email;
-    if (!email) {
-      console.warn('⚠️ No email address found for return:', returnOrder.returnNumber);
-      return { success: false, error: 'No email address found' };
-    }
-
-    const templateFn = emailTemplates[templateType];
-    if (!templateFn) {
-      console.error(`❌ Unknown email template: ${templateType}`);
-      return { success: false, error: `Unknown template: ${templateType}` };
-    }
-
-    const { subject, html } = templateFn(returnOrder, order);
-    return await sendEmail(email, subject, html);
-  } catch (error) {
-    console.error(`❌ Error sending return email (${templateType}):`, error.message);
-    return { success: false, error: error.message };
-  }
-}
+// sendOrderEmail() and sendReturnEmail() used to live here.
+//
+// They dispatched the inherited e-commerce templates -- order shipped, return
+// approved, preorder back in stock -- none of which a gym ever sends. Their
+// only callers were the product order and payment controllers, which are gone.
+// Gym email is built and sent through services/gymNotifications.js instead.
 
 /**
  * Verify SMTP connection
@@ -164,7 +113,5 @@ async function verifyConnection() {
 
 module.exports = {
   sendEmail,
-  sendOrderEmail,
-  sendReturnEmail,
   verifyConnection
 };

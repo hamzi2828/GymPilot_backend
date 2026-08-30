@@ -510,8 +510,8 @@ const settingsController = {
 
       // Create default settings
       const defaultSettings = {
-        siteName: 'The Jymor',
-        siteUrl: 'https://www.inkedwearpk.com',
+        siteName: 'GymPilot',
+        siteUrl: '',
         logoUrl: '/images/logo.png',
         timezone: 'UTC+05:00',
         dateFormat: 'MM/DD/YYYY',

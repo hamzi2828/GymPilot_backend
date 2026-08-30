@@ -142,7 +142,7 @@ const userController = {
             let emailed = false;
             let emailError = null;
             try {
-                const siteName = process.env.SITE_NAME || 'The Jymor';
+                const siteName = process.env.SITE_NAME || 'GymPilot';
                 const loginUrl = `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/authentication`;
                 const result = await sendEmail(
                     normalisedEmail,
@@ -438,7 +438,7 @@ const userController = {
             user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
             await user.save();
 
-            const siteName = process.env.SITE_NAME || 'The Jymor';
+            const siteName = process.env.SITE_NAME || 'GymPilot';
             const frontend = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
             const resetUrl =
                 `${frontend}/authentication?mode=reset&token=${encodeURIComponent(token)}` +

@@ -7,14 +7,11 @@ const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const roleController = require('../controller/roleController');
 const staffController = require('../controller/staffController');
-const categoryController = require('../controller/categoryController');
-const productController = require('../controller/productController');
 const blogController = require('../controller/blogController');
 const settingsController = require('../controller/settingsController');
 const heroSlideController = require('../controller/heroSlideController');
 const blogHeroController = require('../controller/blogHeroController');
 const contactController = require('../controller/contactController');
-const orderController = require('../controller/orderController');
 const optionalAuth = require('../middleware/optionalAuth');
 const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, toPublicPath } = require('../helper/upload');
 
@@ -98,59 +95,6 @@ router.put('/user/addresses/:addressId', auth, userController.updateUserAddress)
 router.delete('/user/addresses/:addressId', auth, userController.deleteUserAddress);
 router.put('/user/addresses/:addressId/default', auth, userController.setDefaultAddress);
 
-// Category routes
-router.get('/categories/featured-with-products', categoryController.listFeaturedCategoriesWithProducts);
-router.get('/categories/shop-premium', categoryController.listFeaturedCategoriesOptimized); // Optimized for "Shop Premium Quality" section
-router.get('/categories/tree', categoryController.getCategoryTree); // Hierarchical tree structure
-router.get('/categories/public', categoryController.listCategories); // Public route for popular categories
-router.get('/categories', categoryController.listCategories);
-router.post('/categories', auth, uploadFields([
-  { name: 'thumbnail', maxCount: 1 },
-  { name: 'banner', maxCount: 1 }
-]), categoryController.createCategory);
-router.put('/categories/:id', auth, uploadFields([
-  { name: 'thumbnail', maxCount: 1 },
-  { name: 'banner', maxCount: 1 },
-  { name: 'sizeChartRegularCm', maxCount: 1 },
-  { name: 'sizeChartRegularInch', maxCount: 1 },
-  { name: 'sizeChartRelaxedCm', maxCount: 1 },
-  { name: 'sizeChartRelaxedInch', maxCount: 1 },
-  { name: 'measuringTipImage', maxCount: 1 }
-]), categoryController.updateCategory);
-router.delete('/categories/:id', auth, categoryController.deleteCategory);
-
-// Color routes
-
-// Size routes
-
-// Product routes
-router.get('/products/random', productController.getRandomProducts); // Public route for random products
-router.get('/products/latest', productController.getLatestProducts); // Public route for latest products
-router.get('/products', productController.listProducts);
-router.get('/products/:id', auth, productController.getProductById);
-// Accept multipart form-data with fields: thumbnail (1), banners (up to 10), colorThumbnail (multiple), colorBanner (multiple), customSizeGuideImage (1)
-router.post(
-  '/products',
-  auth,
-  uploadFields([
-    { name: 'thumbnail', maxCount: 1 },
-    { name: 'banners', maxCount: 10 },
-    { name: 'colorThumbnail', maxCount: 10 }, // Allow multiple color thumbnails
-    { name: 'colorBanner', maxCount: 20 },    // Allow multiple color banners
-    { name: 'customSizeGuideImage', maxCount: 1 }, // Custom size guide image
-  ]),
-  productController.createProduct
-);
-router.put('/products/:id', auth, uploadFields([
-    { name: 'thumbnail', maxCount: 1 },
-    { name: 'banners', maxCount: 10 },
-    { name: 'colorThumbnail', maxCount: 10 }, // Allow multiple color thumbnails
-    { name: 'colorBanner', maxCount: 20 },    // Allow multiple color banners
-    { name: 'customSizeGuideImage', maxCount: 1 }, // Custom size guide image
-  ]), productController.updateProduct);
-
-router.delete('/products/:id', auth, productController.deleteProduct);
-
 // Blog Category routes
 
 // Blog routes
@@ -195,6 +139,21 @@ router.delete('/blog-hero/:id', auth, requirePermission('blog-settings'), blogHe
 router.patch('/blog-hero/:id/toggle-active', auth, requirePermission('blog-settings'), blogHeroController.toggleActiveStatus);
 router.post('/blog-hero/upload-image', auth, requirePermission('blog-settings'), heroUploadFields([{ name: 'image', maxCount: 1 }]), blogHeroController.uploadImage);
 
+// ---------------------------------------------------------------------------
+// Content pages (FAQs, privacy policy, terms)
+//
+// The public read is unauthenticated and returns published pages only. An
+// unpublished page 404s rather than returning a flag, so a draft policy cannot
+// be read by guessing the URL.
+// ---------------------------------------------------------------------------
+const contentPageController = require('../controller/contentPageController');
+router.get('/content', auth, requirePermission('pages'), contentPageController.list);
+// Must precede '/content/:slug' or Express matches the admin path as a slug.
+router.get('/content/:slug/admin', auth, requirePermission('pages'), contentPageController.getOne);
+router.put('/content/:slug', auth, requirePermission('pages', 'manage'), contentPageController.update);
+router.post('/content/:slug/reset', auth, requirePermission('pages', 'manage'), contentPageController.reset);
+router.get('/content/:slug', contentPageController.getPublic);
+
 // Settings routes
 router.get('/settings/public', settingsController.getPublicSettings); // Public route - no auth
 router.get('/settings', auth, requirePermission('settings'), settingsController.getSettings);
@@ -237,37 +196,6 @@ router.delete('/hero-slides/:id', auth, requirePermission('hero-slides'), heroSl
 
 // Wishlist routes (Authentication required)
 
-// Payment and Order Management Routes
-const paymentController = require('../controller/paymentController');
-
-router.post('/api/payment/create-checkout-session', optionalAuth, paymentController.createCheckoutSession);
-router.post('/api/payment/create-payment-intent', paymentController.createPaymentIntent);
-router.post('/api/payment/webhook', express.raw({ type: 'application/json' }), paymentController.handleWebhook);
-router.get('/api/payment/verify/:sessionId', optionalAuth, paymentController.verifyPayment);
-router.get('/api/payment/stripe-public-key', paymentController.getPublicKey);
-router.get('/api/payment/orders', auth, paymentController.getOrders);
-router.get('/api/payment/orders/:orderId', auth, paymentController.getOrderById);
-router.get('/api/payment/getAllOrders', auth, paymentController.getAllOrders);
-router.put('/api/payment/orders/bulk/status', auth, paymentController.bulkUpdateOrderStatus);
-router.delete('/api/payment/orders/bulk', auth, paymentController.bulkDeleteOrders);
-router.put('/api/payment/orders/:orderId/status', auth, paymentController.updateOrderStatus);
-router.delete('/api/payment/orders/:orderId', auth, paymentController.deleteOrder);
-router.post('/api/payment/orders/:orderId/refund', auth, paymentController.refundOrder);
-
-const publicProductController = require('../controller/publicProductController');
-const newsletterController = require('../controller/newsletterController');
-// Public Product Routes - No authentication required
-router.get('/api/public/products', publicProductController.getAllPublishedProducts);
-router.get('/api/public/products/shop-latest', publicProductController.getShopLatestProducts); // Optimized for "Shop Latest Products" section
-router.get('/api/public/products/shop-sale', publicProductController.getShopSaleProducts); // Optimized for sale products section
-router.get('/api/public/products/latest', publicProductController.getLatestProducts);
-router.get('/api/public/products/random', publicProductController.getRandomProducts);
-router.get('/api/public/products/featured', publicProductController.getFeaturedProducts);
-router.get('/api/public/products/search', publicProductController.searchProducts);
-router.get('/api/public/products/sale', publicProductController.getSaleProducts);
-router.get('/api/public/products/category/:category', publicProductController.getProductsByCategory);
-router.get('/api/public/products/:slug', publicProductController.getProductBySlug);
-
 // ---------------------------------------------------------------------------
 // Storefront (redesigned UI) — richer read-only payloads for the new
 // homepage / listing / detail pages. Runs alongside the legacy public routes
@@ -301,6 +229,7 @@ router.patch('/testimonials/:id/status', auth, requirePermission('testimonials')
 router.delete('/testimonials/:id', auth, requirePermission('testimonials'), testimonialController.deleteTestimonial);
 
 // Newsletter routes
+const newsletterController = require('../controller/newsletterController');
 router.post('/api/newsletter/subscribe', newsletterController.subscribe);
 router.post('/api/newsletter/unsubscribe', newsletterController.unsubscribe);
 router.get('/api/newsletter/stats', auth, newsletterController.getStats);
@@ -321,13 +250,6 @@ router.delete('/api/contact/:id', auth, requirePermission('contact-queries'), co
 // Review routes
 
 // Admin Review routes
-
-// Order routes (for COD and direct orders)
-router.post('/api/orders', optionalAuth, orderController.createOrder);
-router.get('/api/orders', auth, orderController.getUserOrders);
-router.get('/api/orders/guest/lookup', orderController.lookupGuestOrder); // Public route for guest order tracking
-router.get('/api/orders/by-number/:orderNumber', optionalAuth, orderController.getOrderByNumber); // Used by checkout success page; returns owner's or guest orders
-router.get('/api/orders/:orderId', auth, orderController.getOrderById);
 
 // Blog Comment routes
 

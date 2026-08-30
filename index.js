@@ -48,13 +48,27 @@ app.use(
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 const GYMFOLIO_URL = process.env.GYMFOLIO_URL || 'http://localhost:3000';
 app.use(cors({
-  origin: [FRONTEND_ORIGIN, GYMFOLIO_URL, 'http://localhost:3000', 'http://localhost:3001', 'https://www.inkedwearpk.com', 'https://www.thejymor.com', 'https://thejymor.com'],
+  origin: [FRONTEND_ORIGIN, GYMFOLIO_URL, 'http://localhost:3000', 'http://localhost:3001', 'https://www.thejymor.com', 'https://thejymor.com'],
   credentials: true,
 }));
 
-// Parse JSON (but not for webhook endpoint)
+// ---------------------------------------------------------------------------
+// Body parsing
+//
+// Stripe signs the EXACT bytes it sent, so the webhook route must see the raw
+// body -- once express.json() has parsed it, the signature can never verify.
+// The route itself applies express.raw(); this skip is what leaves the stream
+// unread for it.
+//
+// It used to name '/api/payment/webhook', the product-order webhook, which no
+// longer exists. The gymfolio webhook that replaced it was NOT skipped, so it
+// was handed a parsed object and constructEvent() rejected every event it ever
+// received.
+// ---------------------------------------------------------------------------
+const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
+
 app.use((req, res, next) => {
-  if (req.originalUrl === '/api/payment/webhook') {
+  if (req.originalUrl.split('?')[0] === STRIPE_WEBHOOK_PATH) {
     next();
   } else {
     express.json({ limit: '50mb' })(req, res, next);
