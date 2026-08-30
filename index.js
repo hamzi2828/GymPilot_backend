@@ -1,16 +1,48 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const path = require('path');
 const { mongoose, ensureConnection } = require('./src/config/mongo');
 const app = express();
 const port = process.env.PORT || 4000;
 const allRoutes = require('./src/routes/allRoutes');
 
+// Vercel puts a proxy in front of this, so the client address arrives in
+// X-Forwarded-For rather than on the socket. Without this, express reports
+// the proxy's address as req.ip and every request in the world shares one
+// rate-limit bucket. One hop, not `true`: trusting the whole chain would let
+// a caller forge the header and pick their own bucket.
+app.set('trust proxy', 1);
+
 const gymfolioRoutes = require('./src/gymfolio/routes/gymfolioRoutes');
 const desktopRoutes = require('./src/attendance/routes/desktopRoutes');
 const attendanceAdminRoutes = require('./src/attendance/routes/adminRoutes');
 const accountsRoutes = require('./src/accounts/routes/accountsRoutes');
+
+// ---------------------------------------------------------------------------
+// Security headers
+//
+// Two of helmet's defaults are wrong for this app and are overridden below.
+// Both would break working pages if left alone, which is why they are spelled
+// out rather than accepted silently:
+//
+//   crossOriginResourcePolicy — defaults to 'same-origin', which would stop
+//     the frontend on :3000 loading a single image from /uploads on :4000.
+//     Every product photo, trainer portrait and hero slide on the site is
+//     served from there.
+//
+//   contentSecurityPolicy — disabled globally because this server returns JSON
+//     and images, not HTML, so a page-level CSP has nothing to protect here.
+//     A targeted one IS applied to /uploads below, where it does real work.
+// ---------------------------------------------------------------------------
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false
+  })
+);
 
 // CORS: allow frontend to access backend
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
@@ -32,8 +64,41 @@ app.use((req, res, next) => {
 // Also add urlencoded parser for form data
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve uploaded files statically (must match path in helper/upload.js)
-app.use('/uploads', express.static(path.resolve(__dirname, 'uploads')));
+// ---------------------------------------------------------------------------
+// Uploaded files
+//
+// These are visitor- and admin-supplied bytes served back from our own origin,
+// which is the setup that turns an image upload into stored XSS. The specific
+// risk is SVG: it is an image everywhere it is used on this site (inside an
+// <img>, where scripts never run) but it is also an XML document that CAN run
+// script when a browser is pointed straight at the file. Thirty-six of them
+// are already uploaded and in use, so refusing to serve them is not an option.
+//
+// The headers below neuter that without touching a single working image:
+//
+//   CSP sandbox + default-src 'none' — an SVG opened directly is dropped into
+//     an opaque origin with scripting off and no permission to load anything,
+//     so there is nothing left for an injected <script> to do. Rendering
+//     inside <img> is unaffected: that path never ran script to begin with.
+//   X-Content-Type-Options: nosniff — stops a browser deciding for itself that
+//     a file we called an image is really HTML.
+//
+// Content-Disposition: attachment on SVG was considered and rejected. It is
+// the other common mitigation, but browsers are not consistent about ignoring
+// it for subresource loads, and being wrong about that would blank out
+// thirty-six images that are live on the site today. The sandbox above already
+// closes the hole; this would only have been belt-and-braces bought with a
+// real risk of breaking working pages.
+// ---------------------------------------------------------------------------
+app.use(
+  '/uploads',
+  express.static(path.resolve(__dirname, 'uploads'), {
+    setHeaders: (res) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    }
+  })
+);
 
 // Middleware to ensure MongoDB connection for serverless environments
 app.use('/api', async (req, res, next) => {
@@ -134,7 +199,7 @@ app.get('/', (req, res) => {
     const mongoose = require('mongoose');
 
     res.json({
-      message: 'Welcome to Inked Wear API',
+      message: 'GymPilot API',
       status: 'running',
       timestamp: new Date().toISOString(),
       version: '1.0.0',
@@ -147,7 +212,7 @@ app.get('/', (req, res) => {
   } catch (error) {
     console.error('Error in welcome route:', error);
     res.status(500).json({
-      message: 'Welcome to Inked Wear API',
+      message: 'GymPilot API',
       status: 'error',
       error: error.message,
       timestamp: new Date().toISOString(),
@@ -155,6 +220,65 @@ app.get('/', (req, res) => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/jobs/reminders
+//
+// The daily job, exposed over HTTP because this backend is serverless: there
+// is no long-lived process here to hold a scheduler, so the schedule has to
+// live outside and poke this endpoint. Vercel Cron, GitHub Actions and an
+// ordinary crontab with `curl` all work.
+//
+// Guarded by a shared secret rather than a user session, because the caller is
+// a machine with no account. Without CRON_SECRET set the route refuses
+// everything — failing closed, so forgetting to configure it cannot leave an
+// open endpoint that emails the whole membership on demand.
+//
+//   curl -X POST https://api.yourgym.com/api/jobs/reminders \
+//        -H "Authorization: Bearer $CRON_SECRET"
+//
+// Registered for GET as well as POST, which is not an oversight: Vercel Cron
+// only ever issues GET, and it is the scheduler this app is deployed under. A
+// GET with side effects is normally wrong, but the alternative is either no
+// schedule at all or a second service whose only job is to turn a GET into a
+// POST. The shared secret is what keeps it from being triggered by anything
+// that merely follows links.
+// ---------------------------------------------------------------------------
+async function runRemindersRoute(req, res) {
+  const secret = process.env.CRON_SECRET;
+
+  if (!secret) {
+    return res.status(503).json({
+      success: false,
+      message: 'Scheduled jobs are disabled: CRON_SECRET is not configured.'
+    });
+  }
+
+  const header = req.headers.authorization || '';
+  const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
+
+  // Constant-time compare. Buffers must match in length first, or timingSafeEqual
+  // throws rather than returning false.
+  const a = Buffer.from(presented);
+  const b = Buffer.from(secret);
+  const ok = a.length === b.length && require('crypto').timingSafeEqual(a, b);
+
+  if (!ok) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+  try {
+    await ensureConnection();
+    const { runDaily } = require('./src/services/reminderJobs');
+    // ?dryRun=1 to check what it would do without sending anything.
+    const result = await runDaily({ dryRun: req.query.dryRun === '1' });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[jobs] reminders failed:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+app.post('/api/jobs/reminders', runRemindersRoute);
+app.get('/api/jobs/reminders', runRemindersRoute);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -1,6 +1,18 @@
 // src/models/blogModel.js
 const mongoose = require('mongoose');
 
+// Imported for its side effect: registering the 'Author' model that the
+// `author` field below refs.
+//
+// Without this, GET /blogs returned a 500 -- "Schema hasn't been registered
+// for model 'Author'" -- and the public blog listing was down. The write paths
+// got away with it because createBlogService and updateBlogService require the
+// model themselves, so by the time anything was saved it existed; nothing on
+// the read path ever did, and populate('author') has no model to populate
+// from. Requiring it here ties registration to the schema that declares the
+// ref, so it cannot go missing again depending on which endpoint ran first.
+require('./authorModel');
+
 const blogSchema = new mongoose.Schema(
   {
     title: {

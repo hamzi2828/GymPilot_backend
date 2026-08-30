@@ -27,11 +27,22 @@ const packageOrderSchema = new mongoose.Schema(
       period: { type: String, required: true },
       features: [String]
     },
+    // Who the membership is for. Name and email are required because an order
+    // that identifies nobody is not an order.
+    //
+    // Phone and country are NOT required, deliberately. They come from the
+    // public checkout form, which asks for them -- but an admin assigning a
+    // membership at the desk has no such form, and when they were required
+    // that path wrote the literal string 'N/A' into both to get past
+    // validation. That made "no phone number" indistinguishable from a member
+    // whose number really is on file, and put 'N/A' on the receipt. An empty
+    // field says the same thing honestly, and the admin screens can then
+    // prompt for what is actually missing.
     customerInfo: {
       fullName: { type: String, required: true },
       email: { type: String, required: true },
-      phone: { type: String, required: true },
-      country: { type: String, required: true },
+      phone: { type: String, default: '' },
+      country: { type: String, default: '' },
       address: String,
       city: String,
       state: String,
@@ -82,6 +93,21 @@ const packageOrderSchema = new mongoose.Schema(
       default: 'pending'
     },
     notes: String,
+
+    // Which expiry notices have already gone out for this membership, as the
+    // day-counts they were sent for ([14, 7, 1]).
+    //
+    // Stored on the order rather than in a separate log because the question
+    // being asked is always "has THIS membership had THIS notice", and the
+    // answer has to survive the cron running twice -- which it will, because a
+    // scheduler that retries on timeout is normal. Appended only after a send
+    // actually succeeds, so a mail outage retries rather than silently
+    // swallowing the reminder.
+    remindersSent: {
+      type: [Number],
+      default: []
+    },
+
     metadata: {
       type: Map,
       of: String

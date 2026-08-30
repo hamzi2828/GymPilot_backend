@@ -10,6 +10,7 @@ const optionalAuth = require('../../middleware/optionalAuth');
 const { uploadSingle, uploadArray, uploadFields } = require('../../helper/upload');
 
 const gymClassController = require('../controller/gymClassController');
+const classBookingController = require('../controller/classBookingController');
 const trainerController = require('../controller/trainerController');
 const packageController = require('../controller/packageController');
 const packageRegistrationController = require('../controller/packageRegistrationController');
@@ -45,6 +46,43 @@ router.put(
 router.patch('/gym-classes/:id/toggle-active', auth, requirePermission('classes'), gymClassController.toggleClassStatus);
 router.patch('/gym-classes/:id/toggle-featured', auth, requirePermission('classes'), gymClassController.toggleClassFeatured);
 router.delete('/gym-classes/:id', auth, requirePermission('classes'), gymClassController.deleteClass);
+
+/* ------------------------------ Class Bookings ------------------------------- */
+//
+// Sessions are computed from each class's weekly template rather than stored,
+// so these read routes take a date range and expand it. See
+// services/classSessions.js.
+//
+// optionalAuth on the two public reads: an anonymous visitor gets a working
+// timetable, and a signed-in member gets the same thing plus which sessions
+// they already hold a place on.
+router.get('/timetable', optionalAuth, classBookingController.timetable);
+router.get('/gym-classes/:id/sessions', optionalAuth, classBookingController.classSessions);
+
+// A member acting for themselves. `create` reads req.isStaffBooking to decide
+// whether a `userId` in the body is honoured; it is unset here, so on this
+// route a member can only ever book themselves in.
+router.post('/bookings', auth, classBookingController.create);
+router.get('/bookings/me', auth, classBookingController.mine);
+
+// Staff routes. The flag below is what unlocks booking or cancelling on behalf
+// of somebody else, and it is set ONLY after requirePermission has run -- so it
+// cannot be forged by a member posting the same body to the route above.
+const asStaff = (req, res, next) => {
+  req.isStaffBooking = true;
+  next();
+};
+
+router.get('/bookings/session', auth, requirePermission('bookings'), classBookingController.session);
+router.get('/bookings', auth, requirePermission('bookings'), classBookingController.list);
+router.post('/bookings/staff', auth, requirePermission('bookings', 'manage'), asStaff, classBookingController.create);
+router.patch('/bookings/:id/status', auth, requirePermission('bookings', 'manage'), classBookingController.setStatus);
+
+// Cancel is deliberately NOT permission-gated: a member cancelling their own
+// booking is the common case and must not need a staff permission. The handler
+// checks ownership, and the staff variant below grants the wider power.
+router.delete('/bookings/staff/:id', auth, requirePermission('bookings', 'manage'), asStaff, classBookingController.cancel);
+router.delete('/bookings/:id', auth, classBookingController.cancel);
 
 /* ---------------------------------- Trainers --------------------------------- */
 router.get('/trainers/active', trainerController.getActiveTrainers);

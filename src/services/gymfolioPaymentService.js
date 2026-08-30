@@ -3,6 +3,8 @@
 const stripe = require('../config/stripe');
 const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const Package = require('../gymfolio/models/packageModel');
+const Settings = require('../models/settings');
+const { parseAmount, resolveCurrency, toMinorUnits } = require('../helper/money');
 
 class GymfolioPaymentService {
   /**
@@ -25,23 +27,23 @@ class GymfolioPaymentService {
         throw new Error(`Package is not active: ${packageData.name}`);
       }
 
-      // Parse package price (remove currency symbols and convert to number)
-      const priceValue = parseFloat(packageData.price.replace(/[^\d.]/g, ''));
+      // Shared with the admin-assignment path, so a package costs the same
+      // whether it is bought at the counter or on the website. This used to be
+      // a local regex here and a bare Number() there, and the two disagreed.
+      const priceValue = parseAmount(packageData.price);
 
-      if (isNaN(priceValue) || priceValue <= 0) {
+      if (priceValue === null || priceValue <= 0) {
         throw new Error(`Invalid package price: ${packageData.price}`);
       }
 
-      // Determine currency from package data or default to USD
-      let currency = 'usd';
-      if (packageData.currency) {
-        currency = packageData.currency.toLowerCase();
-        // Map common currency symbols to codes
-        if (currency === '$' || currency === 'usd') currency = 'usd';
-        else if (currency === '€' || currency === 'eur') currency = 'eur';
-        else if (currency === '£' || currency === 'gbp') currency = 'gbp';
-        else if (currency === 'pkr' || currency === 'rs' || currency === 'inr') currency = 'pkr';
-      }
+      // The gym's settings decide the currency when the package does not name
+      // one. The old fallback here was a hardcoded 'usd', which charged in
+      // dollars for any package left blank regardless of where the gym is.
+      const settings = await Settings.getSettings().catch(() => null);
+      const currency = resolveCurrency(
+        packageData.currency,
+        settings && settings.currency
+      ).toLowerCase();
 
       // Generate order number
       const orderNumber = await PackageOrder.generateOrderNumber();
@@ -59,7 +61,10 @@ class GymfolioPaymentService {
               period: packageData.period
             }
           },
-          unit_amount: Math.round(priceValue * 100), // Convert to cents
+          // Minor units. Not a blanket x100: yen and a handful of others have
+          // no minor unit at all, and multiplying those by 100 would charge a
+          // customer a hundred times the price.
+          unit_amount: toMinorUnits(priceValue, currency),
         },
         quantity: 1,
       }];
@@ -171,6 +176,20 @@ class GymfolioPaymentService {
 
         // Activate subscription
         await order.activateSubscription();
+
+        // Tell the member their membership is live. Required after
+        // activateSubscription, which is what sets the dates the email quotes.
+        // Fired, not awaited: the payment has succeeded either way.
+        try {
+          const notify = require('./gymNotifications');
+          const User = require('../models/user');
+          const member = order.userId
+            ? await User.findById(order.userId).select('firstName lastName email').lean()
+            : null;
+          notify.membershipConfirmed(order, member);
+        } catch (notifyError) {
+          console.error('[notify] membership confirmation failed:', notifyError.message);
+        }
 
         console.log('✅ Payment verified and subscription activated');
       } else if (session.payment_status === 'unpaid') {

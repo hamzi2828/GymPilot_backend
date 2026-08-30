@@ -9,10 +9,17 @@ const router = express.Router();
 
 const controller = require('../controller/desktopAppController');
 const { desktopAuth, requireEnrollPermission } = require('../middleware/desktopAuth');
+const { desktopLoginLimiter } = require('../../middleware/rateLimit');
 
 // Unauthenticated -- this is what issues the token, and the palette the
 // sign-in window paints itself with before it has one.
-router.post('/login', controller.login);
+//
+// The limiter counts failures only, and sits higher than the website's: a gym
+// may run several front desks behind one office connection, and locking all of
+// them out because one receptionist mistyped a password would stop the counter
+// working. /theme is left open -- it returns a colour scheme and nothing else,
+// and the sign-in window needs it before it can draw itself.
+router.post('/login', desktopLoginLimiter, controller.login);
 router.post('/theme', controller.theme);
 
 // Everything past here needs a live desktop token AND an account that still

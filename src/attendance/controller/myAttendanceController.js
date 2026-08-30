@@ -88,7 +88,12 @@ module.exports = {
             _id: { $substr: ['$shiftDate', 0, 7] },
             visits: { $sum: 1 },
             minutes: { $sum: { $ifNull: ['$workedMinutes', 0] } },
-            days: { $addToSet: '$shiftDate' }
+            days: { $addToSet: '$shiftDate' },
+            // Which package(s) the month's visits were taken on, from the
+            // snapshot written at check-in. Aggregated here rather than
+            // derived in the browser: this runs over EVERY visit, whereas the
+            // client only ever holds the recent window or one drilled month.
+            packages: { $addToSet: '$membership.packageName' }
           }
         },
         { $sort: { _id: -1 } },
@@ -143,7 +148,8 @@ module.exports = {
                 minutes: found ? found.minutes : 0,
                 total_label: found ? T.durationLabel(found.minutes) || '0 m' : '0 m',
                 average_label:
-                  found && found.visits ? T.durationLabel(Math.round(found.minutes / found.visits)) : null
+                  found && found.visits ? T.durationLabel(Math.round(found.minutes / found.visits)) : null,
+                packages: found ? (found.packages || []).filter(Boolean) : []
               };
             })()
           : null,
@@ -155,7 +161,10 @@ module.exports = {
           days: (entry.days || []).length,
           minutes: entry.minutes,
           total_label: T.durationLabel(entry.minutes) || '0 m',
-          average_label: entry.visits ? T.durationLabel(Math.round(entry.minutes / entry.visits)) : null
+          average_label: entry.visits ? T.durationLabel(Math.round(entry.minutes / entry.visits)) : null,
+          // Empty when the visits predate package snapshotting; the client
+          // falls back to the member's package terms in that case.
+          packages: (entry.packages || []).filter(Boolean)
         })),
 
         visits: rows.map((row) => ({

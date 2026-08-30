@@ -73,6 +73,28 @@ const trainerSchema = new mongoose.Schema({
     default: null,
     trim: true
   },
+
+  // The staff account this public trainer profile belongs to, when the
+  // trainer is also employed here.
+  //
+  // Why this exists: a trainer who works at the gym is one human held in two
+  // records -- this one, which the website renders, and a User carrying their
+  // pay rate and roster. Attendance files their punches against THIS record
+  // (resolvePerson checks Trainer first), so before this link existed their
+  // hours could never reach the payroll figure on the accounts screen, which
+  // only ever looked at User ids. The result was a wage bill that silently
+  // omitted the gym's trainers.
+  //
+  // Optional, and null on every existing row: a trainer who is not on the
+  // payroll -- a visiting or self-employed coach -- is left unlinked, and the
+  // accounts screen reports how many of those there are rather than pretending
+  // the total covers them.
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true
+  },
   isActive: {
     type: Boolean,
     default: true

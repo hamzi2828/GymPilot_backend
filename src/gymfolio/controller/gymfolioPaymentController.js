@@ -5,6 +5,21 @@ const stripe = require('../../config/stripe');
 const PackageOrder = require('../models/packageOrderModel');
 const Package = require('../models/packageModel');
 const User = require('../../models/user');
+const Settings = require('../../models/settings');
+const { parseAmount, resolveCurrency } = require('../../helper/money');
+const { sweepIfDue } = require('../services/membershipExpiry');
+const notify = require('../../services/gymNotifications');
+
+/**
+ * The country on the member's default address, if they have one on file.
+ * Better than asking the admin to retype it, and better than the 'N/A' this
+ * used to store -- an empty string when we genuinely do not know.
+ */
+function defaultAddressCountry(user) {
+  const addresses = Array.isArray(user.addresses) ? user.addresses : [];
+  const chosen = addresses.find((address) => address.isDefault) || addresses[0];
+  return (chosen && chosen.country) || '';
+}
 
 /** Adds one billing period to a date, for a manually granted subscription. */
 function addPeriod(from, period) {
@@ -31,13 +46,36 @@ const gymfolioPaymentController = {
         return res.status(400).json({ success: false, message: 'userId and packageId are required' });
       }
 
-      const [user, pkg] = await Promise.all([
-        User.findById(userId).select('firstName lastName email phone'),
+      const [user, pkg, settings] = await Promise.all([
+        User.findById(userId).select('firstName lastName email phone addresses'),
         Package.findById(packageId),
+        // Only for the currency fallback below, and tolerant of failure: a
+        // missing settings document must not stop a membership being sold.
+        Settings.getSettings().catch(() => null),
       ]);
 
       if (!user) return res.status(404).json({ success: false, message: 'User not found' });
       if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
+
+      // Package.price is a String, and this path used to run it through
+      // Number(), which yields NaN for anything with a thousands separator and
+      // was then coerced to 0 -- recording a paid membership worth nothing and
+      // quietly understating the month's revenue. parseAmount reads the shapes
+      // an admin actually types; null means it could not, and that is refused
+      // here rather than stored as zero.
+      const amount = parseAmount(pkg.price);
+      if (amount === null) {
+        return res.status(422).json({
+          success: false,
+          message: `Package "${pkg.name}" has an unreadable price (${JSON.stringify(pkg.price)}). Fix it on the Packages screen before assigning it.`,
+        });
+      }
+
+      // One answer for the currency, instead of the three defaults this
+      // codebase used to hold (the model said PKR, this handler said GBP, the
+      // Stripe service said USD), which meant the currency an order was booked
+      // in depended on which screen created it.
+      const currency = resolveCurrency(pkg.currency, settings && settings.currency);
 
       const start = new Date();
       let end = addPeriod(start, pkg.period);
@@ -57,22 +95,25 @@ const gymfolioPaymentController = {
         packageDetails: {
           name: pkg.name,
           price: String(pkg.price),
-          currency: pkg.currency || 'GBP',
+          currency,
           period: pkg.period || 'month',
           features: Array.isArray(pkg.features) ? pkg.features : [],
         },
+        // Whatever the account actually holds, and nothing invented. These two
+        // used to be written as the literal string 'N/A' to satisfy a required
+        // field, which put 'N/A' on the receipt and made "we don't have their
+        // number" impossible to tell from a real one. They are optional in the
+        // schema now, so an empty field simply means empty.
         customerInfo: {
           fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
           email: user.email,
-          // The schema requires these; admin assignment has no checkout form to
-          // collect them, so fall back to placeholders the admin can edit later.
-          phone: user.phone || 'N/A',
-          country: 'N/A',
+          phone: user.phone || '',
+          country: defaultAddressCountry(user),
         },
         payment: {
           method: ['stripe', 'card', 'bank_transfer', 'cash'].includes(paymentMethod) ? paymentMethod : 'cash',
-          amount: Number(pkg.price) || 0,
-          currency: (pkg.currency || 'GBP').toLowerCase(),
+          amount,
+          currency: currency.toLowerCase(),
           status: paid ? 'paid' : 'pending',
           paidAt: paid ? new Date() : undefined,
         },
@@ -86,6 +127,11 @@ const gymfolioPaymentController = {
         status: paid ? 'active' : 'pending',
         notes: notes || `Assigned from the admin panel by ${req.user?.email || 'an administrator'}`,
       });
+
+      // The member should hear that their membership is live, whether it was
+      // bought online or taken in cash at the desk. Fired, not awaited: a mail
+      // failure must not fail a payment that has already been taken.
+      if (paid) notify.membershipConfirmed(order, user);
 
       return res.status(201).json({
         success: true,
@@ -283,6 +329,12 @@ const gymfolioPaymentController = {
 
       const { page, limit, status, sort } = req.query;
 
+      // Awaited, not fired and forgotten: a member opening their history must
+      // not be told a membership that ran out last month is still active.
+      // Throttled internally, so this is a no-op on all but the first call in
+      // any five-minute window.
+      await sweepIfDue();
+
       const result = await gymfolioPaymentService.getUserOrders(userId, {
         page: page ? parseInt(page) : 1,
         limit: limit ? parseInt(limit) : 10,
@@ -310,6 +362,11 @@ const gymfolioPaymentController = {
   async getAllOrders(req, res) {
     try {
       const { page, limit, status, paymentStatus, search, sort } = req.query;
+
+      // Same reason as getUserOrders, and more pressing here: this list is
+      // filtered BY status, so a stale 'active' does not just read wrongly, it
+      // puts a lapsed member in the wrong filter.
+      await sweepIfDue();
 
       const result = await gymfolioPaymentService.getAllOrders({
         page: page ? parseInt(page) : 1,

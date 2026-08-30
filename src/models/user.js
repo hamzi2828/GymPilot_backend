@@ -178,6 +178,29 @@ const userSchema = new mongoose.Schema({
     // found at the desk the same way a member can.
     staffCode: { type: String, default: null, trim: true },
 
+    // ---- Password reset ---------------------------------------------------
+    //
+    // Only the SHA-256 hash of the reset token is stored, for the same reason
+    // the password itself is hashed: a database dump must not hand anyone a
+    // working reset link. The token is generated, mailed, and forgotten.
+    //
+    // `select: false` keeps both out of every query that does not explicitly
+    // ask, so a reset in progress never rides along in an API response.
+    passwordResetTokenHash: { type: String, default: null, select: false },
+    passwordResetExpiresAt: { type: Date, default: null, select: false },
+
+    // When the password last changed. An audit timestamp, not a gate -- it is
+    // recorded, not checked.
+    //
+    // It does not need to be a gate: there is only ever one outstanding reset
+    // token, because requesting a second link overwrites the first one's hash.
+    // An older email in the inbox is therefore already dead, and a token is
+    // cleared the moment it is spent. This field exists so "when did this
+    // account's password last change" is answerable, and as the hook a future
+    // change would use to invalidate live sessions issued before a reset --
+    // which today's stateless 7-day JWT cannot do.
+    passwordChangedAt: { type: Date, default: null, select: false },
+
 }, { timestamps: true });
 
 userSchema.index(

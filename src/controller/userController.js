@@ -44,6 +44,46 @@ function welcomeEmailHtml({ firstName, email, password, siteName, loginUrl }) {
   </div>`;
 }
 
+function passwordResetEmailHtml({ firstName, siteName, resetUrl, validMinutes }) {
+  return `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
+    <h2 style="margin:0 0 16px;font-size:20px">Reset your ${siteName} password</h2>
+    <p style="margin:0 0 16px;line-height:1.6">Hi ${firstName}, we received a request to reset the password on your account. Click the button below to choose a new one.</p>
+    <a href="${resetUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Choose a new password</a>
+    <p style="margin:20px 0 0;line-height:1.6;font-size:13px;color:#71717a">This link is valid for ${validMinutes} minutes and can only be used once.</p>
+    <p style="margin:16px 0 0;line-height:1.6;font-size:13px;color:#71717a">If the button does not work, paste this into your browser:<br>
+      <span style="word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${resetUrl}</span></p>
+    <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you did not ask for this, you can ignore this email — your password will not change.</p>
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Password reset
+//
+// The link that goes out contains a random token; what is stored is only its
+// SHA-256 hash, for the same reason the password itself is hashed. Someone
+// who reads the database cannot reset anyone's password with what they find.
+// ---------------------------------------------------------------------------
+
+const RESET_TOKEN_TTL_MINUTES = 60;
+
+function hashResetToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+// Minimum that is worth enforcing. Deliberately a length rule and nothing
+// else: composition rules push people towards "Password1!" and no further.
+const MIN_PASSWORD_LENGTH = 8;
+
+function passwordProblem(password) {
+  if (!password || typeof password !== 'string') return 'A new password is required';
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+  }
+  if (password.length > 200) return 'Password is too long';
+  return null;
+}
+
 const userController = {
 
 
@@ -328,6 +368,16 @@ const userController = {
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
 
+            // Checked here as well as in requirePermission. That gate only
+            // runs on permission-guarded routes, so without this a deactivated
+            // account could still sign in and use every endpoint behind plain
+            // `auth` -- their own profile, their attendance, the member
+            // portal. Deactivating an account should end its access, not
+            // narrow it.
+            if (user.isActive === false) {
+                return res.status(403).json({ message: 'This account has been deactivated.' });
+            }
+
             const payload = {
                 id: user._id,
                 email: user.email,
@@ -352,6 +402,174 @@ const userController = {
             return res.status(200).json({ message: 'Login successful', token, data: safe });
         } catch (error) {
             res.status(500).json({ message: 'Error during login', error: error.message });
+        }
+    },
+
+    // POST /user/forgot-password - Email a one-time reset link
+    //
+    // Always answers 200 with the same body, whether or not the address is on
+    // file. Saying "no such account" here would turn this endpoint into a way
+    // to find out who is a member, which is exactly the kind of thing a gym's
+    // membership list should not confirm to anybody who asks.
+    forgotPassword: async (req, res) => {
+        const genericResponse = {
+            message: 'If that email address has an account, a reset link is on its way.'
+        };
+
+        try {
+            const { email } = req.body;
+            if (!email) {
+                return res.status(400).json({ message: 'Email is required' });
+            }
+
+            const normalisedEmail = String(email).toLowerCase().trim();
+            const user = await User.findOne({ email: normalisedEmail });
+
+            // No account, a deactivated one, or a Google account with no
+            // password to reset: all stop here, all look identical from
+            // outside.
+            if (!user || user.isActive === false || !user.password) {
+                return res.status(200).json(genericResponse);
+            }
+
+            // Raw token goes in the email; only its hash is stored.
+            const token = crypto.randomBytes(32).toString('hex');
+            user.passwordResetTokenHash = hashResetToken(token);
+            user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
+            await user.save();
+
+            const siteName = process.env.SITE_NAME || 'The Jymor';
+            const frontend = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
+            const resetUrl =
+                `${frontend}/authentication?mode=reset&token=${encodeURIComponent(token)}` +
+                `&email=${encodeURIComponent(normalisedEmail)}`;
+
+            const result = await sendEmail(
+                normalisedEmail,
+                `Reset your ${siteName} password`,
+                passwordResetEmailHtml({
+                    firstName: user.firstName || 'there',
+                    siteName,
+                    resetUrl,
+                    validMinutes: RESET_TOKEN_TTL_MINUTES
+                })
+            );
+
+            if (!result.success) {
+                // The token is live but unreachable. Clearing it stops a link
+                // nobody received from sitting valid for an hour, and the
+                // logged error is how an admin finds out SMTP is misconfigured.
+                console.error('[auth] reset email failed for', normalisedEmail, '-', result.error);
+                user.passwordResetTokenHash = null;
+                user.passwordResetExpiresAt = null;
+                await user.save();
+            }
+
+            return res.status(200).json(genericResponse);
+        } catch (error) {
+            console.error('forgotPassword error:', error);
+            // Still generic: an error here must not become a way to probe
+            // which addresses exist.
+            return res.status(200).json(genericResponse);
+        }
+    },
+
+    // POST /user/reset-password - Consume the emailed token and set a new password
+    resetPassword: async (req, res) => {
+        try {
+            const { token, password } = req.body;
+
+            if (!token) {
+                return res.status(400).json({ message: 'Reset token is required' });
+            }
+
+            const problem = passwordProblem(password);
+            if (problem) {
+                return res.status(400).json({ message: problem });
+            }
+
+            // Looked up BY the hash, so an expired or forged token simply
+            // finds nothing -- there is no branch here that reveals whether
+            // the token existed but had lapsed.
+            const user = await User.findOne({
+                passwordResetTokenHash: hashResetToken(token),
+                passwordResetExpiresAt: { $gt: new Date() }
+            }).select('+passwordResetTokenHash +passwordResetExpiresAt +password');
+
+            if (!user) {
+                return res.status(400).json({
+                    message: 'This reset link is invalid or has expired. Please request a new one.'
+                });
+            }
+
+            if (user.isActive === false) {
+                return res.status(403).json({ message: 'This account is disabled.' });
+            }
+
+            const salt = await bcrypt.genSalt(10);
+            user.password = await bcrypt.hash(password, salt);
+
+            // Single use: the token is spent whether or not the same person
+            // clicks the link again.
+            user.passwordResetTokenHash = null;
+            user.passwordResetExpiresAt = null;
+            user.passwordChangedAt = new Date();
+            await user.save();
+
+            return res.status(200).json({
+                message: 'Password updated. You can now sign in with your new password.'
+            });
+        } catch (error) {
+            console.error('resetPassword error:', error);
+            return res.status(500).json({ message: 'Could not reset password', error: error.message });
+        }
+    },
+
+    // PUT /user/change-password - Signed-in change, current password required
+    changePassword: async (req, res) => {
+        try {
+            const { currentPassword, newPassword } = req.body;
+
+            const problem = passwordProblem(newPassword);
+            if (problem) {
+                return res.status(400).json({ message: problem });
+            }
+
+            const user = await User.findById(req.user.id).select('+password');
+            if (!user) {
+                return res.status(404).json({ message: 'Account not found' });
+            }
+
+            // A Google account has no password to compare against; sending it
+            // through the reset flow would be equally wrong, so say what is
+            // actually going on.
+            if (!user.password) {
+                return res.status(400).json({
+                    message: 'This account signs in with Google and has no password to change.'
+                });
+            }
+
+            if (!currentPassword) {
+                return res.status(400).json({ message: 'Current password is required' });
+            }
+
+            const matches = await bcrypt.compare(currentPassword, user.password);
+            if (!matches) {
+                return res.status(401).json({ message: 'Current password is incorrect' });
+            }
+
+            const salt = await bcrypt.genSalt(10);
+            user.password = await bcrypt.hash(newPassword, salt);
+            // Any reset link already in their inbox stops working now.
+            user.passwordResetTokenHash = null;
+            user.passwordResetExpiresAt = null;
+            user.passwordChangedAt = new Date();
+            await user.save();
+
+            return res.status(200).json({ message: 'Password changed' });
+        } catch (error) {
+            console.error('changePassword error:', error);
+            return res.status(500).json({ message: 'Could not change password', error: error.message });
         }
     },
 
@@ -534,18 +752,75 @@ const userController = {
                 return res.status(401).json({ message: 'Invalid or expired token' });
             }
             
-            const users = await User.find();
-            
-            // Remove sensitive data from each user in the array
-            const usersWithoutPasswords = users.map(user => {
-                const userObject = user.toObject();
-                const { password, ...userWithoutPassword } = userObject;
-                return userWithoutPassword;
-            });
-            
-            res.status(200).json({ 
-                message: 'Users details retrieved successfully', 
-                data: usersWithoutPasswords 
+            // Pagination and search are OPT-IN, and that is deliberate.
+            //
+            // This endpoint used to be an unbounded User.find(), which is a
+            // problem at any real membership size. But two screens already
+            // call it expecting the whole list back -- the Users table and the
+            // member picker on Package Orders -- and quietly starting to
+            // return only the first page would make members vanish from both
+            // with no error to explain it. So the default is unchanged, and a
+            // caller that passes `page` or `limit` gets a page instead.
+            const { search, role, status } = req.query;
+            const wantsPage = req.query.page !== undefined || req.query.limit !== undefined;
+
+            const filter = {};
+
+            if (search && String(search).trim()) {
+                // Escaped: a member searching for "a.b" must not have the dot
+                // treated as "any character", and a stray "(" must not throw.
+                const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const rx = new RegExp(escaped, 'i');
+                filter.$or = [
+                    { firstName: rx },
+                    { lastName: rx },
+                    { email: rx },
+                    { phone: rx },
+                    { memberCode: rx }
+                ];
+            }
+
+            if (role) filter.role = String(role).toLowerCase().trim();
+            if (status === 'active') filter.isActive = true;
+            if (status === 'inactive') filter.isActive = false;
+
+            // A projection rather than deleting the password afterwards: the
+            // hash should not travel out of the database at all. The reset
+            // fields are already `select: false`.
+            const projection = '-password';
+
+            if (!wantsPage) {
+                const users = await User.find(filter).select(projection).lean();
+                return res.status(200).json({
+                    message: 'Users details retrieved successfully',
+                    data: users,
+                    total: users.length
+                });
+            }
+
+            const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+            const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 25));
+
+            const [users, total] = await Promise.all([
+                User.find(filter)
+                    .select(projection)
+                    .sort({ createdAt: -1 })
+                    .skip((page - 1) * limit)
+                    .limit(limit)
+                    .lean(),
+                User.countDocuments(filter)
+            ]);
+
+            res.status(200).json({
+                message: 'Users details retrieved successfully',
+                data: users,
+                total,
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    pages: Math.max(1, Math.ceil(total / limit))
+                }
             });
         } catch (error) {
             console.error('Get user details error:', error);

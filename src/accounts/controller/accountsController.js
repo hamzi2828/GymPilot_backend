@@ -12,6 +12,7 @@ const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const Expense = require('../models/expenseModel');
 const Asset = require('../models/assetModel');
 const User = require('../../models/user');
+const Trainer = require('../../gymfolio/models/trainerModel');
 const Attendance = require('../../attendance/models/attendanceModel');
 const L = require('../services/ledger');
 const T = require('../../attendance/services/timeUtils');
@@ -40,16 +41,56 @@ async function payrollFor(range) {
     .select('firstName lastName employment.payroll employment.jobTitle')
     .lean();
 
+  // Trainers who are also employed here. Their punches are filed against the
+  // TRAINER record, not the User -- resolvePerson() checks Trainer first -- so
+  // without this join their hours were invisible to payroll and an hourly
+  // trainer's wages came out as zero. Trainer.userId is what ties the two
+  // records back to one person.
+  const [linkedTrainers, unlinkedTrainerCount] = await Promise.all([
+    Trainer.find({ isActive: true, userId: { $ne: null } })
+      .select('userId')
+      .lean(),
+    // Counted so the screen can say the figure excludes them, rather than
+    // quietly reporting a wage bill that leaves the coaching staff out.
+    Trainer.countDocuments({ isActive: true, userId: null })
+  ]);
+
   if (!staff.length) {
-    return { totals: {}, salaried: 0, hourly: 0, headcount: 0, hours: 0, people: [] };
+    return {
+      totals: {},
+      salaried: 0,
+      hourly: 0,
+      headcount: 0,
+      hours: 0,
+      people: [],
+      unlinked_trainers: unlinkedTrainerCount
+    };
   }
 
-  // Hours worked in the period, per person, for the hourly half.
+  const staffIds = new Set(staff.map((person) => String(person._id)));
+
+  // trainer _id -> the staff User the hours belong to. Trainers linked to
+  // somebody who is not staff (or is deactivated) are left out.
+  const trainerToUser = new Map();
+  for (const trainer of linkedTrainers) {
+    const owner = String(trainer.userId);
+    if (staffIds.has(owner)) trainerToUser.set(String(trainer._id), owner);
+  }
+
+  // Hours worked in the period, per person, for the hourly half. Matches both
+  // identities a staff punch can carry.
+  const punchIds = [
+    ...staff.map((person) => person._id),
+    ...linkedTrainers
+      .filter((trainer) => trainerToUser.has(String(trainer._id)))
+      .map((trainer) => trainer._id)
+  ];
+
   const worked = await Attendance.aggregate([
     {
       $match: {
         personType: 'staff',
-        personId: { $in: staff.map((person) => person._id) },
+        personId: { $in: punchIds },
         checkInAt: { $gte: range.start, $lt: range.end },
         workedMinutes: { $ne: null }
       }
@@ -57,7 +98,14 @@ async function payrollFor(range) {
     { $group: { _id: '$personId', minutes: { $sum: '$workedMinutes' } } }
   ]);
 
-  const minutesById = new Map(worked.map((row) => [String(row._id), row.minutes]));
+  // Folded onto the User id, so a person who punched some shifts as a trainer
+  // and some as a staff account is paid for all of them once.
+  const minutesById = new Map();
+  for (const row of worked) {
+    const key = String(row._id);
+    const owner = trainerToUser.get(key) || key;
+    minutesById.set(owner, (minutesById.get(owner) || 0) + row.minutes);
+  }
 
   // Salaries are quoted per cycle, so a range that is not exactly one cycle has
   // to be pro-rated or the figure is meaningless.
@@ -107,7 +155,11 @@ async function payrollFor(range) {
     hourly: L.round(hourly),
     headcount: staff.length,
     hours: Math.round((totalMinutes / 60) * 10) / 10,
-    people: people.sort((a, b) => b.cost - a.cost)
+    people: people.sort((a, b) => b.cost - a.cost),
+    // Active trainers with no staff account behind them. They punch in and
+    // out like everyone else, but nothing here knows what they are paid, so
+    // they are not in the total above. Surfaced rather than swallowed.
+    unlinked_trainers: unlinkedTrainerCount
   };
 }
 
@@ -264,6 +316,10 @@ module.exports = {
           headcount: payroll.headcount,
           hours: payroll.hours,
           people: payroll.people.slice(0, 10),
+          // Active trainers with no staff account, and therefore no pay rate.
+          // Their hours are recorded but cannot be costed, so the screen can
+          // warn that this total does not cover them.
+          unlinked_trainers: payroll.unlinked_trainers,
           // A commitment, not a payment: it is what the roster and the rates
           // add up to, and it is only an actual outflow once it is entered as
           // a salaries expense.

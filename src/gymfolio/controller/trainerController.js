@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Trainer = require('../models/trainerModel');
 
 // Check if Vercel Blob is configured
@@ -157,6 +158,20 @@ const getTrainerBySlug = async (req, res) => {
 };
 
 // Create new trainer
+/**
+ * Reads the staff-account link off a form submission.
+ *
+ * Multipart forms have no null: an empty select arrives as the empty string,
+ * and 'null'/'undefined' turn up too when a client stringifies a missing
+ * value. All of those mean "not linked to a staff account".
+ */
+function normaliseUserId(value) {
+  if (value === undefined || value === null) return null;
+  const raw = String(value).trim();
+  if (!raw || raw === 'null' || raw === 'undefined') return null;
+  return mongoose.Types.ObjectId.isValid(raw) ? raw : null;
+}
+
 const createTrainer = async (req, res) => {
   try {
     const {
@@ -172,7 +187,8 @@ const createTrainer = async (req, res) => {
       availability,
       isActive,
       isFeatured,
-      order
+      order,
+      userId
     } = req.body;
 
     // Handle image upload
@@ -238,6 +254,9 @@ const createTrainer = async (req, res) => {
       availability: parsedAvailability || [],
       isActive: isActive !== undefined ? isActive === 'true' || isActive === true : true,
       isFeatured: isFeatured !== undefined ? isFeatured === 'true' || isFeatured === true : false,
+      // The staff account behind this profile, if any. Sent as a string from a
+      // multipart form, where "unlinked" arrives as '' rather than null.
+      userId: normaliseUserId(userId),
       order: order ? parseInt(order) : undefined
     };
 
@@ -301,7 +320,8 @@ const updateTrainer = async (req, res) => {
       availability,
       isActive,
       isFeatured,
-      order
+      order,
+      userId
     } = req.body;
 
     // Handle image upload
@@ -367,7 +387,10 @@ const updateTrainer = async (req, res) => {
       availability: parsedAvailability,
       isActive: isActive !== undefined ? (isActive === 'true' || isActive === true) : trainer.isActive,
       isFeatured: isFeatured !== undefined ? (isFeatured === 'true' || isFeatured === true) : trainer.isFeatured,
-      order: order !== undefined ? parseInt(order) : trainer.order
+      order: order !== undefined ? parseInt(order) : trainer.order,
+      // Only touched when the form actually sent the field, so an older client
+      // that does not know about it cannot silently unlink a trainer.
+      userId: userId !== undefined ? normaliseUserId(userId) : trainer.userId
     };
 
     const updatedTrainer = await Trainer.findByIdAndUpdate(id, updateData, {

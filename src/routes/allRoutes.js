@@ -18,15 +18,45 @@ const orderController = require('../controller/orderController');
 const optionalAuth = require('../middleware/optionalAuth');
 const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, toPublicPath } = require('../helper/upload');
 
+const {
+  loginLimiter,
+  passwordResetLimiter,
+  passwordResetConfirmLimiter,
+  signupLimiter
+} = require('../middleware/rateLimit');
+
 // Map each HTTP method to the corresponding controller function
-router.post('/user/login', userController.loginUser);
-router.post('/user/signup', userController.createUser);
+router.post('/user/login', loginLimiter, userController.loginUser);
+router.post('/user/signup', signupLimiter, userController.createUser);
 router.post('/user/google-login', userController.googleLoginUser);
+
+// ---------------------------------------------------------------------------
+// Password reset
+//
+// Two endpoints, because the reset is two steps taken by two different people
+// in two different places: a request from whoever is at the sign-in screen,
+// and a confirmation from whoever opened the email. Neither needs a token from
+// the other, and neither is authenticated -- the emailed token IS the proof.
+//
+// /change-password is the signed-in equivalent and does need `auth`.
+// ---------------------------------------------------------------------------
+router.post('/user/forgot-password', passwordResetLimiter, userController.forgotPassword);
+router.post('/user/reset-password', passwordResetConfirmLimiter, userController.resetPassword);
+router.put('/user/change-password', auth, userController.changePassword);
 router.put('/update/user', auth, userController.updateUser);
 router.delete('/user', auth, userController.deleteUser);
 router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile);
 router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
 router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
+
+// ---------------------------------------------------------------------------
+// Dashboard
+//
+// Gated on the 'dashboard' tab, which every staff role that can open the panel
+// at all already holds -- so this is a permission check, not a barrier.
+// ---------------------------------------------------------------------------
+const dashboardController = require('../controller/dashboardController');
+router.get('/admin/dashboard', auth, requirePermission('dashboard'), dashboardController.overview);
 
 // ---------------------------------------------------------------------------
 // Roles and access
