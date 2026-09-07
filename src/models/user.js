@@ -173,6 +173,29 @@ const userSchema = new mongoose.Schema({
         version: { type: String, default: '' }
       }
     },
+    // How the member wants to hear from the gym. The channel switches cover
+    // the transactional notices (bookings, payments); `marketing` covers
+    // campaigns and the automated nudges.
+    notificationPreferences: {
+      email: { type: Boolean, default: true },
+      sms: { type: Boolean, default: true },
+      whatsapp: { type: Boolean, default: true },
+      push: { type: Boolean, default: true },
+      marketing: { type: Boolean, default: true }
+    },
+
+    // When the automated messages last went to this member, so nobody is
+    // chased twice (services/automations.js).
+    automation: {
+      absentNudgedAt: { type: Date, default: null },
+      winBackSentAt: { type: Date, default: null },
+      birthdayYear: { type: Number, default: null }
+    },
+
+    // Free labels staff put on a member -- "student", "corporate", "vip" --
+    // used to pick campaign audiences and to filter the members list.
+    tags: { type: [String], default: [], index: true },
+
     addresses: [addressSchema],
     affiliate: { type: affiliateSchema, default: () => ({}) },
 

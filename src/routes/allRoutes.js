@@ -256,6 +256,37 @@ router.post('/api/newsletter/unsubscribe', newsletterController.unsubscribe);
 router.get('/api/newsletter/stats', auth, newsletterController.getStats);
 router.get('/api/newsletter/subscribers', auth, newsletterController.getAllSubscribers);
 
+// ---------------------------------------------------------------------------
+// Messaging: channels, campaigns, announcements, wording, push -- see
+// controller/messagingController.js. Members manage their own preferences.
+// ---------------------------------------------------------------------------
+const messagingController = require('../controller/messagingController');
+router.get('/announcements/active', optionalAuth, messagingController.activeAnnouncements);
+router.get('/user/notification-preferences', auth, messagingController.myPreferences);
+router.put('/user/notification-preferences', auth, messagingController.setMyPreferences);
+router.post('/user/push-subscriptions', auth, messagingController.subscribePush);
+router.delete('/user/push-subscriptions', auth, messagingController.unsubscribePush);
+router.post('/settings/push/keys', auth, requirePermission('settings', 'manage'), messagingController.generatePushKeys);
+
+router.get('/admin/messaging/channels', auth, requirePermission('messaging'), messagingController.channels);
+router.get('/admin/messaging/log', auth, requirePermission('messaging'), messagingController.log);
+router.post('/admin/messaging/send', auth, requirePermission('messaging', 'manage'), messagingController.send);
+router.get('/admin/messaging/templates', auth, requirePermission('messaging'), messagingController.listTemplates);
+router.put('/admin/messaging/templates/:key', auth, requirePermission('messaging', 'manage'), messagingController.saveTemplate);
+router.delete('/admin/messaging/templates/:key', auth, requirePermission('messaging', 'manage'), messagingController.resetTemplate);
+router.post('/admin/messaging/templates/:key/test', auth, requirePermission('messaging', 'manage'), messagingController.testTemplate);
+router.get('/admin/messaging/campaigns', auth, requirePermission('messaging'), messagingController.listCampaigns);
+router.post('/admin/messaging/campaigns', auth, requirePermission('messaging', 'manage'), messagingController.createCampaign);
+router.put('/admin/messaging/campaigns/:id', auth, requirePermission('messaging', 'manage'), messagingController.updateCampaign);
+router.delete('/admin/messaging/campaigns/:id', auth, requirePermission('messaging', 'manage'), messagingController.deleteCampaign);
+router.get('/admin/messaging/campaigns/:id/audience', auth, requirePermission('messaging'), messagingController.campaignAudience);
+router.post('/admin/messaging/campaigns/:id/send', auth, requirePermission('messaging', 'manage'), messagingController.sendCampaign);
+router.get('/admin/messaging/announcements', auth, requirePermission('messaging'), messagingController.listAnnouncements);
+router.post('/admin/messaging/announcements', auth, requirePermission('messaging', 'manage'), messagingController.createAnnouncement);
+router.put('/admin/messaging/announcements/:id', auth, requirePermission('messaging', 'manage'), messagingController.updateAnnouncement);
+router.delete('/admin/messaging/announcements/:id', auth, requirePermission('messaging', 'manage'), messagingController.deleteAnnouncement);
+router.post('/admin/messaging/automations/run', auth, requirePermission('messaging', 'manage'), messagingController.runAutomationsNow);
+
 // Contact routes
 router.post('/api/contact/submit', contactController.submitContact); // Public route
 router.get('/api/contact', auth, requirePermission('contact-queries'), contactController.getAllContacts); // Admin only

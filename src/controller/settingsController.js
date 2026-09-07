@@ -42,7 +42,83 @@ function sanitizeSettings(doc) {
       passSet: !!data.smtp.pass,
     };
   }
+  if (data.messaging) {
+    const m = data.messaging;
+    const secret = (obj, key) => ({ [key]: maskSecret(obj && obj[key]), [`${key}Set`]: !!(obj && obj[key]) });
+    data.messaging = {
+      ...m,
+      sms: { ...(m.sms || {}), ...secret(m.sms, 'authToken'), ...secret(m.sms, 'webhookToken') },
+      whatsapp: { ...(m.whatsapp || {}), ...secret(m.whatsapp, 'authToken'), ...secret(m.whatsapp, 'accessToken'), ...secret(m.whatsapp, 'webhookToken') },
+      push: { ...(m.push || {}), ...secret(m.push, 'vapidPrivateKey') }
+    };
+  }
   return data;
+}
+
+// Nested messaging settings: every field optional, secrets kept when the
+// admin sends back the masked value.
+function mergeMessaging(existing = {}, incoming = {}) {
+  const ex = existing || {};
+  const text = (obj, key, fallback = '') => (obj && obj[key] !== undefined ? String(obj[key]).trim() : fallback);
+  const secret = (obj, key, fallback = '') => (obj && obj[key] !== undefined && !isMasked(obj[key]) ? String(obj[key]).trim() : fallback);
+  const bool = (obj, key, fallback) => (obj && obj[key] !== undefined ? Boolean(obj[key]) : fallback);
+  const sms = ex.sms || {};
+  const wa = ex.whatsapp || {};
+  const push = ex.push || {};
+  const tx = ex.transactional || {};
+  const btn = ex.whatsappButton || {};
+  const auto = ex.automations || {};
+  const inSms = incoming.sms || {};
+  const inWa = incoming.whatsapp || {};
+  const inPush = incoming.push || {};
+  const inTx = incoming.transactional || {};
+  const inBtn = incoming.whatsappButton || {};
+  const inAuto = incoming.automations || {};
+  const provider = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback || 'none');
+  return {
+    defaultCountryCode: text(incoming, 'defaultCountryCode', ex.defaultCountryCode || ''),
+    sms: {
+      provider: inSms.provider !== undefined ? provider(inSms.provider, ['none', 'twilio', 'http']) : sms.provider || 'none',
+      accountSid: text(inSms, 'accountSid', sms.accountSid || ''),
+      authToken: secret(inSms, 'authToken', sms.authToken || ''),
+      from: text(inSms, 'from', sms.from || ''),
+      webhookUrl: text(inSms, 'webhookUrl', sms.webhookUrl || ''),
+      webhookToken: secret(inSms, 'webhookToken', sms.webhookToken || '')
+    },
+    whatsapp: {
+      provider: inWa.provider !== undefined ? provider(inWa.provider, ['none', 'twilio', 'meta', 'http']) : wa.provider || 'none',
+      accountSid: text(inWa, 'accountSid', wa.accountSid || ''),
+      authToken: secret(inWa, 'authToken', wa.authToken || ''),
+      from: text(inWa, 'from', wa.from || ''),
+      phoneNumberId: text(inWa, 'phoneNumberId', wa.phoneNumberId || ''),
+      accessToken: secret(inWa, 'accessToken', wa.accessToken || ''),
+      webhookUrl: text(inWa, 'webhookUrl', wa.webhookUrl || ''),
+      webhookToken: secret(inWa, 'webhookToken', wa.webhookToken || '')
+    },
+    push: {
+      // Keys are only ever made by POST /settings/push/keys; the switch and
+      // the contact address are editable here.
+      enabled: bool(inPush, 'enabled', !!push.enabled) && !!push.vapidPublicKey,
+      vapidPublicKey: push.vapidPublicKey || '',
+      vapidPrivateKey: push.vapidPrivateKey || '',
+      subject: text(inPush, 'subject', push.subject || '')
+    },
+    transactional: {
+      sms: bool(inTx, 'sms', !!tx.sms),
+      whatsapp: bool(inTx, 'whatsapp', !!tx.whatsapp),
+      push: bool(inTx, 'push', tx.push !== false)
+    },
+    whatsappButton: {
+      enabled: bool(inBtn, 'enabled', !!btn.enabled),
+      number: text(inBtn, 'number', btn.number || ''),
+      message: text(inBtn, 'message', btn.message || '')
+    },
+    automations: {
+      absentDays: inAuto.absentDays !== undefined ? Math.max(0, parseInt(inAuto.absentDays, 10) || 0) : auto.absentDays || 0,
+      winBackDays: inAuto.winBackDays !== undefined ? Math.max(0, parseInt(inAuto.winBackDays, 10) || 0) : auto.winBackDays || 0,
+      birthday: bool(inAuto, 'birthday', !!auto.birthday)
+    }
+  };
 }
 
 
@@ -83,7 +159,13 @@ const settingsController = {
         facebookUrl: settings.facebookUrl,
         instagramUrl: settings.instagramUrl,
         twitterUrl: settings.twitterUrl,
-        tiktokUrl: settings.tiktokUrl
+        tiktokUrl: settings.tiktokUrl,
+        // The floating WhatsApp button and the key browsers need to subscribe
+        // to push. Neither is secret.
+        whatsappButton: settings.messaging?.whatsappButton?.enabled && settings.messaging.whatsappButton.number
+          ? { number: settings.messaging.whatsappButton.number, message: settings.messaging.whatsappButton.message || '' }
+          : null,
+        pushPublicKey: settings.messaging?.push?.enabled ? settings.messaging.push.vapidPublicKey || '' : ''
       };
 
       return res.status(200).json({
@@ -183,7 +265,8 @@ const settingsController = {
         invoice,
         membership,
         ianaTimezone,
-        setupCompleted
+        setupCompleted,
+        messaging
       } = req.body;
 
       // Prepare update data with only provided fields
@@ -229,6 +312,10 @@ const settingsController = {
           maxFreezeDays: Math.max(1, parseInt(membership.maxFreezeDays, 10) || 30),
           allowMemberCancel: membership.allowMemberCancel !== undefined ? Boolean(membership.allowMemberCancel) : true
         };
+      }
+      if (messaging && typeof messaging === 'object') {
+        const currentDoc = await Settings.findOne({ isActive: true }).select('messaging').lean();
+        updateData.messaging = mergeMessaging((currentDoc && currentDoc.messaging) || {}, messaging);
       }
 
       // Update only provided fields

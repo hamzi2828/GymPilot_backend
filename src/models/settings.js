@@ -205,6 +205,56 @@ const settingsSchema = new mongoose.Schema(
       allowMemberCancel: { type: Boolean, default: true }
     },
 
+    // Text channels beside email, push, the website's WhatsApp button and
+    // the automated nudges. Secrets are masked on the way out
+    // (settingsController.sanitizeSettings). See services/messaging.js.
+    messaging: {
+      // Prepended to phone numbers saved without a country code ("+92").
+      defaultCountryCode: { type: String, default: '', trim: true },
+      sms: {
+        provider: { type: String, enum: ['none', 'twilio', 'http'], default: 'none' },
+        accountSid: { type: String, default: '', trim: true },
+        authToken: { type: String, default: '', trim: true },
+        from: { type: String, default: '', trim: true },
+        webhookUrl: { type: String, default: '', trim: true },
+        webhookToken: { type: String, default: '', trim: true }
+      },
+      whatsapp: {
+        provider: { type: String, enum: ['none', 'twilio', 'meta', 'http'], default: 'none' },
+        accountSid: { type: String, default: '', trim: true },
+        authToken: { type: String, default: '', trim: true },
+        from: { type: String, default: '', trim: true },
+        phoneNumberId: { type: String, default: '', trim: true },
+        accessToken: { type: String, default: '', trim: true },
+        webhookUrl: { type: String, default: '', trim: true },
+        webhookToken: { type: String, default: '', trim: true }
+      },
+      push: {
+        enabled: { type: Boolean, default: false },
+        vapidPublicKey: { type: String, default: '' },
+        vapidPrivateKey: { type: String, default: '' },
+        subject: { type: String, default: '', trim: true }
+      },
+      // Which channels carry the transactional notices, beyond email.
+      transactional: {
+        sms: { type: Boolean, default: false },
+        whatsapp: { type: Boolean, default: false },
+        push: { type: Boolean, default: true }
+      },
+      // The floating "chat on WhatsApp" button on the public site.
+      whatsappButton: {
+        enabled: { type: Boolean, default: false },
+        number: { type: String, default: '', trim: true },
+        message: { type: String, default: '', trim: true }
+      },
+      // 0 = off. See services/automations.js.
+      automations: {
+        absentDays: { type: Number, default: 0, min: 0 },
+        winBackDays: { type: Number, default: 0, min: 0 },
+        birthday: { type: Boolean, default: false }
+      }
+    },
+
     // Site colour scheme. Stores a preset key; the frontend maps it to CSS
     // custom properties so the whole site recolours from one value.
     theme: {

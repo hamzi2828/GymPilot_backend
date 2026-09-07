@@ -37,6 +37,7 @@ const PERMISSION_TABS = [
 
   { key: 'users',          label: 'Users',           group: 'Customers', path: '/admin/users' },
   { key: 'contact-queries',label: 'Contact Queries', group: 'Customers', path: '/admin/contact-queries' },
+  { key: 'messaging',      label: 'Messaging',       group: 'Customers', path: '/admin/messaging' },
 
   { key: 'homepage',       label: 'Homepage',        group: 'Content',   path: '/admin/homepage' },
   { key: 'hero-slides',    label: 'Hero Slides',     group: 'Content',   path: '/admin/hero-slides' },

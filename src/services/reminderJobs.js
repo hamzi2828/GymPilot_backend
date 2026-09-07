@@ -182,8 +182,12 @@ async function runDaily(options = {}) {
   const freezes = options.dryRun ? { resumed: 0 } : await resumeDueFreezes();
   const memberships = await sendExpiryReminders(options);
   const classes = await sendClassReminders(options);
+  // The automated nudges (absent, win-back, birthday); each is off until
+  // the gym switches it on.
+  const { runAutomations } = require('./automations');
+  const automations = await runAutomations(options);
 
-  return { expired, freezes, memberships, classes };
+  return { expired, freezes, memberships, classes, automations };
 }
 
 module.exports = {
