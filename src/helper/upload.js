@@ -123,6 +123,19 @@ const csvUpload = multer({
 });
 const csvUploadSingle = (fieldName) => csvUpload.single(fieldName);
 
+// Member documents: signed forms, ID scans, medical letters. Images or
+// PDFs, 10 MB.
+const ALLOWED_DOCUMENT_MIME_TYPES = new Set([...ALLOWED_IMAGE_MIME_TYPES, 'application/pdf']);
+const documentUpload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_DOCUMENT_MIME_TYPES.has(file.mimetype)) return cb(null, true);
+    cb(new Error('Only image or PDF files are allowed'));
+  },
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+const documentUploadSingle = (fieldName) => documentUpload.single(fieldName);
+
 // Convenience wrappers
 const uploadSingle = (fieldName) => upload.single(fieldName);
 const uploadArray = (fieldName, maxCount) => upload.array(fieldName, maxCount);
@@ -164,6 +177,7 @@ module.exports = {
   heroUploadFields,
   videoUploadSingle,
   csvUploadSingle,
+  documentUploadSingle,
   ensureUploadsDir,
   toPublicPath,
   localUploadPath,

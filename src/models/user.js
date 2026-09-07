@@ -196,6 +196,59 @@ const userSchema = new mongoose.Schema({
     // used to pick campaign audiences and to filter the members list.
     tags: { type: [String], default: [], index: true },
 
+    // ---- Member profile -----------------------------------------------------
+    //
+    // Filled in by the member from the portal or by staff from Users →
+    // Profile. `staffNotes` and `medical.notes` are staff-only and never
+    // returned to the member (see userController.getUserDetailForProfile).
+    emergencyContact: {
+      name: { type: String, default: '', trim: true },
+      phone: { type: String, default: '', trim: true },
+      relationship: { type: String, default: '', trim: true }
+    },
+    medical: {
+      conditions: { type: String, default: '', trim: true },
+      medications: { type: String, default: '', trim: true },
+      injuries: { type: String, default: '', trim: true },
+      notes: { type: String, default: '', trim: true },
+      // The readiness questionnaire. `flagged` is any "yes".
+      parq: {
+        completedAt: { type: Date, default: null },
+        answers: { type: [{ question: String, answer: Boolean }], default: [] },
+        flagged: { type: Boolean, default: false }
+      }
+    },
+    // The membership agreement (Settings → membership rules), signed by
+    // typing a name online or recorded by staff from a paper copy.
+    waiver: {
+      signedAt: { type: Date, default: null },
+      version: { type: String, default: '' },
+      signature: { type: String, default: '' },
+      source: { type: String, default: '' },      // portal | desk
+      ip: { type: String, default: '' },
+      recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+    },
+    documents: {
+      type: [
+        new mongoose.Schema(
+          {
+            name: { type: String, default: '', trim: true },
+            url: { type: String, default: '' },
+            mimeType: { type: String, default: '' },
+            size: { type: Number, default: 0 },
+            uploadedAt: { type: Date, default: Date.now },
+            uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+          },
+          { _id: true }
+        )
+      ],
+      default: []
+    },
+    staffNotes: { type: String, default: '' },
+    goals: { type: String, default: '', trim: true },
+    // How they found the gym.
+    source: { type: String, default: '', trim: true },
+
     addresses: [addressSchema],
     affiliate: { type: affiliateSchema, default: () => ({}) },
 

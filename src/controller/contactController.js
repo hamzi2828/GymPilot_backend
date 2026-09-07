@@ -27,6 +27,10 @@ exports.submitContact = async (req, res) => {
 
     await newContact.save();
 
+    // An enquiry from someone who is not a member is a lead; the front desk
+    // works it from Customers → Leads.
+    require('./leadController').leadFromContact(newContact);
+
     // Send response without sensitive data
     return res.status(201).json({
       success: true,

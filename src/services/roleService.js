@@ -86,6 +86,7 @@ const DEFAULT_ROLES = [
       roles: 'view',
       users: 'manage',
       'contact-queries': 'manage',
+      leads: 'manage',
       messaging: 'manage',
       homepage: 'view',
       'hero-slides': 'view',
@@ -113,6 +114,7 @@ const DEFAULT_ROLES = [
       attendance: 'manage',
       users: 'manage',
       'contact-queries': 'manage',
+      leads: 'manage',
       messaging: 'manage'
     })
   },

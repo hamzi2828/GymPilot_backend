@@ -14,7 +14,7 @@ const blogHeroController = require('../controller/blogHeroController');
 const contactController = require('../controller/contactController');
 const optionalAuth = require('../middleware/optionalAuth');
 const { tenantFromOAuthState } = require('../platform/middleware/tenantFromPayload');
-const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, csvUploadSingle, toPublicPath } = require('../helper/upload');
+const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, csvUploadSingle, documentUploadSingle, toPublicPath } = require('../helper/upload');
 
 const {
   loginLimiter,
@@ -60,6 +60,32 @@ router.delete('/user', auth, userController.deleteUser);
 router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile);
 router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
 router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
+
+// ---------------------------------------------------------------------------
+// Member profiles (photo, health, agreement, documents, tags, notes) and the
+// lead pipeline -- see controller/memberProfileController.js, leadController.js
+// ---------------------------------------------------------------------------
+const memberProfileController = require('../controller/memberProfileController');
+const leadController = require('../controller/leadController');
+router.get('/user/health', auth, memberProfileController.myHealth);
+router.put('/user/health', auth, memberProfileController.setMyHealth);
+router.get('/user/waiver', auth, memberProfileController.myWaiver);
+router.post('/user/waiver/sign', auth, memberProfileController.signWaiver);
+router.post('/user/photo', auth, uploadSingle('photo'), memberProfileController.setMyPhoto);
+router.get('/admin/users/tags', auth, requirePermission('users'), memberProfileController.tags);
+router.get('/admin/users/:id/profile', auth, requirePermission('users'), memberProfileController.profile);
+router.put('/admin/users/:id/profile', auth, requirePermission('users', 'manage'), memberProfileController.updateProfile);
+router.post('/admin/users/:id/photo', auth, requirePermission('users', 'manage'), uploadSingle('photo'), memberProfileController.setPhoto);
+router.post('/admin/users/:id/documents', auth, requirePermission('users', 'manage'), documentUploadSingle('file'), memberProfileController.addDocument);
+router.delete('/admin/users/:id/documents/:docId', auth, requirePermission('users', 'manage'), memberProfileController.removeDocument);
+router.post('/admin/users/:id/waiver', auth, requirePermission('users', 'manage'), memberProfileController.recordWaiver);
+router.get('/admin/leads', auth, requirePermission('leads'), leadController.list);
+router.post('/admin/leads', auth, requirePermission('leads', 'manage'), leadController.create);
+router.put('/admin/leads/:id', auth, requirePermission('leads', 'manage'), leadController.update);
+router.patch('/admin/leads/:id/status', auth, requirePermission('leads', 'manage'), leadController.setStatus);
+router.post('/admin/leads/:id/notes', auth, requirePermission('leads', 'manage'), leadController.addNote);
+router.post('/admin/leads/:id/convert', auth, requirePermission('leads', 'manage'), leadController.convert);
+router.delete('/admin/leads/:id', auth, requirePermission('leads', 'manage'), leadController.remove);
 
 // Bulk import from a spreadsheet -- see controller/userImportController.js.
 const userImportController = require('../controller/userImportController');

@@ -714,10 +714,20 @@ const userController = {
                 return res.status(401).json({ message: 'Invalid or expired token' });
             }
             
-            const userData = req.body;
-            
-            // Prevent updating sensitive fields
-            const { password, ...safeUpdates } = userData;
+            const userData = req.body || {};
+
+            // Only the fields a member may change about themselves. Anything
+            // else -- role, token version, staff notes, plan limits -- is not
+            // theirs to set, however the request is shaped.
+            const MEMBER_EDITABLE = ['firstName', 'lastName', 'email', 'phone', 'dateOfBirth', 'gender', 'avatarUrl', 'goals'];
+            const safeUpdates = {};
+            for (const key of MEMBER_EDITABLE) {
+                if (userData[key] !== undefined) safeUpdates[key] = userData[key];
+            }
+            if (typeof safeUpdates.email === 'string') safeUpdates.email = safeUpdates.email.toLowerCase().trim();
+            if (!Object.keys(safeUpdates).length) {
+                return res.status(400).json({ message: 'Nothing to update' });
+            }
             
             const updatedUser = await User.findByIdAndUpdate(
                 currentUser.id,
@@ -776,7 +786,9 @@ const userController = {
             }
             
             // Remove sensitive data from response
-            const { password: _, ...userWithoutPassword } = user.toObject();
+            // The staff-only notes are about the member, not for them.
+            const { password: _, staffNotes: _notes, automation: _auto, ...userWithoutPassword } = user.toObject();
+            if (userWithoutPassword.medical) delete userWithoutPassword.medical.notes;
             
             res.status(200).json({ 
                 message: 'User details retrieved successfully', 

@@ -202,7 +202,14 @@ const settingsSchema = new mongoose.Schema(
     membership: {
       allowMemberFreeze: { type: Boolean, default: true },
       maxFreezeDays: { type: Number, default: 30, min: 1 },
-      allowMemberCancel: { type: Boolean, default: true }
+      allowMemberCancel: { type: Boolean, default: true },
+      // The agreement members sign. Bumping the version asks everyone to
+      // sign again.
+      waiver: {
+        required: { type: Boolean, default: false },
+        version: { type: String, default: '1.0', trim: true },
+        text: { type: String, default: '' }
+      }
     },
 
     // Text channels beside email, push, the website's WhatsApp button and

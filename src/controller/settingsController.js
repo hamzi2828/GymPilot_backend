@@ -307,10 +307,18 @@ const settingsController = {
         };
       }
       if (membership && typeof membership === 'object') {
+        const existingMembership = (await Settings.findOne({ isActive: true }).select('membership').lean())?.membership || {};
+        const existingWaiver = existingMembership.waiver || {};
+        const waiver = membership.waiver && typeof membership.waiver === 'object' ? membership.waiver : {};
         updateData.membership = {
           allowMemberFreeze: membership.allowMemberFreeze !== undefined ? Boolean(membership.allowMemberFreeze) : true,
           maxFreezeDays: Math.max(1, parseInt(membership.maxFreezeDays, 10) || 30),
-          allowMemberCancel: membership.allowMemberCancel !== undefined ? Boolean(membership.allowMemberCancel) : true
+          allowMemberCancel: membership.allowMemberCancel !== undefined ? Boolean(membership.allowMemberCancel) : true,
+          waiver: {
+            required: waiver.required !== undefined ? Boolean(waiver.required) : !!existingWaiver.required,
+            version: waiver.version !== undefined ? String(waiver.version).trim().slice(0, 20) || '1.0' : existingWaiver.version || '1.0',
+            text: waiver.text !== undefined ? String(waiver.text).slice(0, 50000) : existingWaiver.text || ''
+          }
         };
       }
       if (messaging && typeof messaging === 'object') {
