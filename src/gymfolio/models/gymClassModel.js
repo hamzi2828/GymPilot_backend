@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const scheduleSchema = new mongoose.Schema({
   day: {
@@ -205,6 +206,6 @@ gymClassSchema.statics.getClassesByCategory = function(category) {
     .sort({ order: 1, createdAt: 1 });
 };
 
-const GymClass = mongoose.model('GymClass', gymClassSchema);
+const GymClass = tenantModel('GymClass', gymClassSchema);
 
 module.exports = GymClass;

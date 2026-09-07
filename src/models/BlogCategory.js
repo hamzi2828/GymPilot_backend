@@ -1,5 +1,6 @@
 // BlogCategory.js
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const blogCategorySchema = new mongoose.Schema(
   {
@@ -49,4 +50,4 @@ blogCategorySchema.virtual('blogCount', {
 });
 
 // Check if the model already exists before compiling it
-module.exports = mongoose.models.BlogCategory || mongoose.model('BlogCategory', blogCategorySchema);
+module.exports = tenantModel('BlogCategory', blogCategorySchema);

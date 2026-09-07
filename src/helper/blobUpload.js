@@ -1,5 +1,13 @@
 // src/helper/blobUpload.js
 const { put, del } = require('@vercel/blob');
+const { currentTenant } = require('../platform/tenantContext');
+
+// Every gym's files sit under their own prefix in the store, named by the
+// gym's slug, so listings and clean-ups can be scoped to one customer.
+function tenantFolder(folder) {
+  const gym = currentTenant();
+  return gym && gym.slug ? `${gym.slug}/${folder}` : folder;
+}
 
 // Allowed image mime types
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
@@ -37,7 +45,7 @@ async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads') {
   const rand = Math.round(Math.random() * 1e9);
   const ext = filename.split('.').pop()?.toLowerCase() || 'jpg';
   const baseName = filename.replace(/\.[^/.]+$/, '').replace(/\s+/g, '-');
-  const uniqueFilename = `${folder}/${timestamp}-${rand}-${baseName}.${ext}`;
+  const uniqueFilename = `${tenantFolder(folder)}/${timestamp}-${rand}-${baseName}.${ext}`;
 
   // Upload to Vercel Blob
   const { url } = await put(uniqueFilename, buffer, {
@@ -243,7 +251,7 @@ async function uploadScreenshot(buffer, filename, mimetype) {
   const rand = Math.round(Math.random() * 1e9);
   const ext = filename.split('.').pop()?.toLowerCase() || 'jpg';
   const baseName = filename.replace(/\.[^/.]+$/, '').replace(/\s+/g, '-');
-  const uniqueFilename = `screenshots/${timestamp}-${rand}-${baseName}.${ext}`;
+  const uniqueFilename = `${tenantFolder('screenshots')}/${timestamp}-${rand}-${baseName}.${ext}`;
 
   // Upload to Vercel Blob
   const { url } = await put(uniqueFilename, buffer, {

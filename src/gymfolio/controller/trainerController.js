@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Trainer = require('../models/trainerModel');
+const { checkLimit } = require('../../platform/planLimits');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -259,6 +260,10 @@ const createTrainer = async (req, res) => {
       userId: normaliseUserId(userId),
       order: order ? parseInt(order) : undefined
     };
+
+    // The gym's platform plan may cap how many trainers it can list.
+    const limit = await checkLimit('trainers');
+    if (!limit.ok) return res.status(403).json({ success: false, message: limit.message, code: limit.code });
 
     const trainer = new Trainer(trainerData);
     await trainer.save();

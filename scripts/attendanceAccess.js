@@ -17,6 +17,7 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs, stripGymArg } = require('./lib/tenantScript');
 
 const User = require('../src/models/user');
 const DesktopToken = require('../src/attendance/models/desktopTokenModel');
@@ -52,10 +53,13 @@ function describe(user) {
 }
 
 (async () => {
-  const [command, ...args] = process.argv.slice(2);
+  // `--gym <slug>` is consumed by the tenant helper, not by this parser.
+  const [command, ...args] = stripGymArg(process.argv.slice(2));
   if (!command || command === 'help' || command === '--help') usage();
 
   await mongoose.connect(process.env.MONGO_URI);
+  // Every gym has its own database: --gym <slug> picks which one.
+  enterContext(await resolveGymContextFromArgs());
 
   try {
     if (command === 'list') {

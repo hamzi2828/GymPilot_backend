@@ -17,6 +17,7 @@
 // subtractions.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const CATEGORIES = [
   'cardio',
@@ -127,4 +128,4 @@ assetSchema.statics.CATEGORIES = CATEGORIES;
 assetSchema.statics.CATEGORY_LABELS = CATEGORY_LABELS;
 assetSchema.statics.DEFAULT_LIFE_YEARS = DEFAULT_LIFE_YEARS;
 
-module.exports = mongoose.models.Asset || mongoose.model('Asset', assetSchema);
+module.exports = tenantModel('Asset', assetSchema);

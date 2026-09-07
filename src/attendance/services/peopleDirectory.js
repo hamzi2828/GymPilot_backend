@@ -144,7 +144,9 @@ async function membershipFor(user) {
       order.status !== 'cancelled' &&
       order.subscription &&
       order.subscription.endDate &&
-      new Date(order.subscription.endDate) >= now
+      new Date(order.subscription.endDate) >= now &&
+      // A pack with nothing left on it is not a live membership.
+      !(order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total)
   );
 
   const chosen = live || paidOrders[0];
@@ -158,12 +160,17 @@ async function membershipFor(user) {
     ? Math.ceil((endDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
     : null;
 
+  const sessionsLeft =
+    chosen.sessions && chosen.sessions.total > 0 ? Math.max(0, chosen.sessions.total - (chosen.sessions.used || 0)) : null;
+
   return {
-    status: live ? 'active' : 'expired',
+    // frozen and past_due are reported as such so the desk can say so.
+    status: live ? (chosen.status === 'frozen' ? 'frozen' : chosen.status === 'past_due' ? 'past_due' : 'active') : 'expired',
     orderId: chosen._id,
     packageName: (chosen.packageDetails && chosen.packageDetails.name) || 'Membership',
     endDate,
-    daysLeft
+    daysLeft,
+    sessionsLeft
   };
 }
 
@@ -302,7 +309,20 @@ async function resolvePerson(personType, personId) {
   return null;
 }
 
+/**
+ * The one person whose member or staff code matches exactly. Case does not
+ * matter; a search that merely contains the code does not count.
+ */
+async function findByCode(code) {
+  const clean = String(code || '').trim();
+  if (!clean) return null;
+  const { members, staff } = await listPeople({ q: clean, limit: 25 });
+  const wanted = clean.toLowerCase();
+  return [...members, ...staff].find((person) => String(person.code || '').toLowerCase() === wanted) || null;
+}
+
 module.exports = {
+  findByCode,
   fullName,
   ensureMemberCode,
   ensureStaffCode,

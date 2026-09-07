@@ -14,6 +14,7 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 
 const Expense = require('../src/accounts/models/expenseModel');
 const Asset = require('../src/accounts/models/assetModel');
@@ -339,6 +340,8 @@ async function reset() {
 async function main() {
   const args = process.argv.slice(2);
   await connect();
+  // Every gym has its own database: --gym <slug> picks which one.
+  enterContext(await resolveGymContextFromArgs());
 
   if (args.includes('--reset')) {
     await reset();

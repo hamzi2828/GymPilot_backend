@@ -3,6 +3,7 @@
 const Settings = require('../models/settings');
 const fs = require('fs').promises;
 const path = require('path');
+const { localUploadPath } = require('../helper/upload');
 
 // Secrets are stored so the admin UI can manage them, but they must never be
 // echoed back in full: a masked preview is enough to confirm what is saved.
@@ -123,6 +124,15 @@ const settingsController = {
       const settings = await Settings.getSettings();
       const data = sanitizeSettings(settings);
 
+      // Platform-level facts about this gym that the settings screen shows
+      // and edits alongside the gym's own settings.
+      const { currentTenant } = require('../platform/tenantContext');
+      const gym = currentTenant();
+      data.ianaTimezone = (gym && gym.locale && gym.locale.timezone) || process.env.ATTENDANCE_TIMEZONE || 'UTC';
+      data.gymSlug = gym ? gym.slug : null;
+      const apiBase = `${req.protocol}://${req.get('host')}`;
+      data.stripeWebhookUrl = gym ? `${apiBase}/api/gymfolio/payment/webhook/${gym.slug}` : `${apiBase}/api/gymfolio/payment/webhook`;
+
       return res.status(200).json({
         success: true,
         message: 'Settings retrieved successfully',
@@ -169,11 +179,57 @@ const settingsController = {
         tiktokUrl,
         theme,
         stripe,
-        smtp
+        smtp,
+        invoice,
+        membership,
+        ianaTimezone,
+        setupCompleted
       } = req.body;
 
       // Prepare update data with only provided fields
       const updateData = {};
+
+      // The gym's clock lives on its platform record (every gym has its own),
+      // edited here so the owner does not need the platform panel for it.
+      let timezoneChanged = false;
+      if (ianaTimezone !== undefined) {
+        const tz = String(ianaTimezone || '').trim();
+        try {
+          new Intl.DateTimeFormat('en-GB', { timeZone: tz });
+        } catch {
+          return res.status(400).json({ success: false, message: `"${tz}" is not a valid timezone (use an IANA name such as Europe/London)` });
+        }
+        const { currentTenant } = require('../platform/tenantContext');
+        const gym = currentTenant();
+        if (gym) {
+          const Gym = require('../platform/models/gymModel');
+          const { invalidateTenantCache } = require('../platform/middleware/resolveTenant');
+          await Gym.updateOne({ _id: gym._id }, { $set: { 'locale.timezone': tz } });
+          invalidateTenantCache();
+          gym.locale = { ...(gym.locale || {}), timezone: tz };
+          timezoneChanged = true;
+        }
+      }
+
+      if (setupCompleted !== undefined) {
+        updateData.setupCompletedAt = setupCompleted ? new Date() : null;
+      }
+
+      if (invoice && typeof invoice === 'object') {
+        updateData.invoice = {
+          prefix: String(invoice.prefix || 'INV').trim().toUpperCase() || 'INV',
+          taxLabel: String(invoice.taxLabel || 'Tax').trim() || 'Tax',
+          taxNumber: String(invoice.taxNumber || '').trim(),
+          footerNote: String(invoice.footerNote || '').trim()
+        };
+      }
+      if (membership && typeof membership === 'object') {
+        updateData.membership = {
+          allowMemberFreeze: membership.allowMemberFreeze !== undefined ? Boolean(membership.allowMemberFreeze) : true,
+          maxFreezeDays: Math.max(1, parseInt(membership.maxFreezeDays, 10) || 30),
+          allowMemberCancel: membership.allowMemberCancel !== undefined ? Boolean(membership.allowMemberCancel) : true
+        };
+      }
 
       // Update only provided fields
       if (theme !== undefined) updateData.theme = String(theme).trim();
@@ -225,8 +281,28 @@ const settingsController = {
       if (emailNotifications !== undefined) updateData.emailNotifications = Boolean(emailNotifications);
       if (marketingEmails !== undefined) updateData.marketingEmails = Boolean(marketingEmails);
       if (securityAlerts !== undefined) updateData.securityAlerts = Boolean(securityAlerts);
-      if (twoFactorAuth !== undefined) updateData.twoFactorAuth = Boolean(twoFactorAuth);
-      if (currency !== undefined) updateData.currency = currency;
+      if (twoFactorAuth !== undefined) {
+        // Requiring an emailed code for every staff sign-in is only safe once
+        // email provably works; otherwise the whole staff is locked out.
+        if (Boolean(twoFactorAuth)) {
+          const { verifyConnection } = require('../services/emailService');
+          const smtp = await verifyConnection();
+          if (!smtp.ok) {
+            return res.status(409).json({
+              success: false,
+              message: `Fix outgoing email before requiring two-factor sign-in (SMTP check failed: ${smtp.error}).`
+            });
+          }
+        }
+        updateData.twoFactorAuth = Boolean(twoFactorAuth);
+      }
+      if (currency !== undefined) {
+        const code = String(currency || '').toUpperCase().trim();
+        if (!/^[A-Z]{3}$/.test(code)) {
+          return res.status(400).json({ success: false, message: 'Currency must be a 3-letter ISO code such as USD, GBP or PKR' });
+        }
+        updateData.currency = code;
+      }
       if (taxRate !== undefined) updateData.taxRate = Number(taxRate);
       if (topSliderText !== undefined) updateData.topSliderText = topSliderText.trim();
       if (logoWidth !== undefined) updateData.logoWidth = Number(logoWidth);
@@ -250,6 +326,10 @@ const settingsController = {
 
       // Ensure we have some data to update
       if (Object.keys(updateData).length === 0) {
+        if (timezoneChanged) {
+          const settings = await Settings.getSettings();
+          return res.status(200).json({ success: true, message: 'Settings updated successfully', data: sanitizeSettings(settings) });
+        }
         return res.status(400).json({
           success: false,
           message: 'No valid fields provided for update'
@@ -332,7 +412,8 @@ const settingsController = {
       // Remove old logo file if it exists and is not the default
       if (oldLogoUrl && oldLogoUrl !== '/images/logo.png' && oldLogoUrl.startsWith('/uploads/')) {
         try {
-          const oldLogoPath = path.join(__dirname, '../../uploads', path.basename(oldLogoUrl));
+          const oldLogoPath = localUploadPath(oldLogoUrl);
+          if (!oldLogoPath) throw new Error('not inside the uploads directory');
           await fs.access(oldLogoPath); // Check if file exists
           await fs.unlink(oldLogoPath); // Delete old logo
           console.log('Old logo deleted:', oldLogoPath);
@@ -403,7 +484,8 @@ const settingsController = {
 
       if (oldFooterLogoUrl && oldFooterLogoUrl.startsWith('/uploads/')) {
         try {
-          const oldLogoPath = path.join(__dirname, '../../uploads', path.basename(oldFooterLogoUrl));
+          const oldLogoPath = localUploadPath(oldFooterLogoUrl);
+          if (!oldLogoPath) throw new Error('not inside the uploads directory');
           await fs.access(oldLogoPath);
           await fs.unlink(oldLogoPath);
         } catch (err) {
@@ -439,7 +521,8 @@ const settingsController = {
 
       if (currentFooterLogoUrl && currentFooterLogoUrl.startsWith('/uploads/')) {
         try {
-          const logoPath = path.join(__dirname, '../../uploads', path.basename(currentFooterLogoUrl));
+          const logoPath = localUploadPath(currentFooterLogoUrl);
+          if (!logoPath) throw new Error('not inside the uploads directory');
           await fs.access(logoPath);
           await fs.unlink(logoPath);
         } catch (err) {
@@ -476,7 +559,8 @@ const settingsController = {
       // Remove current logo file if it's uploaded (not default)
       if (currentLogoUrl && currentLogoUrl !== defaultLogoUrl && currentLogoUrl.startsWith('/uploads/')) {
         try {
-          const logoPath = path.join(__dirname, '../../uploads', path.basename(currentLogoUrl));
+          const logoPath = localUploadPath(currentLogoUrl);
+          if (!logoPath) throw new Error('not inside the uploads directory');
           await fs.access(logoPath); // Check if file exists
           await fs.unlink(logoPath); // Delete logo
           console.log('Logo file deleted:', logoPath);
@@ -536,7 +620,8 @@ const settingsController = {
       // Remove uploaded logo if exists
       if (currentLogoUrl && currentLogoUrl !== '/images/logo.png' && currentLogoUrl.startsWith('/uploads/')) {
         try {
-          const logoPath = path.join(__dirname, '../../uploads', path.basename(currentLogoUrl));
+          const logoPath = localUploadPath(currentLogoUrl);
+          if (!logoPath) throw new Error('not inside the uploads directory');
           await fs.access(logoPath);
           await fs.unlink(logoPath);
           console.log('Uploaded logo deleted during reset:', logoPath);

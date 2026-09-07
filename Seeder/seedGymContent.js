@@ -14,6 +14,7 @@
  */
 require('dotenv').config();
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 
 const HeroSlide = require('../src/models/heroSlideModel');
 const Trainer = require('../src/gymfolio/models/trainerModel');
@@ -343,6 +344,8 @@ async function run() {
 
   await mongoose.connect(process.env.MONGO_URI);
   console.log('Connected to', mongoose.connection.name);
+  // Every gym has its own database: --gym <slug> picks which one.
+  enterContext(await resolveGymContextFromArgs());
 
   const report = [];
 

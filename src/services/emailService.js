@@ -1,10 +1,11 @@
 const nodemailer = require('nodemailer');
 
-// Create reusable transporter
-let transporter = null;
-// Fingerprint of the config the cached transporter was built from, so a
-// credential change in the admin panel takes effect without a redeploy.
-let transporterKey = null;
+// Reusable transporters, one per distinct SMTP configuration. Keyed by a
+// fingerprint of the config rather than by gym, so a credential change in a
+// gym's admin panel takes effect without a redeploy, and gyms that share
+// nothing do not keep rebuilding each other's transport.
+const transporters = new Map(); // config fingerprint -> transporter
+const MAX_TRANSPORTERS = 100;
 
 /**
  * Resolves SMTP config, preferring the admin-managed settings document and
@@ -48,7 +49,8 @@ async function initTransporter() {
   const cfg = await resolveSmtpConfig();
   const key = `${cfg.host}|${cfg.port}|${cfg.secure}|${cfg.user}|${cfg.pass}`;
 
-  if (transporter && transporterKey === key) return { transport: transporter, cfg };
+  let transporter = transporters.get(key);
+  if (transporter) return { transport: transporter, cfg };
 
   transporter = nodemailer.createTransport({
     host: cfg.host,
@@ -56,7 +58,13 @@ async function initTransporter() {
     secure: cfg.secure,
     auth: { user: cfg.user, pass: cfg.pass },
   });
-  transporterKey = key;
+
+  // Bounded: drop the oldest entry rather than grow with every config ever
+  // seen on a long-lived process.
+  if (transporters.size >= MAX_TRANSPORTERS) {
+    transporters.delete(transporters.keys().next().value);
+  }
+  transporters.set(key, transporter);
 
   return { transport: transporter, cfg };
 }
@@ -68,7 +76,7 @@ async function initTransporter() {
  * @param {string} html - Email HTML content
  * @returns {Promise<object>} - Send result
  */
-async function sendEmail(to, subject, html) {
+async function sendEmail(to, subject, html, options = {}) {
   try {
     const { transport, cfg } = await initTransporter();
 
@@ -76,7 +84,9 @@ async function sendEmail(to, subject, html) {
       from: cfg.from || `"${process.env.SITE_NAME || 'GymPilot'}" <${cfg.user}>`,
       to,
       subject,
-      html
+      html,
+      // e.g. an invoice PDF: [{ filename, content (Buffer), contentType }]
+      ...(Array.isArray(options.attachments) && options.attachments.length ? { attachments: options.attachments } : {})
     };
 
     const result = await transport.sendMail(mailOptions);

@@ -21,6 +21,7 @@
 // when a slot is removed outright.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -222,4 +223,4 @@ classBookingSchema.statics.promoteFromWaitlist = async function (classId, sessio
 };
 
 module.exports =
-  mongoose.models.ClassBooking || mongoose.model('ClassBooking', classBookingSchema);
+  tenantModel('ClassBooking', classBookingSchema);

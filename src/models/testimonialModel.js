@@ -4,6 +4,7 @@
 // from the admin panel (create / edit / reorder / toggle).
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const testimonialSchema = new mongoose.Schema(
   {
@@ -69,4 +70,4 @@ testimonialSchema.pre('save', async function (next) {
   next();
 });
 
-module.exports = mongoose.model('Testimonial', testimonialSchema);
+module.exports = tenantModel('Testimonial', testimonialSchema);

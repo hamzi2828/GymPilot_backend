@@ -134,7 +134,10 @@ function bucketKeyFor(date, grain) {
 // Currency
 // ---------------------------------------------------------------------------
 
-let currencyCache = { at: 0, value: null };
+const { tenantKey } = require('../../platform/tenantContext');
+
+// Per gym: each reports in its own currency.
+const currencyCaches = new Map(); // tenantKey -> { at, value }
 
 // Which currency to report in.
 //
@@ -146,6 +149,8 @@ let currencyCache = { at: 0, value: null };
 // see currencyNotice(), which the screens render as a banner pointing at the
 // setting that needs fixing.
 async function resolveCurrency() {
+  const cacheKey = tenantKey();
+  const currencyCache = currencyCaches.get(cacheKey) || { at: 0, value: null };
   if (currencyCache.value && Date.now() - currencyCache.at < 60000) return currencyCache.value;
 
   const [settings, byCurrency] = await Promise.all([
@@ -176,7 +181,7 @@ async function resolveCurrency() {
     mismatch: !!dominant && !configuredHasMoney && dominant !== configured
   };
 
-  currencyCache = { at: Date.now(), value };
+  currencyCaches.set(cacheKey, { at: Date.now(), value });
   return value;
 }
 

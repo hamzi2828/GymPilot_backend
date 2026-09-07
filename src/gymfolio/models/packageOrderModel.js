@@ -1,6 +1,7 @@
 // packageOrderModel.js - Package Order Model for Gymfolio Package Subscriptions
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const packageOrderSchema = new mongoose.Schema(
   {
@@ -25,7 +26,20 @@ const packageOrderSchema = new mongoose.Schema(
       price: { type: String, required: true },
       currency: { type: String, required: true },
       period: { type: String, required: true },
-      features: [String]
+      features: [String],
+      // Snapshot of the package's shape at the time of sale (see
+      // membershipService.packageSnapshot). Older orders have none of these
+      // and are treated as plain memberships.
+      kind: { type: String, default: 'membership' },
+      durationDays: { type: Number, default: 0 },
+      sessions: { type: Number, default: 0 },
+      joiningFee: { type: Number, default: 0 },
+      billing: {
+        mode: { type: String, default: 'one_time' },
+        interval: { type: String, default: 'month' },
+        intervalCount: { type: Number, default: 1 },
+        trialDays: { type: Number, default: 0 }
+      }
     },
     // Who the membership is for. Name and email are required because an order
     // that identifies nobody is not an order.
@@ -72,7 +86,30 @@ const packageOrderSchema = new mongoose.Schema(
         default: 'pending'
       },
       paidAt: Date,
-      transactionId: String
+      transactionId: String,
+
+      // ---- Discounts ----
+      subtotal: { type: Number, default: null },        // list price (+ joining fee) before discount
+      discountAmount: { type: Number, default: 0 },
+      discountNote: { type: String, default: '' },      // e.g. credit for unused days on an upgrade
+      couponCode: { type: String, default: '' },
+      couponRedeemed: { type: Boolean, default: false },
+
+      // ---- Stripe subscriptions ----
+      stripeSubscriptionId: { type: String, default: null, index: true },
+      stripeInvoiceId: { type: String, default: null },
+      lastPaymentError: { type: String, default: '' },
+
+      // ---- Bank transfer: the receipt the member sent and what staff did with it ----
+      proof: {
+        url: { type: String, default: '' },
+        note: { type: String, default: '' },
+        reference: { type: String, default: '' },
+        uploadedAt: { type: Date, default: null },
+        reviewedAt: { type: Date, default: null },
+        reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+        rejectionReason: { type: String, default: '' }
+      }
     },
     subscription: {
       startDate: Date,
@@ -85,14 +122,97 @@ const packageOrderSchema = new mongoose.Schema(
         type: Boolean,
         default: false
       },
-      renewalDate: Date
+      renewalDate: Date,
+      // Set when the member (or Stripe) has said "do not renew": access runs
+      // to endDate, then the expiry job closes it.
+      cancelAtPeriodEnd: { type: Boolean, default: false },
+      stripeStatus: { type: String, default: '' },
+      renewals: {
+        type: [
+          new mongoose.Schema(
+            {
+              at: Date,
+              amount: Number,
+              currency: String,
+              invoiceId: String,
+              periodEnd: Date
+            },
+            { _id: false }
+          )
+        ],
+        default: []
+      }
     },
     status: {
       type: String,
-      enum: ['pending', 'active', 'expired', 'cancelled', 'suspended'],
+      // frozen: paused by the member or staff, end date pushed out.
+      // past_due: a Stripe renewal failed; Stripe is retrying.
+      enum: ['pending', 'active', 'expired', 'cancelled', 'suspended', 'frozen', 'past_due'],
       default: 'pending'
     },
     notes: String,
+
+    // ---- Lifecycle ----
+    freeze: {
+      isFrozen: { type: Boolean, default: false },
+      frozenAt: { type: Date, default: null },
+      resumeAt: { type: Date, default: null },
+      reason: { type: String, default: '' },
+      totalFrozenDays: { type: Number, default: 0 },
+      history: {
+        type: [
+          new mongoose.Schema(
+            {
+              from: Date,
+              to: Date,
+              days: Number,
+              reason: String,
+              by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+              resumedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+              source: String
+            },
+            { _id: false }
+          )
+        ],
+        default: []
+      }
+    },
+    cancellation: {
+      cancelledAt: { type: Date, default: null },
+      reason: { type: String, default: '' },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      source: { type: String, default: '' },  // member | staff | stripe
+      immediate: { type: Boolean, default: false },
+      resumedAt: { type: Date, default: null }
+    },
+    // Session packs: how many are on it and how many have been used.
+    sessions: {
+      total: { type: Number, default: 0 },
+      used: { type: Number, default: 0 },
+      exhaustedAt: { type: Date, default: null },
+      log: {
+        type: [
+          new mongoose.Schema(
+            { at: Date, by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, note: String },
+            { _id: false }
+          )
+        ],
+        default: []
+      }
+    },
+    // The order this one renewed or replaced.
+    renewedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageOrder', default: null },
+    // Issued once the order is paid; see services/invoiceService.js.
+    invoice: {
+      number: { type: String, default: null, index: true },
+      issuedAt: { type: Date, default: null },
+      taxRate: { type: Number, default: 0 },
+      taxLabel: { type: String, default: 'Tax' },
+      taxAmount: { type: Number, default: 0 },
+      subtotal: { type: Number, default: 0 },
+      total: { type: Number, default: 0 },
+      currency: { type: String, default: '' }
+    },
 
     // Which expiry notices have already gone out for this membership, as the
     // day-counts they were sent for ([14, 7, 1]).
@@ -170,32 +290,31 @@ packageOrderSchema.methods.isSubscriptionActive = function() {
   return this.payment.status === 'paid' && this.status === 'active';
 };
 
-// Method to activate subscription
-packageOrderSchema.methods.activateSubscription = async function() {
+// Method to activate subscription.
+//
+// Kept for the callers that always used it; the dates now come from the
+// membership service so a renewal bought early starts when the current term
+// ends, and packs/passes honour their explicit duration.
+packageOrderSchema.methods.activateSubscription = async function(options = {}) {
+  const service = require('../services/membershipService');
+  const now = new Date();
+  const start = options.startDate
+    ? new Date(options.startDate)
+    : await service.startDateFor({
+        userId: this.userId,
+        email: this.customerInfo && this.customerInfo.email,
+        kind: (this.packageDetails && this.packageDetails.kind) || 'membership',
+        now
+      });
   this.subscription.isActive = true;
-  this.subscription.startDate = new Date();
-
-  // Calculate end date based on package period
-  const period = this.packageDetails.period.toLowerCase();
-  const endDate = new Date();
-
-  if (period.includes('month')) {
-    const months = parseInt(period) || 1;
-    endDate.setMonth(endDate.getMonth() + months);
-  } else if (period.includes('year')) {
-    const years = parseInt(period) || 1;
-    endDate.setFullYear(endDate.getFullYear() + years);
-  } else {
-    // Default to 30 days
-    endDate.setDate(endDate.getDate() + 30);
-  }
-
-  this.subscription.endDate = endDate;
+  this.subscription.startDate = start;
+  this.subscription.endDate = options.endDate ? new Date(options.endDate) : service.termEnd(start, this.packageDetails || {});
+  this.subscription.renewalDate = this.subscription.endDate;
   this.status = 'active';
 
   await this.save();
 };
 
-const PackageOrder = mongoose.model('PackageOrder', packageOrderSchema);
+const PackageOrder = tenantModel('PackageOrder', packageOrderSchema);
 
 module.exports = PackageOrder;

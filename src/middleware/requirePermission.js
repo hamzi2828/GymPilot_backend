@@ -14,8 +14,30 @@
 // Must be mounted AFTER `auth`, which puts the JWT on req.user.
 
 const User = require('../models/user');
+const AdminAuditLog = require('../models/adminAuditLogModel');
 const { can, ADMIN_SLUG } = require('../services/roleService');
 const { isTab } = require('../config/permissions');
+
+// Every write that passes the gate is recorded once the response is done.
+// A read is not: the trail is about what changed, not what was looked at.
+function auditAfter(req, res, tab, slug) {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    AdminAuditLog.record({
+      actorId: req.user && req.user.id,
+      actorEmail: (req.user && req.user.email) || '',
+      actorRole: slug,
+      method: req.method,
+      path: req.originalUrl.split('?')[0],
+      tab,
+      status: res.statusCode,
+      body: AdminAuditLog.summariseBody(req.body),
+      ip: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim(),
+      userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
+      durationMs: Date.now() - startedAt
+    });
+  });
+}
 
 const READ_METHODS = ['GET', 'HEAD', 'OPTIONS'];
 
@@ -53,6 +75,7 @@ module.exports = function requirePermission(tab, level) {
 
       req.permissionTab = tab;
       req.roleSlug = slug;
+      if (!READ_METHODS.includes(req.method)) auditAfter(req, res, tab, slug);
       return next();
     } catch (error) {
       return res.status(500).json({ message: 'Permission check failed', error: error.message });

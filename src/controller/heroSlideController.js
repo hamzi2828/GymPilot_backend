@@ -1,6 +1,7 @@
 const HeroSlide = require('../models/heroSlideModel');
 const path = require('path');
 const fs = require('fs');
+const { localUploadPath } = require('../helper/upload');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -206,8 +207,8 @@ const updateSlide = async (req, res) => {
 
         // Delete old image file if it exists and is not the default
         if (oldImagePath && oldImagePath.startsWith('/uploads/')) {
-          const oldFilePath = path.join(__dirname, '../../uploads', path.basename(oldImagePath));
-          if (fs.existsSync(oldFilePath)) {
+          const oldFilePath = localUploadPath(oldImagePath);
+          if (oldFilePath && fs.existsSync(oldFilePath)) {
             fs.unlinkSync(oldFilePath);
           }
         }
@@ -387,8 +388,8 @@ const deleteSlide = async (req, res) => {
     
     // Delete image file if it exists
     if (slide.imageUrl && slide.imageUrl.startsWith('/uploads/')) {
-      const filePath = path.join(__dirname, '../../uploads', path.basename(slide.imageUrl));
-      if (fs.existsSync(filePath)) {
+      const filePath = localUploadPath(slide.imageUrl);
+      if (filePath && fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
     }

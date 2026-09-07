@@ -4,7 +4,7 @@
   "description": "GymPilot - gym management backend (members, memberships, classes, attendance, accounts)",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test \"test/**/*.test.js\"",
     "start": "node index.js",
     "dev": "nodemon index.js",
     "memberships:expire": "node scripts/expireMemberships.js",
@@ -13,7 +13,12 @@
     "seed:trainers": "node Seeder/createTrainers.js",
     "seed:attendance": "node Seeder/createAttendance.js",
     "seed:accounts": "node Seeder/createAccounts.js",
-    "seed:classes": "node Seeder/createGymClasses.js"
+    "seed:classes": "node Seeder/createGymClasses.js",
+    "platform:super-admin": "node scripts/platform/createSuperAdmin.js",
+    "platform:register-existing": "node scripts/platform/registerExistingGym.js",
+    "platform:provision": "node scripts/platform/provisionGym.js",
+    "platform:gyms": "node scripts/platform/listGyms.js",
+    "platform:delete-gym": "node scripts/platform/deleteGym.js"
   },
   "repository": {
     "type": "git",
@@ -40,6 +45,7 @@
     "mongoose": "^8.17.1",
     "multer": "^2.0.2",
     "nodemailer": "^8.0.1",
+    "pdfkit": "^0.15.0",
     "sanitize-html": "^2.17.7",
     "stripe": "^18.5.0"
   },

@@ -1,11 +1,12 @@
 // src/middleware/optionalAuth.js
 const jwt = require('jsonwebtoken');
+const { tenantMismatch, sessionProblem } = require('./auth');
 
 /**
  * Optional authentication middleware
  * Populates req.user if valid token is present, but doesn't fail if no token
  */
-module.exports = function optionalAuth(req, res, next) {
+module.exports = async function optionalAuth(req, res, next) {
   try {
     const authHeader = req.headers['authorization'] || '';
     const token = authHeader.startsWith('Bearer ')
@@ -25,6 +26,14 @@ module.exports = function optionalAuth(req, res, next) {
     }
 
     const decoded = jwt.verify(token, secret);
+
+    // A platform session, or a token issued by a different gym, counts as no
+    // token at all here -- the same as any other token this gym did not issue.
+    if (decoded.scope === 'platform' || tenantMismatch(decoded, req) || (await sessionProblem(decoded))) {
+      req.user = null;
+      return next();
+    }
+
     req.user = decoded;
     return next();
   } catch (err) {

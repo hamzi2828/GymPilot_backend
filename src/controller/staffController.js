@@ -17,9 +17,12 @@ const mongoose = require('mongoose');
 const User = require('../models/user');
 const Role = require('../models/roleModel');
 const Attendance = require('../attendance/models/attendanceModel');
+const Trainer = require('../gymfolio/models/trainerModel');
 const { sendEmail } = require('../services/emailService');
 const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate } = require('../services/roleService');
 const T = require('../attendance/services/timeUtils');
+const { frontendOrigin: tenantOrigin } = require('../platform/tenantContext');
+const { checkLimit } = require('../platform/planLimits');
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'intern', 'casual'];
@@ -136,12 +139,10 @@ function cleanEmployment(input = {}, existing = {}) {
 async function nextStaffCode() {
   const [lastUser, lastTrainer] = await Promise.all([
     User.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) }).sort({ staffCode: -1 }).select('staffCode').lean(),
-    mongoose.models.Trainer
-      ? mongoose.models.Trainer.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) })
-          .sort({ staffCode: -1 })
-          .select('staffCode')
-          .lean()
-      : null
+    Trainer.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) })
+      .sort({ staffCode: -1 })
+      .select('staffCode')
+      .lean()
   ]);
 
   const parse = (row) => {
@@ -356,6 +357,10 @@ module.exports = {
         });
       }
 
+      // The gym's platform plan may cap how many staff accounts it can hold.
+      const limit = await checkLimit('staff');
+      if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+
       const password = generatePassword();
       const hashed = await bcrypt.hash(password, await bcrypt.genSalt(10));
 
@@ -381,7 +386,7 @@ module.exports = {
       let emailError = null;
       try {
         const siteName = process.env.SITE_NAME || 'GymPilot';
-        const loginUrl = `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/authentication`;
+        const loginUrl = `${tenantOrigin()}/authentication`;
         const result = await sendEmail(
           normalisedEmail,
           `Your ${siteName} staff account`,

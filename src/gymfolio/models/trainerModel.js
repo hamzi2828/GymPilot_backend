@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const trainerSchema = new mongoose.Schema({
   name: {
@@ -167,6 +168,6 @@ trainerSchema.statics.getFeaturedTrainers = function(limit = 4) {
     .limit(limit);
 };
 
-const Trainer = mongoose.model('Trainer', trainerSchema);
+const Trainer = tenantModel('Trainer', trainerSchema);
 
 module.exports = Trainer;

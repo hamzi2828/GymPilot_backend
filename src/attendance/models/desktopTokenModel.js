@@ -9,6 +9,7 @@
 // so a database dump does not hand anyone a working session.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 const crypto = require('crypto');
 
 const DEFAULT_TTL_DAYS = 30;
@@ -93,4 +94,4 @@ desktopTokenSchema.statics.revokeAllForUser = function (userId) {
 };
 
 module.exports =
-  mongoose.models.DesktopToken || mongoose.model('DesktopToken', desktopTokenSchema);
+  tenantModel('DesktopToken', desktopTokenSchema);

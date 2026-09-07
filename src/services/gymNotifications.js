@@ -16,15 +16,18 @@
 const Settings = require('../models/settings');
 const { sendEmail } = require('./emailService');
 const t = require('../templates/gymEmails');
+const { tenantKey, frontendOrigin } = require('../platform/tenantContext');
 
 // Settings are read on nearly every notification and change about once a year,
-// so they are cached briefly rather than fetched per email.
+// so they are cached briefly rather than fetched per email. One entry per gym:
+// the name and the links in the footer belong to the gym the email is about.
 const SETTINGS_TTL_MS = 60 * 1000;
-let cached = null;
-let cachedAt = 0;
+const brands = new Map(); // tenantKey -> { at, value }
 
 async function brand() {
-  if (cached && Date.now() - cachedAt < SETTINGS_TTL_MS) return cached;
+  const key = tenantKey();
+  const hit = brands.get(key);
+  if (hit && Date.now() - hit.at < SETTINGS_TTL_MS) return hit.value;
 
   let siteName = process.env.SITE_NAME || 'GymPilot';
   let notificationsOn = true;
@@ -42,9 +45,11 @@ async function brand() {
     // email with a generic name is better than no email.
   }
 
-  const frontend = (process.env.FRONTEND_ORIGIN || 'http://localhost:3000').replace(/\/+$/, '');
+  // The gym's own website, from its registered domain -- never from env,
+  // which would send every gym's members to the first gym's site.
+  const frontend = frontendOrigin();
 
-  cached = {
+  const value = {
     siteName,
     notificationsOn,
     portalUrl: `${frontend}/user-detail?tab=bookings`,
@@ -52,14 +57,13 @@ async function brand() {
     timetableUrl: `${frontend}/timetable`,
     renewUrl: `${frontend}/packages`
   };
-  cachedAt = Date.now();
-  return cached;
+  brands.set(key, { at: Date.now(), value });
+  return value;
 }
 
 /** Clears the settings cache — used by tests and after a settings save. */
 function resetBrandCache() {
-  cached = null;
-  cachedAt = 0;
+  brands.delete(tenantKey());
 }
 
 /**
@@ -67,14 +71,14 @@ function resetBrandCache() {
  * place that checks whether email is switched on, one place that logs, and one
  * place that guarantees a failure cannot propagate.
  */
-async function deliver(to, built, context) {
+async function deliver(to, built, context, options = {}) {
   try {
     if (!to) return { success: false, skipped: 'no address' };
 
     const { notificationsOn } = await brand();
     if (!notificationsOn) return { success: false, skipped: 'email notifications are off' };
 
-    const result = await sendEmail(to, built.subject, built.html);
+    const result = await sendEmail(to, built.subject, built.html, options);
     if (!result.success) {
       console.error(`[notify] ${context} -> ${to} failed:`, result.error);
     }
@@ -182,7 +186,106 @@ async function membershipConfirmed(order, member) {
   });
 
   const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
-  return deliver(to, built, 'membership confirmed');
+
+  // The invoice rides along as a PDF when the order has one. Failing to
+  // render it must not stop the confirmation itself.
+  let attachments;
+  try {
+    if (order.invoice && order.invoice.number) {
+      const { renderInvoicePdf } = require('./invoiceService');
+      attachments = [{ filename: `${order.invoice.number}.pdf`, content: await renderInvoicePdf(order), contentType: 'application/pdf' }];
+    }
+  } catch (error) {
+    console.error('[notify] invoice attachment failed:', error.message);
+  }
+  return deliver(to, built, 'membership confirmed', { attachments });
+}
+
+async function membershipRenewed(order, member) {
+  const b = await brand();
+  const last = order.subscription && order.subscription.renewals && order.subscription.renewals[order.subscription.renewals.length - 1];
+  const built = t.membershipRenewed({
+    firstName: firstNameOf(member) || firstNameOf(order.customerInfo),
+    packageName: order.packageDetails && order.packageDetails.name,
+    endDate: order.subscription && order.subscription.endDate,
+    amount: last ? last.amount : order.payment && order.payment.amount,
+    currency: (last ? last.currency : order.payment && order.payment.currency || '').toUpperCase(),
+    siteName: b.siteName,
+    portalUrl: b.accountUrl
+  });
+  const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
+  return deliver(to, built, 'membership renewed');
+}
+
+async function paymentFailed(order, member) {
+  const b = await brand();
+  const built = t.paymentFailed({
+    firstName: firstNameOf(member) || firstNameOf(order.customerInfo),
+    packageName: order.packageDetails && order.packageDetails.name,
+    endDate: order.subscription && order.subscription.endDate,
+    reason: order.payment && order.payment.lastPaymentError,
+    siteName: b.siteName,
+    portalUrl: `${b.accountUrl}?tab=history`
+  });
+  const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
+  return deliver(to, built, 'payment failed');
+}
+
+async function transferReceived(order, member) {
+  const b = await brand();
+  const built = t.transferReceived({
+    firstName: firstNameOf(member) || firstNameOf(order.customerInfo),
+    packageName: order.packageDetails && order.packageDetails.name,
+    amount: order.payment && order.payment.amount,
+    currency: (order.payment && order.payment.currency || '').toUpperCase(),
+    orderNumber: order.orderNumber,
+    siteName: b.siteName,
+    portalUrl: `${b.accountUrl}?tab=history`
+  });
+  const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
+  return deliver(to, built, 'transfer received');
+}
+
+async function transferRejected(order, member) {
+  const b = await brand();
+  const built = t.transferRejected({
+    firstName: firstNameOf(member) || firstNameOf(order.customerInfo),
+    packageName: order.packageDetails && order.packageDetails.name,
+    reason: order.payment && order.payment.proof && order.payment.proof.rejectionReason,
+    orderNumber: order.orderNumber,
+    siteName: b.siteName,
+    renewUrl: b.renewUrl
+  });
+  const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
+  return deliver(to, built, 'transfer rejected');
+}
+
+async function membershipFrozen(order, member) {
+  const b = await brand();
+  const built = t.membershipFrozen({
+    firstName: firstNameOf(member) || firstNameOf(order.customerInfo),
+    packageName: order.packageDetails && order.packageDetails.name,
+    resumeAt: order.freeze && order.freeze.resumeAt,
+    endDate: order.subscription && order.subscription.endDate,
+    siteName: b.siteName,
+    portalUrl: `${b.accountUrl}?tab=history`
+  });
+  const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
+  return deliver(to, built, 'membership frozen');
+}
+
+async function membershipCancelled(order, member) {
+  const b = await brand();
+  const built = t.membershipCancelled({
+    firstName: firstNameOf(member) || firstNameOf(order.customerInfo),
+    packageName: order.packageDetails && order.packageDetails.name,
+    endDate: order.subscription && order.subscription.endDate,
+    immediate: order.status === 'cancelled',
+    siteName: b.siteName,
+    renewUrl: b.renewUrl
+  });
+  const to = (member && member.email) || (order.customerInfo && order.customerInfo.email);
+  return deliver(to, built, 'membership cancelled');
 }
 
 async function membershipExpiring(order, member, daysLeft) {
@@ -235,5 +338,11 @@ module.exports = {
   membershipConfirmed,
   membershipExpiring,
   membershipExpired,
-  memberWelcome
+  memberWelcome,
+  membershipRenewed,
+  paymentFailed,
+  transferReceived,
+  transferRejected,
+  membershipFrozen,
+  membershipCancelled
 };

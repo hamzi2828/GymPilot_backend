@@ -253,6 +253,80 @@ function classReminder({ firstName, className, date, startTime, endTime, instruc
 
 /* ------------------------------- welcome -------------------------------- */
 
+function membershipRenewed({ firstName, packageName, endDate, amount, currency, siteName = BRAND_FALLBACK, portalUrl }) {
+  const body = [
+    paragraph(`Hi ${escapeHtml(firstName || 'there')}, your membership has renewed.`),
+    detailTable([
+      ['Package', packageName],
+      ['Now runs until', dateLabel(endDate)],
+      ['Charged', amount ? `${currency || ''} ${amount}`.trim() : '']
+    ]),
+    portalUrl ? button(portalUrl, 'Open my account') : ''
+  ].join('');
+  return { subject: `Your ${siteName} membership has renewed`, html: shell(siteName, 'Membership renewed', body) };
+}
+
+function paymentFailed({ firstName, packageName, endDate, reason, siteName = BRAND_FALLBACK, portalUrl }) {
+  const body = [
+    paragraph(`Hi ${escapeHtml(firstName || 'there')}, we could not take the payment for your ${escapeHtml(packageName || 'membership')}.`),
+    callout(escapeHtml(reason || 'The card was declined.'), 'bad'),
+    paragraph(
+      `We will try again over the next few days. To avoid losing access${endDate ? ` after ${escapeHtml(dateLabel(endDate))}` : ''}, please update your card from your account.`
+    ),
+    portalUrl ? button(portalUrl, 'Update my card') : ''
+  ].join('');
+  return { subject: `Action needed: your ${siteName} payment failed`, html: shell(siteName, 'Payment failed', body) };
+}
+
+function transferReceived({ firstName, packageName, amount, currency, orderNumber, siteName = BRAND_FALLBACK, portalUrl }) {
+  const body = [
+    paragraph(`Hi ${escapeHtml(firstName || 'there')}, thanks — we have your bank transfer details and will confirm your membership as soon as the payment is checked.`),
+    detailTable([
+      ['Package', packageName],
+      ['Amount', amount ? `${currency || ''} ${amount}`.trim() : ''],
+      ['Reference', orderNumber]
+    ]),
+    portalUrl ? button(portalUrl, 'View my order') : ''
+  ].join('');
+  return { subject: `We received your transfer details — ${siteName}`, html: shell(siteName, 'Transfer received', body) };
+}
+
+function transferRejected({ firstName, packageName, reason, orderNumber, siteName = BRAND_FALLBACK, renewUrl }) {
+  const body = [
+    paragraph(`Hi ${escapeHtml(firstName || 'there')}, we could not match a bank transfer to your order for ${escapeHtml(packageName || 'a membership')}.`),
+    reason ? callout(escapeHtml(reason), 'bad') : '',
+    paragraph(`Order reference: ${escapeHtml(orderNumber || '')}. If you did send the payment, reply to this email with the transfer receipt and we will look again.`),
+    renewUrl ? button(renewUrl, 'Try again') : ''
+  ].join('');
+  return { subject: `About your ${siteName} payment`, html: shell(siteName, 'Payment not confirmed', body) };
+}
+
+function membershipFrozen({ firstName, packageName, resumeAt, endDate, siteName = BRAND_FALLBACK, portalUrl }) {
+  const body = [
+    paragraph(`Hi ${escapeHtml(firstName || 'there')}, your ${escapeHtml(packageName || 'membership')} is frozen.`),
+    detailTable([
+      ['Resumes on', dateLabel(resumeAt)],
+      ['Now runs until', dateLabel(endDate)]
+    ]),
+    paragraph('The days you are away are added to the end of your membership. You can resume early from your account or at reception.'),
+    portalUrl ? button(portalUrl, 'Open my account') : ''
+  ].join('');
+  return { subject: `Your ${siteName} membership is frozen`, html: shell(siteName, 'Membership frozen', body) };
+}
+
+function membershipCancelled({ firstName, packageName, endDate, immediate, siteName = BRAND_FALLBACK, renewUrl }) {
+  const body = [
+    paragraph(
+      immediate
+        ? `Hi ${escapeHtml(firstName || 'there')}, your ${escapeHtml(packageName || 'membership')} has been cancelled.`
+        : `Hi ${escapeHtml(firstName || 'there')}, your ${escapeHtml(packageName || 'membership')} will not renew. You can keep training until ${escapeHtml(dateLabel(endDate))}.`
+    ),
+    paragraph('Changed your mind? You are always welcome back.'),
+    renewUrl ? button(renewUrl, 'See packages') : ''
+  ].join('');
+  return { subject: `Your ${siteName} membership`, html: shell(siteName, immediate ? 'Membership cancelled' : 'Membership will not renew', body) };
+}
+
 function memberWelcome({ firstName, siteName = BRAND_FALLBACK, portalUrl, timetableUrl }) {
   const body = [
     paragraph(`Welcome ${escapeHtml(firstName || 'aboard')} — your account is ready.`),
@@ -275,6 +349,8 @@ module.exports = {
   // exported for reuse and for tests
   shell,
   escapeHtml,
+  paragraph,
+  button,
   detailTable,
   callout,
   dateLabel,
@@ -287,5 +363,11 @@ module.exports = {
   bookingPromoted,
   bookingCancelled,
   classReminder,
-  memberWelcome
+  memberWelcome,
+  membershipRenewed,
+  paymentFailed,
+  transferReceived,
+  transferRejected,
+  membershipFrozen,
+  membershipCancelled
 };

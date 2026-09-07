@@ -1,5 +1,29 @@
 const Package = require('../models/packageModel');
 
+const KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt_pack'];
+const INTERVALS = ['day', 'week', 'month', 'year'];
+
+// The billing shape of a package from a request body, falling back to what
+// the package already has (on update) or the defaults (on create).
+function billingFields({ kind, billing, durationDays, sessions, joiningFee }, existing = {}) {
+  const current = existing.billing || {};
+  const b = billing && typeof billing === 'object' ? billing : {};
+  const out = {};
+  if (kind !== undefined || !existing.kind) out.kind = KINDS.includes(kind) ? kind : existing.kind || 'membership';
+  if (billing !== undefined || !existing.billing) {
+    out.billing = {
+      mode: b.mode === 'recurring' ? 'recurring' : b.mode === 'one_time' ? 'one_time' : current.mode || 'one_time',
+      interval: INTERVALS.includes(b.interval) ? b.interval : current.interval || 'month',
+      intervalCount: Math.max(1, parseInt(b.intervalCount, 10) || current.intervalCount || 1),
+      trialDays: Math.max(0, parseInt(b.trialDays, 10) || (b.trialDays === undefined ? current.trialDays || 0 : 0))
+    };
+  }
+  if (durationDays !== undefined) out.durationDays = Math.max(0, parseInt(durationDays, 10) || 0);
+  if (sessions !== undefined) out.sessions = Math.max(0, parseInt(sessions, 10) || 0);
+  if (joiningFee !== undefined) out.joiningFee = Math.max(0, Number(joiningFee) || 0);
+  return out;
+}
+
 // Get all active packages (public endpoint)
 const getActivePackages = async (req, res) => {
   try {
@@ -81,7 +105,12 @@ const createPackage = async (req, res) => {
       badge,
       supportingText,
       isActive,
-      order
+      order,
+      kind,
+      billing,
+      durationDays,
+      sessions,
+      joiningFee
     } = req.body;
 
     // Parse features if it's a string
@@ -105,7 +134,8 @@ const createPackage = async (req, res) => {
       badge: badge || undefined,
       supportingText: supportingText || undefined,
       isActive: isActive !== undefined ? isActive === 'true' || isActive === true : true,
-      order: order ? parseInt(order) : undefined
+      order: order ? parseInt(order) : undefined,
+      ...billingFields({ kind, billing, durationDays, sessions, joiningFee })
     };
 
     const package = new Package(packageData);
@@ -149,7 +179,12 @@ const updatePackage = async (req, res) => {
       badge,
       supportingText,
       isActive,
-      order
+      order,
+      kind,
+      billing,
+      durationDays,
+      sessions,
+      joiningFee
     } = req.body;
 
     const package = await Package.findById(id);
@@ -181,7 +216,8 @@ const updatePackage = async (req, res) => {
       badge: badge !== undefined ? badge : package.badge,
       supportingText: supportingText !== undefined ? supportingText : package.supportingText,
       isActive: isActive !== undefined ? (isActive === 'true' || isActive === true) : package.isActive,
-      order: order ? parseInt(order) : package.order
+      order: order ? parseInt(order) : package.order,
+      ...billingFields({ kind, billing, durationDays, sessions, joiningFee }, package)
     };
 
     const updatedPackage = await Package.findByIdAndUpdate(id, updateData, {

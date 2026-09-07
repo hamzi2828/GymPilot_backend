@@ -1,6 +1,7 @@
 // packageRegistrationModel.js - Package Registration Model for GymFolio/Gymwear
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const packageRegistrationSchema = new mongoose.Schema(
   {
@@ -55,6 +56,6 @@ packageRegistrationSchema.index({ platform: 1, createdAt: -1 });
 packageRegistrationSchema.index({ email: 1 });
 packageRegistrationSchema.index({ status: 1 });
 
-const PackageRegistration = mongoose.model('PackageRegistration', packageRegistrationSchema);
+const PackageRegistration = tenantModel('PackageRegistration', packageRegistrationSchema);
 
 module.exports = PackageRegistration;

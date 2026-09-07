@@ -11,6 +11,7 @@
 // for why matching happens there rather than here.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 const crypto = require('crypto');
 
 const ALGORITHM = 'aes-256-gcm';
@@ -19,15 +20,20 @@ const ALGORITHM = 'aes-256-gcm';
 // keeps this closed, not the salt.
 const KEY_SALT = 'gympilot.fingerprint.v1';
 
-let cachedKey = null;
+const { currentTenant } = require('../../platform/tenantContext');
+
+// One derived key per gym, so a template lifted from one gym's database
+// cannot be decrypted with another's. The gym a single-gym deployment
+// defaults to keeps the original derivation: its templates were written
+// with it, and re-keying biometric data in place is not something to do
+// silently in a migration.
+const keys = new Map(); // scope -> Buffer
 
 // Prefers a purpose-made secret, and falls back to JWT_SECRET so a fresh
 // checkout works without extra setup. Set FINGERPRINT_ENCRYPTION_KEY in
 // production: rotating the JWT secret would otherwise make every stored
 // template unreadable.
 function encryptionKey() {
-  if (cachedKey) return cachedKey;
-
   const secret = process.env.FINGERPRINT_ENCRYPTION_KEY || process.env.JWT_SECRET;
   if (!secret) {
     throw new Error(
@@ -35,8 +41,16 @@ function encryptionKey() {
     );
   }
 
-  cachedKey = crypto.scryptSync(secret, KEY_SALT, 32);
-  return cachedKey;
+  const gym = currentTenant();
+  const legacy = !gym || (process.env.DEFAULT_TENANT_SLUG && gym.slug === process.env.DEFAULT_TENANT_SLUG);
+  const scope = legacy ? '__legacy__' : String(gym._id);
+
+  let key = keys.get(scope);
+  if (!key) {
+    key = crypto.scryptSync(secret, legacy ? KEY_SALT : `${KEY_SALT}:${scope}`, 32);
+    keys.set(scope, key);
+  }
+  return key;
 }
 
 function encryptTemplate(base64Template) {
@@ -125,4 +139,4 @@ fingerprintSchema.statics.encryptTemplate = encryptTemplate;
 fingerprintSchema.statics.decryptTemplate = decryptTemplate;
 
 module.exports =
-  mongoose.models.Fingerprint || mongoose.model('Fingerprint', fingerprintSchema);
+  tenantModel('Fingerprint', fingerprintSchema);

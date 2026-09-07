@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const blogHeroSchema = new mongoose.Schema(
   {
@@ -99,4 +100,4 @@ blogHeroSchema.methods.toggleActive = async function() {
   return await this.save();
 };
 
-module.exports = mongoose.model('BlogHero', blogHeroSchema);
+module.exports = tenantModel('BlogHero', blogHeroSchema);

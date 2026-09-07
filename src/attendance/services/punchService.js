@@ -50,7 +50,9 @@ function punchContext(operator, device, method) {
     osUser: device.osUser || '',
     clientApp: device.clientApp || '',
     ip: device.ip || '',
-    method: method === 'manual' ? 'manual' : 'fingerprint'
+    // How the person was identified: a finger on the reader, a staff pick
+    // from the list, a scanned QR code, or a typed member number.
+    method: ['manual', 'qr', 'code', 'fingerprint'].includes(method) ? method : 'fingerprint'
   };
 }
 
@@ -63,8 +65,32 @@ function punchContext(operator, device, method) {
 // face-to-face, so it gets its own amber state between green and red rather
 // than being lumped in with either.
 function membershipVerdict(membership) {
+  if (membership.status === 'frozen') {
+    return {
+      status: 'membership_frozen',
+      label: 'Frozen',
+      warning: 'MEMBERSHIP FROZEN — resume it at the desk before training'
+    };
+  }
+
+  if (membership.status === 'past_due') {
+    return {
+      status: 'membership_past_due',
+      label: 'Payment overdue',
+      warning: 'CARD PAYMENT FAILED — ask the member to update their card'
+    };
+  }
+
   if (membership.status === 'active') {
     const days = membership.daysLeft;
+
+    if (membership.sessionsLeft !== null && membership.sessionsLeft !== undefined) {
+      return {
+        status: membership.sessionsLeft <= 2 ? 'membership_expiring' : 'membership_active',
+        label: `${plural(membership.sessionsLeft, 'session')} left`,
+        warning: membership.sessionsLeft <= 2 ? `${plural(membership.sessionsLeft, 'SESSION').toUpperCase()} LEFT — offer a new pack` : null
+      };
+    }
 
     if (days !== null && days <= EXPIRY_WARNING_DAYS) {
       return {

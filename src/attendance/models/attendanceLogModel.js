@@ -9,6 +9,7 @@
 // a record of every time it did.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 const attendanceLogSchema = new mongoose.Schema(
   {
@@ -74,4 +75,4 @@ attendanceLogSchema.statics.record = function (entry) {
 };
 
 module.exports =
-  mongoose.models.AttendanceLog || mongoose.model('AttendanceLog', attendanceLogSchema);
+  tenantModel('AttendanceLog', attendanceLogSchema);

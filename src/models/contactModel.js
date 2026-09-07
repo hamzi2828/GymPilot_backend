@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const contactSchema = new mongoose.Schema({
   fullName: {
@@ -155,4 +156,4 @@ contactSchema.methods.markResponseSent = function() {
   return this.save();
 };
 
-module.exports = mongoose.model('Contact', contactSchema);
+module.exports = tenantModel('Contact', contactSchema);

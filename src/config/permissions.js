@@ -28,6 +28,7 @@ const PERMISSION_TABS = [
 
   { key: 'package-orders', label: 'Package Orders',  group: 'Sales',     path: '/admin/package-orders' },
   { key: 'registrations',  label: 'Registrations',   group: 'Sales',     path: '/admin/package-registrations' },
+  { key: 'coupons',        label: 'Coupons',         group: 'Sales',     path: '/admin/coupons' },
 
   { key: 'attendance',     label: 'Attendance',      group: 'Operations', path: '/admin/attendance' },
   { key: 'accounts',       label: 'Accounts',        group: 'Operations', path: '/admin/accounts' },
@@ -44,7 +45,8 @@ const PERMISSION_TABS = [
   { key: 'blog-settings',  label: 'Blog Settings',   group: 'Content',   path: '/admin/blog-settings' },
   { key: 'pages',          label: 'Pages',           group: 'Content',   path: '/admin/pages' },
 
-  { key: 'settings',       label: 'Settings',        group: 'System',    path: '/admin/settings' }
+  { key: 'settings',       label: 'Settings',        group: 'System',    path: '/admin/settings' },
+  { key: 'audit',          label: 'Audit log',       group: 'System',    path: '/admin/audit-log' }
 ];
 
 const TAB_KEYS = PERMISSION_TABS.map((tab) => tab.key);

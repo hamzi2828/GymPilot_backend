@@ -7,9 +7,18 @@
 // PREVIOUS day. Filing on the raw UTC date would put those two visits on
 // different rows and make "today's attendance" wrong for five hours a day.
 //
-// So all day/time reasoning goes through here, against ATTENDANCE_TIMEZONE.
+// So all day/time reasoning goes through here, against the gym's timezone.
+//
+// Which is read per call, not once at load: every gym on the platform has
+// its own zone (set on its platform record), and a request for a London gym
+// and a request for a Karachi gym can be in flight in the same process.
+// ATTENDANCE_TIMEZONE remains the fallback for a gym that has none set.
 
-const TIMEZONE = process.env.ATTENDANCE_TIMEZONE || 'Asia/Karachi';
+const { tenantTimezone } = require('../../platform/tenantContext');
+
+function timezone() {
+  return tenantTimezone();
+}
 
 const WEEKDAYS = [
   'Sunday', 'Monday', 'Tuesday', 'Wednesday',
@@ -27,7 +36,7 @@ const MONTHS = [
 // the server's zone.
 function localParts(date = new Date()) {
   const formatter = new Intl.DateTimeFormat('en-GB', {
-    timeZone: TIMEZONE,
+    timeZone: timezone(),
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -137,7 +146,12 @@ function durationLabel(minutes) {
 }
 
 module.exports = {
-  TIMEZONE,
+  // Kept as a property for the callers that report `T.TIMEZONE` in their
+  // responses; a getter so it is the current gym's zone, not a fixed one.
+  get TIMEZONE() {
+    return timezone();
+  },
+  timezone,
   WEEKDAYS,
   localParts,
   dateKey,

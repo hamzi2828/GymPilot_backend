@@ -1,6 +1,7 @@
 // createAdmin.js - Create admin user
 
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const bcrypt = require('bcryptjs');
 const User = require('../src/models/user');
 
@@ -32,6 +33,8 @@ const adminData = {
 async function createAdmin() {
   try {
     await connectDB();
+    // Every gym has its own database: --gym <slug> picks which one.
+    enterContext(await resolveGymContextFromArgs());
     console.log('Creating admin user...\n');
 
     // Check if admin already exists

@@ -7,6 +7,7 @@ const router = express.Router();
 const auth = require('../../middleware/auth');
 const requirePermission = require('../../middleware/requirePermission');
 const optionalAuth = require('../../middleware/optionalAuth');
+const { tenantFromStripeWebhook, tenantFromSlugParam } = require('../../platform/middleware/tenantFromPayload');
 const { uploadSingle, uploadArray, uploadFields } = require('../../helper/upload');
 
 const gymClassController = require('../controller/gymClassController');
@@ -15,6 +16,8 @@ const trainerController = require('../controller/trainerController');
 const packageController = require('../controller/packageController');
 const packageRegistrationController = require('../controller/packageRegistrationController');
 const gymfolioPaymentController = require('../controller/gymfolioPaymentController');
+const membershipController = require('../controller/membershipController');
+const couponController = require('../controller/couponController');
 
 /* -------------------------------- Gym Classes -------------------------------- */
 router.get('/gym-classes/active', gymClassController.getActiveClasses);
@@ -130,7 +133,23 @@ router.get('/package-registrations/:id', auth, requirePermission('registrations'
 router.put('/package-registrations/:id/status', auth, requirePermission('registrations'), packageRegistrationController.updateRegistrationStatus);
 router.delete('/package-registrations/:id', auth, requirePermission('registrations'), packageRegistrationController.deleteRegistration);
 
+/* --------------------------------- Coupons ---------------------------------- */
+// The public check is what the checkout page calls as the member types a
+// code; it reveals only whether the code works and what it takes off.
+router.post('/coupons/validate', optionalAuth, couponController.validate);
+router.get('/coupons', auth, requirePermission('coupons'), couponController.list);
+router.post('/coupons', auth, requirePermission('coupons', 'manage'), couponController.create);
+router.put('/coupons/:id', auth, requirePermission('coupons', 'manage'), couponController.update);
+router.delete('/coupons/:id', auth, requirePermission('coupons', 'manage'), couponController.remove);
+
 /* ------------------------------ Package Payments ----------------------------- */
+// Which ways of paying this gym offers right now (card needs Stripe keys,
+// bank transfer needs at least one bank account on file).
+router.get('/payment/methods', optionalAuth, gymfolioPaymentController.paymentMethods);
+router.get('/payment/banks', membershipController.banks);
+router.post('/payment/bank-transfer', auth, membershipController.createBankTransfer);
+router.get('/membership/rules', membershipController.rules);
+
 router.get('/payments/public-key', gymfolioPaymentController.getPublicKey);
 router.post('/payments/checkout', optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);
 router.post('/payments/verify', optionalAuth, gymfolioPaymentController.verifyPackagePayment);
@@ -146,6 +165,18 @@ router.post('/payment/verify/:sessionId', optionalAuth, gymfolioPaymentControlle
 router.post(
   '/payment/webhook',
   express.raw({ type: 'application/json' }),
+  // Stripe calls the API directly, so the gym is read from the event's
+  // metadata rather than from the request's origin.
+  tenantFromStripeWebhook,
+  gymfolioPaymentController.handleWebhook
+);
+// The per-gym webhook URL: each gym registers
+//   https://<api>/api/gymfolio/payment/webhook/<slug>
+// in its own Stripe dashboard, with its own signing secret in Settings.
+router.post(
+  '/payment/webhook/:slug',
+  express.raw({ type: 'application/json' }),
+  tenantFromSlugParam,
   gymfolioPaymentController.handleWebhook
 );
 
@@ -157,5 +188,25 @@ router.get('/package-orders/:id', auth, gymfolioPaymentController.getOrderById);
 router.put('/package-orders/:id/status', auth, requirePermission('package-orders'), gymfolioPaymentController.updateOrderStatus);
 router.post('/package-orders/:id/cancel-subscription', auth, gymfolioPaymentController.cancelSubscription);
 router.get('/package-orders/:id/subscription-status', auth, gymfolioPaymentController.getSubscriptionStatus);
+
+/* --------------------------- Membership lifecycle --------------------------- */
+//
+// Member-or-staff routes: the handler checks whether the caller owns the
+// order or holds the package-orders permission, and applies the member-side
+// limits (freeze length, whether cancelling online is allowed) accordingly.
+router.post('/package-orders/:id/proof', auth, uploadSingle('proof'), membershipController.submitProof);
+router.post('/package-orders/:id/freeze', auth, membershipController.freeze);
+router.post('/package-orders/:id/unfreeze', auth, membershipController.unfreeze);
+router.post('/package-orders/:id/cancel', auth, membershipController.cancel);
+router.post('/package-orders/:id/resume', auth, membershipController.resume);
+router.post('/package-orders/:id/billing-portal', auth, membershipController.billingPortal);
+router.get('/package-orders/:id/invoice.pdf', auth, membershipController.invoicePdf);
+
+// Staff only.
+router.post('/package-orders/:id/approve', auth, requirePermission('package-orders', 'manage'), membershipController.approve);
+router.post('/package-orders/:id/reject', auth, requirePermission('package-orders', 'manage'), membershipController.reject);
+router.post('/package-orders/:id/renew', auth, requirePermission('package-orders', 'manage'), membershipController.renew);
+router.post('/package-orders/:id/change-package', auth, requirePermission('package-orders', 'manage'), membershipController.changePackage);
+router.post('/package-orders/:id/use-session', auth, requirePermission('package-orders', 'manage'), membershipController.useSession);
 
 module.exports = router;

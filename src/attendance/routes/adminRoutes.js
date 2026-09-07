@@ -23,6 +23,10 @@ const myController = require('../controller/myAttendanceController');
 // be turned into a way to read somebody else's.
 router.get('/me', auth, myController.me);
 
+// The QR code a member shows at the door -- theirs alone, freshly signed
+// each time it is asked for. See services/qrToken.js.
+router.get('/me/qr', auth, myController.qr);
+
 // Both gates on every route BELOW: `auth` only proves the token is valid, not that
 // the account may read the gym's attendance. Everything here is a read, so
 // 'view' on the attendance tab is enough -- which is what lets an accountant

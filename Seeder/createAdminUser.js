@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const bcrypt = require('bcryptjs');
 
 // MongoDB connection
@@ -40,6 +41,8 @@ async function createAdminUser() {
         console.log('Connecting to MongoDB...');
         await mongoose.connect(MONGO_URI);
         console.log('Connected to MongoDB');
+        // Every gym has its own database: --gym <slug> picks which one.
+        enterContext(await resolveGymContextFromArgs());
 
         // Check if admin already exists
         const existingAdmin = await User.findOne({ email: adminUser.email });

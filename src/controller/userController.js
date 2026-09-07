@@ -6,6 +6,9 @@ const User = require('../models/user');
 const { getUserFromToken } = require('../helper/helper');
 const crypto = require('crypto');
 const { sendEmail } = require('../services/emailService');
+const { frontendOrigin: tenantOrigin, currentTenantId, currentTenantSlug } = require('../platform/tenantContext');
+const { checkLimit } = require('../platform/planLimits');
+const { forgetSession } = require('../middleware/auth');
 
 /** Generates a readable but strong temporary password. */
 function generatePassword(length = 14) {
@@ -118,6 +121,10 @@ const userController = {
             });
             const assignedRole = requestedRole ? requestedRole.slug : 'user';
 
+            // The gym's platform plan may cap how many accounts it can hold.
+            const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
+            if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+
             // Generated server-side so a plaintext password is never accepted
             // over the wire or persisted anywhere but the outbound email.
             const password = generatePassword();
@@ -143,7 +150,7 @@ const userController = {
             let emailError = null;
             try {
                 const siteName = process.env.SITE_NAME || 'GymPilot';
-                const loginUrl = `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/authentication`;
+                const loginUrl = `${tenantOrigin()}/authentication`;
                 const result = await sendEmail(
                     normalisedEmail,
                     `Your ${siteName} account`,
@@ -194,6 +201,10 @@ const userController = {
                 return res.status(409).json({ message: 'Email already in use' });
             }
 
+            // The gym's platform plan may cap how many members it can hold.
+            const limit = await checkLimit('members');
+            if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+
             // Hash password
             const salt = await bcrypt.genSalt(10);
             const hashed = await bcrypt.hash(password, salt);
@@ -230,7 +241,10 @@ const userController = {
             const scope = encodeURIComponent('openid email profile');
             const returnUrl = req.query.returnUrl || '/';
             const platformType = req.query.platformType || '';
-            const stateData = JSON.stringify({ returnUrl, platformType });
+            // The gym rides along in `state`: Google sends the callback to the
+            // API's own address, which says nothing about which site started
+            // the sign-in. See platform/middleware/tenantFromPayload.js.
+            const stateData = JSON.stringify({ returnUrl, platformType, tenant: currentTenantSlug() });
             const state = encodeURIComponent(stateData);
             const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}&access_type=offline&include_granted_scopes=true&prompt=consent&state=${state}`;
 
@@ -269,7 +283,7 @@ const userController = {
                 returnUrl = decodeURIComponent(state || '/');
             }
 
-            const frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
+            const frontendOrigin = tenantOrigin();
 
             const oauthClient = new OAuth2Client(clientId, clientSecret, redirectUri);
             const { tokens } = await oauthClient.getToken({ code, redirect_uri: redirectUri });
@@ -332,6 +346,8 @@ const userController = {
                 firstName: user.firstName,
                 lastName: user.lastName,
                 role: user.role,
+                tid: currentTenantId(),
+                tv: user.tokenVersion || 0,
             }, secret, { expiresIn: '7d' });
 
             user.lastLogin = new Date();
@@ -378,13 +394,35 @@ const userController = {
                 return res.status(403).json({ message: 'This account has been deactivated.' });
             }
 
+            // A second step by email for staff when the gym requires it, and
+            // for anyone who switched it on for their own account. The token
+            // is only issued once the code comes back (securityController).
+            const twoFactor = require('../services/twoFactorService');
+            if (await twoFactor.required(user)) {
+                const challenge = await twoFactor.startChallenge(user);
+                if (!challenge.emailed) {
+                    return res.status(503).json({
+                        message: 'We could not email your sign-in code. Please contact the gym.',
+                        error: challenge.error
+                    });
+                }
+                return res.status(200).json({
+                    requires2fa: true,
+                    challengeId: challenge.challengeId,
+                    message: `We emailed a 6-digit code to ${twoFactor.maskEmail(user.email)}.`
+                });
+            }
+
             const payload = {
                 id: user._id,
                 email: user.email,
                 firstName: user.firstName,
                 lastName: user.lastName,
                 role: user.role,
-
+                // Which gym issued this token; checked by middleware/auth so a
+                // session from one gym's site cannot be replayed on another's.
+                tid: currentTenantId(),
+                tv: user.tokenVersion || 0,
             };
 
             const secret = process.env.JWT_SECRET;
@@ -439,7 +477,7 @@ const userController = {
             await user.save();
 
             const siteName = process.env.SITE_NAME || 'GymPilot';
-            const frontend = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
+            const frontend = tenantOrigin();
             const resetUrl =
                 `${frontend}/authentication?mode=reset&token=${encodeURIComponent(token)}` +
                 `&email=${encodeURIComponent(normalisedEmail)}`;
@@ -508,6 +546,9 @@ const userController = {
 
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(password, salt);
+            // Every other session ends with the old password.
+            user.tokenVersion = (user.tokenVersion || 0) + 1;
+            forgetSession(user._id);
 
             // Single use: the token is spent whether or not the same person
             // clicks the link again.
@@ -560,6 +601,10 @@ const userController = {
 
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(newPassword, salt);
+            // Every other session ends with the old password; this one gets
+            // a fresh token from the client signing in again.
+            user.tokenVersion = (user.tokenVersion || 0) + 1;
+            forgetSession(user._id);
             // Any reset link already in their inbox stops working now.
             user.passwordResetTokenHash = null;
             user.passwordResetExpiresAt = null;
@@ -639,6 +684,8 @@ const userController = {
                 firstName: user.firstName,
                 lastName: user.lastName,
                 role: user.role,
+                tid: currentTenantId(),
+                tv: user.tokenVersion || 0,
             };
             const secret = process.env.JWT_SECRET;
             if (!secret) {

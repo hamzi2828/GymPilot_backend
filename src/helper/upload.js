@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const { currentTenant } = require('../platform/tenantContext');
 
 // Configure uploads directory (fallback for local development)
 const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
@@ -52,11 +53,29 @@ const ALLOWED_VIDEO_MIME_TYPES = new Set([
 const MAX_VIDEO_FILE_MB = Number(process.env.UPLOAD_MAX_VIDEO_SIZE_MB || 100);
 const MAX_VIDEO_FILE_BYTES = Math.max(1, MAX_VIDEO_FILE_MB) * 1024 * 1024;
 
+// Each gym's files live in their own sub-folder, named by the gym's slug, so
+// two gyms on one server never see or overwrite each other's uploads. The
+// folder is part of `file.filename`, which is what every controller already
+// turns into the public `/uploads/<filename>` path -- so the URLs they store
+// come out as `/uploads/<slug>/<file>` without any of them changing.
+function tenantUploadFolder(req) {
+  const gym = (req && req.tenant) || currentTenant();
+  return gym && gym.slug ? String(gym.slug) : '';
+}
+
 // Use memory storage for Vercel Blob, disk storage for local
 const storage = USE_BLOB_STORAGE
   ? multer.memoryStorage()
   : multer.diskStorage({
       destination: (req, file, cb) => {
+        const folder = tenantUploadFolder(req);
+        if (folder) {
+          try {
+            fs.mkdirSync(path.join(UPLOADS_DIR, folder), { recursive: true });
+          } catch (e) {
+            return cb(e);
+          }
+        }
         cb(null, UPLOADS_DIR);
       },
       filename: (req, file, cb) => {
@@ -64,7 +83,8 @@ const storage = USE_BLOB_STORAGE
         const rand = Math.round(Math.random() * 1e9);
         const ext = path.extname(file.originalname || '').toLowerCase();
         const base = path.basename((file.originalname || 'file').replace(/\s+/g, '-'), ext);
-        cb(null, `${timestamp}-${rand}-${base}${ext}`);
+        const folder = tenantUploadFolder(req);
+        cb(null, `${folder ? folder + '/' : ''}${timestamp}-${rand}-${base}${ext}`);
       },
     });
 
@@ -89,6 +109,20 @@ const videoUpload = multer({
   limits: { fileSize: MAX_VIDEO_FILE_BYTES },
 });
 
+// CSV imports: always in memory (parsed, never stored), text only, 5 MB.
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: (req, file, cb) => {
+    const ok =
+      /\.csv$/i.test(file.originalname || '') ||
+      ['text/csv', 'application/csv', 'text/plain', 'application/vnd.ms-excel'].includes(file.mimetype);
+    if (ok) return cb(null, true);
+    cb(new Error('Only .csv files are accepted'));
+  },
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
+const csvUploadSingle = (fieldName) => csvUpload.single(fieldName);
+
 // Convenience wrappers
 const uploadSingle = (fieldName) => upload.single(fieldName);
 const uploadArray = (fieldName, maxCount) => upload.array(fieldName, maxCount);
@@ -103,8 +137,22 @@ const videoUploadSingle = (fieldName) => videoUpload.single(fieldName);
 
 // Helper to build public URL path (as served by Express static middleware)
 function toPublicPath(filename) {
-  // Returns a path like '/uploads/<filename>'
-  return `/uploads/${path.basename(filename)}`;
+  // Returns a path like '/uploads/<slug>/<filename>'. The gym folder is part
+  // of the multer filename, so only a leading slash or backslash is trimmed.
+  return `/uploads/${String(filename).replace(/\\/g, '/').replace(/^\/+/, '')}`;
+}
+
+// The absolute path on disk for a stored '/uploads/...' URL, or null when
+// the URL is not one of ours or tries to escape the uploads directory.
+// Every delete of a local upload goes through here: the old
+// path.basename() approach dropped the gym folder and so deleted nothing.
+function localUploadPath(publicUrl) {
+  if (!publicUrl || typeof publicUrl !== 'string' || !publicUrl.startsWith('/uploads/')) return null;
+  const relative = publicUrl.slice('/uploads/'.length).split('?')[0].split('#')[0];
+  if (!relative) return null;
+  const absolute = path.resolve(UPLOADS_DIR, relative);
+  if (absolute !== UPLOADS_DIR && !absolute.startsWith(UPLOADS_DIR + path.sep)) return null;
+  return absolute;
 }
 
 module.exports = {
@@ -115,8 +163,11 @@ module.exports = {
   heroUploadSingle,
   heroUploadFields,
   videoUploadSingle,
+  csvUploadSingle,
   ensureUploadsDir,
   toPublicPath,
+  localUploadPath,
+  tenantUploadFolder,
   UPLOADS_DIR,
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_VIDEO_MIME_TYPES,

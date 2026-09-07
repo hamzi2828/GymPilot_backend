@@ -13,7 +13,8 @@ const heroSlideController = require('../controller/heroSlideController');
 const blogHeroController = require('../controller/blogHeroController');
 const contactController = require('../controller/contactController');
 const optionalAuth = require('../middleware/optionalAuth');
-const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, toPublicPath } = require('../helper/upload');
+const { tenantFromOAuthState } = require('../platform/middleware/tenantFromPayload');
+const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSingle, csvUploadSingle, toPublicPath } = require('../helper/upload');
 
 const {
   loginLimiter,
@@ -40,11 +41,30 @@ router.post('/user/google-login', userController.googleLoginUser);
 router.post('/user/forgot-password', passwordResetLimiter, userController.forgotPassword);
 router.post('/user/reset-password', passwordResetConfirmLimiter, userController.resetPassword);
 router.put('/user/change-password', auth, userController.changePassword);
+
+// ---------------------------------------------------------------------------
+// Account security & data rights -- see controller/securityController.js
+// ---------------------------------------------------------------------------
+const securityController = require('../controller/securityController');
+// Second sign-in step: the emailed code, exchanged for the token.
+router.post('/user/login/2fa', loginLimiter, securityController.verifyTwoFactor);
+router.put('/user/two-factor', auth, securityController.setMyTwoFactor);
+router.post('/user/logout-all', auth, securityController.logoutAll);
+router.put('/user/consents', auth, securityController.setMyConsent);
+router.get('/user/export', auth, securityController.exportMyData);
+router.put('/admin/users/:id/consent', auth, requirePermission('users', 'manage'), securityController.recordConsent);
+router.post('/admin/users/:id/logout-all', auth, requirePermission('users', 'manage'), securityController.forceLogout);
+router.get('/admin/audit-log', auth, requirePermission('audit'), securityController.auditLog);
 router.put('/update/user', auth, userController.updateUser);
 router.delete('/user', auth, userController.deleteUser);
 router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile);
 router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
 router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
+
+// Bulk import from a spreadsheet -- see controller/userImportController.js.
+const userImportController = require('../controller/userImportController');
+router.get('/admin/users/import/template', auth, requirePermission('users'), userImportController.template);
+router.post('/admin/users/import', auth, requirePermission('users', 'manage'), csvUploadSingle('file'), userImportController.importCsv);
 
 // ---------------------------------------------------------------------------
 // Dashboard
@@ -81,7 +101,8 @@ router.delete('/staff/:id', auth, requirePermission('staff', 'manage'), staffCon
 
 // Google OAuth 2.0 redirect flow
 router.get('/auth/google', userController.startGoogleOAuth);
-router.get('/auth/google/callback', userController.googleOAuthCallback);
+// Google calls back to the API's own address; the gym is read from `state`.
+router.get('/auth/google/callback', tenantFromOAuthState, userController.googleOAuthCallback);
 
 // Admin operations by ID
 router.put('/update/status/:id', auth, requirePermission('users'), userController.updateUserStatusById);

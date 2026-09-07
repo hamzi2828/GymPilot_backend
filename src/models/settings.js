@@ -1,6 +1,7 @@
 // src/model/settings.js
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const settingsSchema = new mongoose.Schema(
   {
@@ -84,11 +85,17 @@ const settingsSchema = new mongoose.Schema(
     },
     
     // Billing Settings
+    // Any ISO 4217 code. Gyms run in every currency there is; the old three-
+    // value list is gone.
     currency: {
       type: String,
       default: 'USD',
-      enum: ['USD', 'GBP', 'PKR'],
-      trim: true
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: (value) => /^[A-Z]{3}$/.test(String(value || '')),
+        message: 'Currency must be a 3-letter ISO code such as USD, GBP or PKR'
+      }
     },
     taxRate: {
       type: Number,
@@ -177,6 +184,27 @@ const settingsSchema = new mongoose.Schema(
       fromEmail: { type: String, default: '', trim: true }
     },
 
+    // Invoices. Prices are treated as tax-inclusive; taxRate above says how
+    // much of each payment was tax.
+    invoice: {
+      prefix: { type: String, default: 'INV', trim: true },
+      taxLabel: { type: String, default: 'Tax', trim: true },
+      taxNumber: { type: String, default: '', trim: true },
+      footerNote: { type: String, default: '', trim: true }
+    },
+
+    // Set when the owner has been through the setup wizard (or the gym was
+    // adopted from a pre-platform deployment). Until then the admin panel
+    // points at /admin/setup.
+    setupCompletedAt: { type: Date, default: null },
+
+    // What members may do to their own membership from the portal.
+    membership: {
+      allowMemberFreeze: { type: Boolean, default: true },
+      maxFreezeDays: { type: Number, default: 30, min: 1 },
+      allowMemberCancel: { type: Boolean, default: true }
+    },
+
     // Site colour scheme. Stores a preset key; the frontend maps it to CSS
     // custom properties so the whole site recolours from one value.
     theme: {
@@ -256,4 +284,4 @@ settingsSchema.statics.updateSettings = async function(updateData) {
   return settings;
 };
 
-module.exports = mongoose.model('Settings', settingsSchema);
+module.exports = tenantModel('Settings', settingsSchema);

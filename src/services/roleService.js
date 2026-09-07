@@ -14,6 +14,7 @@
 
 const Role = require('../models/roleModel');
 const { allowAll, fullPermissionMap, grants } = require('../config/permissions');
+const { tenantKey } = require('../platform/tenantContext');
 
 const ADMIN_SLUG = 'admin';
 const MEMBER_SLUG = 'user';
@@ -22,20 +23,24 @@ const MEMBER_SLUG = 'user';
 // enough to collapse the burst of calls one admin page makes.
 const CACHE_TTL_MS = 15000;
 
-let cache = { at: 0, bySlug: new Map() };
+// One cache per gym: every gym has its own roles in its own database, and a
+// Manager in one gym must never be read as a Manager in another.
+const caches = new Map(); // tenantKey -> { at, bySlug }
 
 function invalidate() {
-  cache = { at: 0, bySlug: new Map() };
+  caches.delete(tenantKey());
 }
 
 async function loadRoles() {
-  if (cache.at && Date.now() - cache.at < CACHE_TTL_MS) return cache.bySlug;
+  const key = tenantKey();
+  const cache = caches.get(key);
+  if (cache && cache.at && Date.now() - cache.at < CACHE_TTL_MS) return cache.bySlug;
 
   const roles = await Role.find({ isActive: true }).lean();
   const bySlug = new Map();
   for (const role of roles) bySlug.set(role.slug, role);
 
-  cache = { at: Date.now(), bySlug };
+  caches.set(key, { at: Date.now(), bySlug });
   return bySlug;
 }
 
@@ -74,6 +79,7 @@ const DEFAULT_ROLES = [
       packages: 'manage',
       'package-orders': 'manage',
       registrations: 'manage',
+      coupons: 'manage',
       attendance: 'manage',
       accounts: 'manage',
       staff: 'manage',
@@ -85,7 +91,8 @@ const DEFAULT_ROLES = [
       testimonials: 'manage',
       blogs: 'manage',
       'blog-settings': 'view',
-      settings: 'view'
+      settings: 'view',
+      audit: 'view'
     })
   },
   {
@@ -101,6 +108,7 @@ const DEFAULT_ROLES = [
       packages: 'view',
       'package-orders': 'manage',
       registrations: 'manage',
+      coupons: 'view',
       attendance: 'manage',
       users: 'manage',
       'contact-queries': 'manage'

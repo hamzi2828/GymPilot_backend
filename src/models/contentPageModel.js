@@ -19,6 +19,7 @@
 // renamed out from under the URL that links to it.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 // The pages the frontend has routes for. Adding one here is not enough on its
 // own -- it needs a route too -- but it stops an admin inventing a slug that
@@ -107,4 +108,4 @@ contentPageSchema.statics.publicBySlug = function (slug) {
 };
 
 module.exports =
-  mongoose.models.ContentPage || mongoose.model('ContentPage', contentPageSchema);
+  tenantModel('ContentPage', contentPageSchema);

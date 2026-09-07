@@ -1,6 +1,7 @@
 //src/model/user.js
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 // Address sub-schema
 const addressSchema = new mongoose.Schema({
@@ -140,6 +141,38 @@ const userSchema = new mongoose.Schema({
     role: { type: String, default: 'user', trim: true, lowercase: true, index: true },
     isActive: { type: Boolean, default: true },
     lastLogin: { type: Date, default: null },
+
+    // ---- Sessions & security -------------------------------------------
+    //
+    // Bumped to end every session issued before it: a password change,
+    // "sign out everywhere", or staff forcing an account out. Carried in
+    // the JWT as `tv` and compared by middleware/auth on each request.
+    tokenVersion: { type: Number, default: 0 },
+
+    // Email code at sign-in. `pending` is the challenge in flight; the hash
+    // is never returned by a query that does not ask for it.
+    twoFactor: {
+      enabled: { type: Boolean, default: false },
+      pending: {
+        challengeId: { type: String, default: null, index: true },
+        codeHash: { type: String, default: null, select: false },
+        expiresAt: { type: Date, default: null },
+        attempts: { type: Number, default: 0 }
+      }
+    },
+
+    // What the person has agreed to. Fingerprint templates are biometric
+    // data; none are stored without this being true, and withdrawing it
+    // deletes them.
+    consents: {
+      biometric: {
+        given: { type: Boolean, default: false },
+        at: { type: Date, default: null },
+        source: { type: String, default: '' },      // portal | desk | admin
+        recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+        version: { type: String, default: '' }
+      }
+    },
     addresses: [addressSchema],
     affiliate: { type: affiliateSchema, default: () => ({}) },
 
@@ -222,4 +255,4 @@ userSchema.index(
     { unique: true, partialFilterExpression: { staffCode: { $type: 'string' } } }
 );
 
-module.exports = mongoose.models.User || mongoose.model('User', userSchema);
+module.exports = tenantModel('User', userSchema);

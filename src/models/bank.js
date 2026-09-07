@@ -1,6 +1,7 @@
 // src/models/bank.js
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const bankSchema = new mongoose.Schema({
     name: {
@@ -48,4 +49,4 @@ const bankSchema = new mongoose.Schema({
     deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, { timestamps: true });
 
-module.exports = mongoose.models.Bank || mongoose.model('Bank', bankSchema);
+module.exports = tenantModel('Bank', bankSchema);

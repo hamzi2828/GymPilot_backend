@@ -1,4 +1,5 @@
 const GymClass = require('../models/gymClassModel');
+const { checkLimit } = require('../../platform/planLimits');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -290,6 +291,10 @@ const createClass = async (req, res) => {
       price: price ? parseFloat(price) : 0,
       currency: currency || 'PKR'
     };
+
+    // The gym's platform plan may cap how many classes it can run.
+    const limit = await checkLimit('classes');
+    if (!limit.ok) return res.status(403).json({ success: false, message: limit.message, code: limit.code });
 
     const gymClass = new GymClass(classData);
     await gymClass.save();

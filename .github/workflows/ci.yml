@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Syntax check every source file
+        run: |
+          set -e
+          for f in index.js $(git ls-files 'src/**/*.js' 'scripts/**/*.js' 'Seeder/*.js'); do node --check "$f"; done
+      - name: Unit tests
+        run: npm test
+        env:
+          JWT_SECRET: ci-secret
+          MONGO_URI: mongodb://127.0.0.1:27017/ci

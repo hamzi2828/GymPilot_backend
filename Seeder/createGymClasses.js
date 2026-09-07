@@ -1,6 +1,7 @@
 // createGymClasses.js - Create gym classes with comprehensive data
 
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const GymClass = require('../src/models/gymClassModel');
 const Trainer = require('../src/models/trainerModel');
 
@@ -648,6 +649,8 @@ async function createGymClasses() {
 async function main() {
   try {
     await connectDB();
+    // Every gym has its own database: --gym <slug> picks which one.
+    enterContext(await resolveGymContextFromArgs());
     console.log('🚀 Starting gym class seeder...\n');
 
     const classes = await createGymClasses();

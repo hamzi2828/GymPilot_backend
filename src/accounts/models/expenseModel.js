@@ -10,6 +10,7 @@
 // and "K-Electric bill" into three categories that no report can add up.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 // The things a gym actually spends money on, in the order they usually matter.
 const CATEGORIES = [
@@ -116,4 +117,4 @@ expenseSchema.index({ category: 1, incurredOn: -1 });
 expenseSchema.statics.CATEGORIES = CATEGORIES;
 expenseSchema.statics.CATEGORY_LABELS = CATEGORY_LABELS;
 
-module.exports = mongoose.models.Expense || mongoose.model('Expense', expenseSchema);
+module.exports = tenantModel('Expense', expenseSchema);

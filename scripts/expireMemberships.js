@@ -15,6 +15,7 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('./lib/tenantScript');
 const { expireLapsedOrders, countLapsed } = require('../src/gymfolio/services/membershipExpiry');
 const PackageOrder = require('../src/gymfolio/models/packageOrderModel');
 
@@ -27,11 +28,13 @@ async function main() {
   }
 
   await mongoose.connect(process.env.MONGO_URI);
+  // Every gym has its own database: --gym <slug> picks which one.
+  enterContext(await resolveGymContextFromArgs());
 
   const now = new Date();
   const pending = await countLapsed(now);
 
-  console.log(`Database : ${mongoose.connection.name}`);
+  console.log(`Cluster  : ${mongoose.connection.host}`);
   console.log(`As at    : ${now.toISOString()}`);
   console.log(`Lapsed but still marked active: ${pending}`);
 

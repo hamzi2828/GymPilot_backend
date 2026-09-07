@@ -1,5 +1,6 @@
 // src/models/authorModel.js
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const authorSchema = new mongoose.Schema(
   {
@@ -91,6 +92,6 @@ authorSchema.statics.decrementBlogCount = async function(authorId) {
 authorSchema.index({ name: 1, email: 1 });
 authorSchema.index({ slug: 1, active: 1 });
 
-const Author = mongoose.model('Author', authorSchema);
+const Author = tenantModel('Author', authorSchema);
 
 module.exports = Author;

@@ -1,5 +1,6 @@
 // src/models/newsletterModel.js
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const newsletterSchema = new mongoose.Schema(
   {
@@ -71,6 +72,6 @@ newsletterSchema.statics.unsubscribeEmail = async function(email) {
   );
 };
 
-const Newsletter = mongoose.model('Newsletter', newsletterSchema);
+const Newsletter = tenantModel('Newsletter', newsletterSchema);
 
 module.exports = Newsletter;

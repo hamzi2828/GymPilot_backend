@@ -22,6 +22,9 @@ const { listPeople, resolvePerson } = require('../services/peopleDirectory');
 const { currentPalette } = require('../services/deskTheme');
 const { recordPunch } = require('../services/punchService');
 const T = require('../services/timeUtils');
+const { verifyQrToken } = require('../services/qrToken');
+const { findByCode } = require('../services/peopleDirectory');
+const { tenantKey } = require('../../platform/tenantContext');
 
 // The 1:N false-accept target the desktop matcher scales by candidate count.
 // 1-in-100,000 is the DigitalPersona default and what the reference reader
@@ -42,7 +45,8 @@ const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 const attempts = new Map();
 
 function attemptKey(email, ip) {
-  return `${String(email || '').toLowerCase()}|${ip || ''}`;
+  // Scoped to the gym: the same address at two gyms is two accounts.
+  return `${tenantKey()}|${String(email || '').toLowerCase()}|${ip || ''}`;
 }
 
 function isThrottled(key) {
@@ -326,9 +330,33 @@ module.exports = {
   // out, and what to say about it.
   punch: async (req, res) => {
     const body = req.body || {};
-    const personType = String(body.person_type || '').trim();
-    const personId = String(body.person_id || '').trim();
-    const method = String(body.method || 'fingerprint').trim();
+    let personType = String(body.person_type || '').trim();
+    let personId = String(body.person_id || '').trim();
+    let method = String(body.method || 'fingerprint').trim();
+
+    // A scanned QR code or a typed member/staff number stands in for the
+    // person picker. Both come from the web kiosk; the fingerprint desk
+    // keeps sending person_type/person_id.
+    if (body.qr) {
+      const resolved = verifyQrToken(String(body.qr));
+      if (!resolved) {
+        return res.status(400).json({
+          success: false,
+          message: 'That QR code is not valid or has expired. Open the account page for a fresh one.'
+        });
+      }
+      personType = resolved.personType;
+      personId = resolved.personId;
+      method = 'qr';
+    } else if (body.code) {
+      const found = await findByCode(String(body.code));
+      if (!found) {
+        return res.status(404).json({ success: false, message: 'No member or staff member has that code.' });
+      }
+      personType = found.person_type;
+      personId = found.id;
+      method = 'code';
+    }
 
     try {
       if (personType !== 'member' && personType !== 'staff') {
@@ -407,6 +435,27 @@ module.exports = {
       const person = await resolvePerson(personType, personId);
       if (!person) {
         return res.status(404).json({ success: false, message: 'That person is no longer on file.' });
+      }
+
+      // A fingerprint template is biometric data. Nothing is stored until
+      // the person has agreed: either earlier (their account page, or staff
+      // recording a signed form) or right now, with the desk ticking the
+      // consent box on their behalf.
+      const record = person.record;
+      const hasConsentField = record && typeof record === 'object' && 'consents' in (record.toObject ? record.toObject() : record);
+      const consentGiven = !!(record && record.consents && record.consents.biometric && record.consents.biometric.given);
+      const consentNow = body.consent === true || body.consent === 'true' || body.consent === 1;
+      if (!consentGiven && !consentNow) {
+        return res.status(409).json({
+          success: false,
+          code: 'CONSENT_REQUIRED',
+          message: `${person.name} has not consented to fingerprint storage. Tick the consent box after they agree, or ask them to accept it in their account.`
+        });
+      }
+      if (!consentGiven && consentNow && hasConsentField && record.save) {
+        record.consents = record.consents || {};
+        record.consents.biometric = { given: true, at: new Date(), source: 'desk', recordedBy: req.desktopUser._id, version: '2026-09' };
+        await record.save();
       }
 
       const operatorName =

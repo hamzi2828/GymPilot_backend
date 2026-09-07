@@ -15,6 +15,7 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('./lib/tenantScript');
 const { runDaily, EXPIRY_NOTICE_DAYS } = require('../src/services/reminderJobs');
 
 const SEND = process.argv.includes('--send');
@@ -41,7 +42,9 @@ async function main() {
   }
 
   await mongoose.connect(process.env.MONGO_URI);
-  console.log(`Database        : ${mongoose.connection.name}`);
+  // Every gym has its own database: --gym <slug> picks which one.
+  enterContext(await resolveGymContextFromArgs());
+  console.log(`Cluster         : ${mongoose.connection.host}`);
   console.log(`Expiry notices  : ${EXPIRY_NOTICE_DAYS.join(', ')} days before`);
   console.log(`Mode            : ${SEND ? 'SENDING' : 'dry run (nothing will be sent)'}`);
 

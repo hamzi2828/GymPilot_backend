@@ -18,6 +18,7 @@
 // as scripts/expireMemberships.js for a real cron once one exists.
 
 const PackageOrder = require('../models/packageOrderModel');
+const { tenantKey } = require('../../platform/tenantContext');
 
 // How long a sweep's result is trusted before another is allowed. The screens
 // that call this are opened many times a minute in a busy gym, and running a
@@ -25,10 +26,20 @@ const PackageOrder = require('../models/packageOrderModel');
 // minutes that could not equally wait five minutes to be noticed.
 const THROTTLE_MS = 5 * 60 * 1000;
 
-// Per-process, so each serverless instance sweeps at most once per window.
-// Losing this on a cold start is harmless: the sweep is idempotent.
-let lastSweepAt = 0;
-let inFlight = null;
+// Per-process and per-gym, so each serverless instance sweeps each gym at
+// most once per window. Losing this on a cold start is harmless: the sweep
+// is idempotent.
+const sweeps = new Map(); // tenantKey -> { lastSweepAt, inFlight }
+
+function sweepState() {
+  const key = tenantKey();
+  let state = sweeps.get(key);
+  if (!state) {
+    state = { lastSweepAt: 0, inFlight: null };
+    sweeps.set(key, state);
+  }
+  return state;
+}
 
 /**
  * The one query that defines "lapsed".
@@ -87,29 +98,30 @@ async function expireLapsedOrders(now = new Date()) {
  */
 async function sweepIfDue() {
   const now = Date.now();
+  const state = sweepState();
 
-  if (now - lastSweepAt < THROTTLE_MS) {
+  if (now - state.lastSweepAt < THROTTLE_MS) {
     return { expired: 0, skipped: true };
   }
 
   // A second caller arriving mid-sweep waits for the first rather than
   // launching its own.
-  if (inFlight) return inFlight;
+  if (state.inFlight) return state.inFlight;
 
-  lastSweepAt = now;
-  inFlight = expireLapsedOrders()
+  state.lastSweepAt = now;
+  state.inFlight = expireLapsedOrders()
     .catch((error) => {
       // Housekeeping must never be the reason a page fails to load. Reset the
       // clock so the next request retries rather than waiting out the window.
       console.error('[membership] expiry sweep failed:', error.message);
-      lastSweepAt = 0;
+      state.lastSweepAt = 0;
       return { expired: 0, failed: true };
     })
     .finally(() => {
-      inFlight = null;
+      state.inFlight = null;
     });
 
-  return inFlight;
+  return state.inFlight;
 }
 
 /**

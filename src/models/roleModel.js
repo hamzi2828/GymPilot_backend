@@ -9,6 +9,7 @@
 // check of `role === 'admin'` keeps working after this collection appears.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 const { fullPermissionMap } = require('../config/permissions');
 
 const roleSchema = new mongoose.Schema(
@@ -60,4 +61,4 @@ const roleSchema = new mongoose.Schema(
 
 roleSchema.index({ isStaff: 1, isActive: 1 });
 
-module.exports = mongoose.models.Role || mongoose.model('Role', roleSchema);
+module.exports = tenantModel('Role', roleSchema);

@@ -44,11 +44,44 @@ app.use(
   })
 );
 
-// CORS: allow frontend to access backend
+// ---------------------------------------------------------------------------
+// CORS
+//
+// Every gym on the platform has its own website on its own domain, and all
+// of them talk to this one API. So the allowed origins are not a fixed list:
+// an origin is allowed when it is one of the static ones below OR the domain
+// of a registered gym (or a `<slug>.PLATFORM_ROOT_DOMAIN` subdomain). The
+// lookup is the same cached one the tenant resolver uses.
+// ---------------------------------------------------------------------------
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 const GYMFOLIO_URL = process.env.GYMFOLIO_URL || 'http://localhost:3000';
+const STATIC_ORIGINS = new Set(
+  [
+    FRONTEND_ORIGIN,
+    GYMFOLIO_URL,
+    process.env.PLATFORM_ADMIN_ORIGIN,
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'https://www.thejymor.com',
+    'https://thejymor.com'
+  ].filter(Boolean)
+);
+const { isRegisteredOrigin } = require('./src/platform/middleware/resolveTenant');
+
 app.use(cors({
-  origin: [FRONTEND_ORIGIN, GYMFOLIO_URL, 'http://localhost:3000', 'http://localhost:3001', 'https://www.thejymor.com', 'https://thejymor.com'],
+  origin: async (origin, callback) => {
+    // No Origin header: not a browser (curl, the desktop app, Stripe). CORS
+    // does not apply, so there is nothing to refuse.
+    if (!origin) return callback(null, true);
+    if (STATIC_ORIGINS.has(origin)) return callback(null, true);
+    try {
+      await ensureConnection();
+      return callback(null, await isRegisteredOrigin(origin));
+    } catch (error) {
+      console.error('[cors] origin check failed:', error.message);
+      return callback(null, false);
+    }
+  },
   credentials: true,
 }));
 
@@ -68,7 +101,9 @@ app.use(cors({
 const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
 
 app.use((req, res, next) => {
-  if (req.originalUrl.split('?')[0] === STRIPE_WEBHOOK_PATH) {
+  const path = req.originalUrl.split('?')[0];
+  // Both the legacy path and the per-gym one (/webhook/<slug>).
+  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/')) {
     next();
   } else {
     express.json({ limit: '50mb' })(req, res, next);
@@ -115,6 +150,83 @@ app.use(
 );
 
 // Middleware to ensure MongoDB connection for serverless environments
+// ---------------------------------------------------------------------------
+// Platform panel (super admin)
+//
+// Mounted BEFORE the tenant gate: it manages gyms, it does not belong to one.
+// Its own routes carry their own authentication (platform tokens only).
+// ---------------------------------------------------------------------------
+const platformRoutes = require('./src/platform/routes/platformRoutes');
+app.use('/api/platform', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({ success: false, message: 'Database connection failed. Please try again in a moment.' });
+  }
+}, platformRoutes);
+
+// ---------------------------------------------------------------------------
+// Tenant gate
+//
+// Everything past this point runs for exactly one gym: the one whose website
+// the request came from. resolveTenant works that out, opens that gym's
+// database, and carries it through the request so every model call below
+// lands in the right place. See src/platform/middleware/resolveTenant.js.
+//
+// A few paths are exempt because no gym can be known from the request
+// itself -- they either need no gym, or learn it from their payload later:
+//   /api/platform/*                     the panel above
+//   /api/jobs/*                         the cron, which loops over every gym
+//   /auth/google/callback               gym in the OAuth `state`
+//   /api/gymfolio/payment/webhook       gym in the Stripe event metadata
+// ---------------------------------------------------------------------------
+const { resolveTenant } = require('./src/platform/middleware/resolveTenant');
+
+const TENANT_EXEMPT_EXACT = new Set(['/', '/health', '/robots.txt', '/auth/google/callback', '/api/gymfolio/payment/webhook']);
+const TENANT_EXEMPT_PREFIXES = ['/uploads/', '/api/platform', '/api/jobs', '/api/gymfolio/payment/webhook/'];
+
+function isTenantExempt(path) {
+  const clean = path.split('?')[0];
+  if (TENANT_EXEMPT_EXACT.has(clean)) return true;
+  return TENANT_EXEMPT_PREFIXES.some((prefix) => clean.startsWith(prefix));
+}
+
+app.use(async (req, res, next) => {
+  if (isTenantExempt(req.path)) return next();
+  try {
+    await ensureConnection();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    return res.status(503).json({
+      success: false,
+      error: 'Database connection failed',
+      message: 'Please try again in a moment'
+    });
+  }
+  return resolveTenant(req, res, next);
+});
+
+// GET /api/tenant -- which gym this domain is serving. Public: the website
+// uses it to show a clear message when a domain is not linked to any gym.
+app.get('/api/tenant', (req, res) => {
+  const gym = req.tenant;
+  return res.json({
+    success: true,
+    data: {
+      slug: gym.slug,
+      name: gym.name,
+      status: gym.status,
+      subscription_status: gym.subscription ? gym.subscription.status : null,
+      timezone: gym.locale ? gym.locale.timezone : null,
+      currency: gym.locale ? gym.locale.currency : null,
+      matched_host: req.tenantHost || null,
+      source: req.tenantSource
+    }
+  });
+});
+
 app.use('/api', async (req, res, next) => {
   try {
     await ensureConnection();
@@ -282,9 +394,17 @@ async function runRemindersRoute(req, res) {
   try {
     await ensureConnection();
     const { runDaily } = require('./src/services/reminderJobs');
+    const { forEachActiveGym, rollSubscriptionStatuses } = require('./src/platform/jobs');
     // ?dryRun=1 to check what it would do without sending anything.
-    const result = await runDaily({ dryRun: req.query.dryRun === '1' });
-    return res.json({ success: true, ...result });
+    const dryRun = req.query.dryRun === '1';
+
+    // Platform first: a gym whose subscription lapsed today is skipped by the
+    // per-gym loop below rather than emailed one last time.
+    const subscriptions = await rollSubscriptionStatuses({ dryRun });
+    // Then every gym, each inside its own database.
+    const gyms = await forEachActiveGym(() => runDaily({ dryRun }));
+
+    return res.json({ success: true, dryRun, subscriptions, gyms });
   } catch (error) {
     console.error('[jobs] reminders failed:', error);
     return res.status(500).json({ success: false, message: error.message });
@@ -352,6 +472,12 @@ app.use((error, req, res, next) => {
       error: 'Upload error', 
       message: error.message 
     });
+  }
+
+  // Our own upload filters ("Only image files are allowed", "Only .csv files
+  // are accepted") are the caller's mistake, not the server's.
+  if (error && /^Only .+ (files|images) (are|is) (allowed|accepted)/i.test(String(error.message))) {
+    return res.status(400).json({ success: false, error: 'Upload error', message: error.message });
   }
   
   // Default error handler

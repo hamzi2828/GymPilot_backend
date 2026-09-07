@@ -40,7 +40,37 @@ function currentStreak(dateKeys) {
   return streak;
 }
 
+const User = require('../../models/user');
+const { issueQrToken } = require('../services/qrToken');
+const { ensureMemberCode, ensureUserStaffCode } = require('../services/peopleDirectory');
+
 module.exports = {
+  // GET /api/attendance/me/qr
+  qr: async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id);
+      if (!user || user.isActive === false) return res.status(401).json({ success: false, message: 'Account not found' });
+
+      const isStaff = !!(user.employment && user.employment.isStaff);
+      const personType = isStaff ? 'staff' : 'member';
+      const code = isStaff ? await ensureUserStaffCode(user) : await ensureMemberCode(user);
+      const { token, expiresAt } = issueQrToken({ personType, personId: user._id });
+
+      return res.json({
+        success: true,
+        data: {
+          token,
+          expires_at: expiresAt,
+          person_type: personType,
+          code,
+          name: [user.firstName, user.lastName].filter(Boolean).join(' ')
+        }
+      });
+    } catch (error) {
+      console.error('[attendance] qr failed:', error);
+      return res.status(500).json({ success: false, message: 'Could not create your check-in code' });
+    }
+  },
   // GET /api/attendance/me
   me: async (req, res) => {
     try {

@@ -176,10 +176,14 @@ async function runDaily(options = {}) {
   // Order matters: expire first, so a membership that lapsed overnight is not
   // then sent a "renew in 1 day" notice about a date that has already passed.
   const expired = options.dryRun ? { expired: 0 } : await expireLapsedOrders();
+  // Freezes whose planned end has passed come back on before the reminders
+  // run, so a member resuming today is not told their membership is lapsed.
+  const { resumeDueFreezes } = require('../gymfolio/services/membershipService');
+  const freezes = options.dryRun ? { resumed: 0 } : await resumeDueFreezes();
   const memberships = await sendExpiryReminders(options);
   const classes = await sendClassReminders(options);
 
-  return { expired, memberships, classes };
+  return { expired, freezes, memberships, classes };
 }
 
 module.exports = {

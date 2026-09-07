@@ -1,517 +1,283 @@
-// gymfolioPaymentController.js - Controller for Gymfolio Package Payment Management
+// src/gymfolio/controller/gymfolioPaymentController.js
+//
+// Selling a package: Stripe Checkout, the desk (cash / bank / card in
+// person), and the webhook that keeps Stripe and the orders in step. What
+// happens to a membership afterwards lives in membershipController.
 
 const gymfolioPaymentService = require('../../services/gymfolioPaymentService');
-const stripe = require('../../config/stripe');
 const PackageOrder = require('../models/packageOrderModel');
 const Package = require('../models/packageModel');
 const User = require('../../models/user');
 const Settings = require('../../models/settings');
-const { parseAmount, resolveCurrency } = require('../../helper/money');
 const { sweepIfDue } = require('../services/membershipExpiry');
 const notify = require('../../services/gymNotifications');
+const membership = require('../services/membershipService');
+const { getStripe, stripeConfig, cardPaymentsAvailable, StripeNotConfiguredError } = require('../../services/stripeClient');
+const { activeBanks } = require('./membershipController');
 
-/**
- * The country on the member's default address, if they have one on file.
- * Better than asking the admin to retype it, and better than the 'N/A' this
- * used to store -- an empty string when we genuinely do not know.
- */
-function defaultAddressCountry(user) {
-  const addresses = Array.isArray(user.addresses) ? user.addresses : [];
-  const chosen = addresses.find((address) => address.isDefault) || addresses[0];
-  return (chosen && chosen.country) || '';
+function userIdOf(req) {
+  return req.user ? req.user._id || req.user.id : null;
 }
 
-/** Adds one billing period to a date, for a manually granted subscription. */
-function addPeriod(from, period) {
-  const d = new Date(from);
-  const p = String(period || 'month').toLowerCase();
-  if (p.includes('year')) d.setFullYear(d.getFullYear() + 1);
-  else if (p.includes('week')) d.setDate(d.getDate() + 7);
-  else if (p.includes('day')) d.setDate(d.getDate() + 1);
-  else d.setMonth(d.getMonth() + 1);
-  return d;
+function fail(res, error, fallback) {
+  if (error instanceof StripeNotConfiguredError || error instanceof membership.MembershipError) {
+    return res.status(error.status || 400).json({ success: false, message: error.message, code: error.code || undefined });
+  }
+  console.error(fallback, error);
+  return res.status(500).json({ success: false, message: error.message || fallback });
 }
 
 const gymfolioPaymentController = {
   /**
-   * Assign a package to an existing member directly from the admin panel,
-   * bypassing checkout. Used for cash/bank payments taken in person and for
-   * comping a membership.
+   * POST /api/gymfolio/package-orders/assign
+   *
+   * Staff creating a membership without checkout: cash or bank taken in
+   * person, a card charged on the desk terminal, or a comped package.
    */
   async assignPackageToUser(req, res) {
     try {
-      const { userId, packageId, paymentMethod = 'cash', markPaid = true, notes, durationMonths } = req.body;
-
+      const { userId, packageId, paymentMethod = 'cash', markPaid = true, notes, durationMonths, couponCode, amount, startDate } = req.body || {};
       if (!userId || !packageId) {
         return res.status(400).json({ success: false, message: 'userId and packageId are required' });
       }
 
-      const [user, pkg, settings] = await Promise.all([
+      const [user, pkg] = await Promise.all([
         User.findById(userId).select('firstName lastName email phone addresses'),
-        Package.findById(packageId),
-        // Only for the currency fallback below, and tolerant of failure: a
-        // missing settings document must not stop a membership being sold.
-        Settings.getSettings().catch(() => null),
+        Package.findById(packageId)
       ]);
-
       if (!user) return res.status(404).json({ success: false, message: 'User not found' });
       if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
 
-      // Package.price is a String, and this path used to run it through
-      // Number(), which yields NaN for anything with a thousands separator and
-      // was then coerced to 0 -- recording a paid membership worth nothing and
-      // quietly understating the month's revenue. parseAmount reads the shapes
-      // an admin actually types; null means it could not, and that is refused
-      // here rather than stored as zero.
-      const amount = parseAmount(pkg.price);
-      if (amount === null) {
-        return res.status(422).json({
-          success: false,
-          message: `Package "${pkg.name}" has an unreadable price (${JSON.stringify(pkg.price)}). Fix it on the Packages screen before assigning it.`,
-        });
-      }
-
-      // One answer for the currency, instead of the three defaults this
-      // codebase used to hold (the model said PKR, this handler said GBP, the
-      // Stripe service said USD), which meant the currency an order was booked
-      // in depended on which screen created it.
-      const currency = resolveCurrency(pkg.currency, settings && settings.currency);
-
-      const start = new Date();
-      let end = addPeriod(start, pkg.period);
-      const months = Number(durationMonths);
-      if (Number.isFinite(months) && months > 0) {
-        end = new Date(start);
-        end.setMonth(end.getMonth() + months);
-      }
-
-      const orderNumber = await PackageOrder.generateOrderNumber();
-      const paid = markPaid !== false;
-
-      const order = await PackageOrder.create({
-        orderNumber,
-        userId: user._id,
-        packageId: pkg._id,
-        packageDetails: {
-          name: pkg.name,
-          price: String(pkg.price),
-          currency,
-          period: pkg.period || 'month',
-          features: Array.isArray(pkg.features) ? pkg.features : [],
-        },
-        // Whatever the account actually holds, and nothing invented. These two
-        // used to be written as the literal string 'N/A' to satisfy a required
-        // field, which put 'N/A' on the receipt and made "we don't have their
-        // number" impossible to tell from a real one. They are optional in the
-        // schema now, so an empty field simply means empty.
-        customerInfo: {
-          fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
-          email: user.email,
-          phone: user.phone || '',
-          country: defaultAddressCountry(user),
-        },
-        payment: {
-          method: ['stripe', 'card', 'bank_transfer', 'cash'].includes(paymentMethod) ? paymentMethod : 'cash',
-          amount,
-          currency: currency.toLowerCase(),
-          status: paid ? 'paid' : 'pending',
-          paidAt: paid ? new Date() : undefined,
-        },
-        subscription: {
-          startDate: start,
-          endDate: end,
-          isActive: paid,
-          autoRenew: false,
-          renewalDate: end,
-        },
-        status: paid ? 'active' : 'pending',
-        notes: notes || `Assigned from the admin panel by ${req.user?.email || 'an administrator'}`,
+      const order = await membership.createManualOrder({
+        user,
+        pkg,
+        paymentMethod,
+        markPaid: markPaid !== false && markPaid !== 'false',
+        notes,
+        durationMonths,
+        startDate,
+        couponCode,
+        amountOverride: amount,
+        by: req.user && req.user.email
       });
 
-      // The member should hear that their membership is live, whether it was
-      // bought online or taken in cash at the desk. Fired, not awaited: a mail
-      // failure must not fail a payment that has already been taken.
-      if (paid) notify.membershipConfirmed(order, user);
+      if (order.payment.status === 'paid') notify.membershipConfirmed(order, user).catch(() => {});
 
-      return res.status(201).json({
-        success: true,
-        message: `${pkg.name} assigned to ${user.email}`,
-        data: order,
-      });
+      return res.status(201).json({ success: true, message: `${pkg.name} assigned to ${user.email}`, data: order });
     } catch (error) {
-      console.error('Assign package error:', error);
-      return res.status(500).json({ success: false, message: 'Failed to assign package', error: error.message });
+      return fail(res, error, 'Failed to assign package');
     }
   },
 
-  /**
-   * Create package checkout session
-   */
+  /** GET /api/gymfolio/payment/methods -- how this gym can be paid right now. */
+  async paymentMethods(req, res) {
+    try {
+      const [card, banks, settings] = await Promise.all([
+        cardPaymentsAvailable().catch(() => false),
+        activeBanks().catch(() => []),
+        Settings.getSettings().catch(() => null)
+      ]);
+      return res.json({
+        success: true,
+        data: {
+          card,
+          bankTransfer: banks.length > 0,
+          banks,
+          currency: (settings && settings.currency) || 'USD'
+        }
+      });
+    } catch (error) {
+      return fail(res, error, 'Failed to load payment methods');
+    }
+  },
+
+  /** POST /api/gymfolio/payment/create-package-checkout-session */
   async createPackageCheckoutSession(req, res) {
     try {
-      console.log('🔍 GYMFOLIO PAYMENT: Create package checkout session called');
-      console.log('🔍 User:', req.user ? req.user._id : 'Guest');
+      const { packageId, customerInfo, couponCode } = req.body || {};
+      const userId = userIdOf(req);
 
-      const { packageId, customerInfo } = req.body;
-      const userId = req.user ? (req.user._id || req.user.id) : null;
-
-      // Validation
-      if (!packageId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Package ID is required'
-        });
-      }
-
+      if (!packageId) return res.status(400).json({ success: false, message: 'Package ID is required' });
       if (!customerInfo || !customerInfo.email) {
-        return res.status(400).json({
-          success: false,
-          message: 'Customer information is required'
-        });
+        return res.status(400).json({ success: false, message: 'Customer information is required' });
       }
 
-      // Create checkout session
-      const session = await gymfolioPaymentService.createPackageCheckoutSession(
-        userId,
-        packageId,
-        customerInfo
-      );
-
-      res.status(200).json({
-        success: true,
-        sessionId: session.sessionId,
-        url: session.url,
-        orderNumber: session.orderNumber
-      });
+      const session = await gymfolioPaymentService.createPackageCheckoutSession(userId, packageId, customerInfo, { couponCode });
+      return res.status(200).json({ success: true, sessionId: session.sessionId, url: session.url, orderNumber: session.orderNumber });
     } catch (error) {
-      console.error('❌ Error in createPackageCheckoutSession:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to create checkout session'
-      });
+      return fail(res, error, 'Failed to create checkout session');
     }
   },
 
-  /**
-   * Verify package payment
-   */
+  /** GET|POST /api/gymfolio/payment/verify/:sessionId */
   async verifyPackagePayment(req, res) {
     try {
       const { sessionId } = req.params;
-
-      if (!sessionId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Session ID is required'
-        });
-      }
-
+      if (!sessionId) return res.status(400).json({ success: false, message: 'Session ID is required' });
       const result = await gymfolioPaymentService.verifyPackagePayment(sessionId);
-
-      res.status(200).json(result);
+      return res.status(200).json(result);
     } catch (error) {
-      console.error('❌ Error verifying payment:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to verify payment'
-      });
+      return fail(res, error, 'Failed to verify payment');
     }
   },
 
-  /**
-   * Get Stripe public key
-   */
+  /** GET /api/gymfolio/payment/stripe-public-key -- this gym's publishable key. */
   async getPublicKey(req, res) {
     try {
-      const publicKey = process.env.STRIPE_PUBLISHABLE_KEY;
-
-      if (!publicKey) {
-        return res.status(500).json({
-          success: false,
-          message: 'Stripe public key not configured'
-        });
+      const cfg = await stripeConfig();
+      if (!cfg.publishableKey || !cfg.enabled) {
+        return res.status(404).json({ success: false, code: 'STRIPE_NOT_CONFIGURED', message: 'Card payments are not set up for this gym' });
       }
-
-      res.status(200).json({
-        success: true,
-        publicKey: publicKey
-      });
+      return res.status(200).json({ success: true, publicKey: cfg.publishableKey });
     } catch (error) {
-      console.error('Error getting Stripe public key:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to get Stripe public key'
-      });
+      return fail(res, error, 'Failed to get Stripe public key');
     }
   },
 
   /**
-   * Handle Stripe webhooks
+   * POST /api/gymfolio/payment/webhook[/:slug]
+   *
+   * The gym is already in context (from the slug, or from the event's
+   * metadata for the legacy URL). The signature is checked against THAT
+   * gym's signing secret; an event signed by anyone else is refused.
    */
   async handleWebhook(req, res) {
     try {
       const sig = req.headers['stripe-signature'];
-      const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-      if (!webhookSecret) {
-        console.error('⚠️ Webhook secret not configured');
-        return res.status(500).json({
-          success: false,
-          message: 'Webhook secret not configured'
-        });
+      const cfg = await stripeConfig();
+      if (!cfg.webhookSecret) {
+        console.error('⚠️ Webhook secret not configured for this gym');
+        return res.status(500).json({ success: false, message: 'Webhook secret not configured' });
       }
 
-      // Verify webhook signature
       let event;
       try {
-        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+        const stripe = await getStripe();
+        event = stripe.webhooks.constructEvent(req.body, sig, cfg.webhookSecret);
       } catch (err) {
         console.error('⚠️ Webhook signature verification failed:', err.message);
         return res.status(400).send(`Webhook Error: ${err.message}`);
       }
 
-      // Handle the event
       await gymfolioPaymentService.handleWebhook(event);
-
-      res.json({ received: true });
+      return res.json({ received: true });
     } catch (error) {
       console.error('❌ Error handling webhook:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Webhook handler failed'
-      });
+      return res.status(500).json({ success: false, message: 'Webhook handler failed' });
     }
   },
 
-  /**
-   * Get order by ID
-   */
+  /** GET /api/gymfolio/package-orders/:id -- the member's own order, or any for staff. */
   async getOrderById(req, res) {
     try {
-      const { orderId } = req.params;
-      const userId = req.user ? (req.user._id || req.user.id) : null;
-
-      const order = await gymfolioPaymentService.getOrderById(orderId, userId);
-
-      if (!order) {
-        return res.status(404).json({
-          success: false,
-          message: 'Order not found'
-        });
-      }
-
-      res.status(200).json({
-        success: true,
-        data: order
-      });
+      const { id, orderId } = req.params;
+      const wanted = orderId || id;
+      const { can } = require('../../services/roleService');
+      const staff = req.user && (await can(req.user.role, 'package-orders', 'view'));
+      const order = await gymfolioPaymentService.getOrderById(wanted, staff ? null : userIdOf(req));
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      return res.status(200).json({ success: true, data: order });
     } catch (error) {
-      console.error('Error fetching order:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to fetch order'
-      });
+      return fail(res, error, 'Failed to fetch order');
     }
   },
 
-  /**
-   * Get user orders
-   */
+  /** GET /api/gymfolio/package-orders/me */
   async getUserOrders(req, res) {
     try {
-      const userId = req.user ? (req.user._id || req.user.id) : null;
-
-      if (!userId) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authentication required'
-        });
-      }
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
       const { page, limit, status, sort } = req.query;
-
-      // Awaited, not fired and forgotten: a member opening their history must
-      // not be told a membership that ran out last month is still active.
-      // Throttled internally, so this is a no-op on all but the first call in
-      // any five-minute window.
       await sweepIfDue();
-
       const result = await gymfolioPaymentService.getUserOrders(userId, {
-        page: page ? parseInt(page) : 1,
-        limit: limit ? parseInt(limit) : 10,
+        page: page ? parseInt(page, 10) : 1,
+        limit: limit ? parseInt(limit, 10) : 10,
         status,
         sort
       });
-
-      res.status(200).json({
-        success: true,
-        data: result.orders,
-        pagination: result.pagination
-      });
+      return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });
     } catch (error) {
-      console.error('Error fetching user orders:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to fetch orders'
-      });
+      return fail(res, error, 'Failed to fetch orders');
     }
   },
 
-  /**
-   * Get all orders (admin only)
-   */
+  /** GET /api/gymfolio/package-orders (staff) */
   async getAllOrders(req, res) {
     try {
-      const { page, limit, status, paymentStatus, search, sort } = req.query;
-
-      // Same reason as getUserOrders, and more pressing here: this list is
-      // filtered BY status, so a stale 'active' does not just read wrongly, it
-      // puts a lapsed member in the wrong filter.
+      const { page, limit, status, paymentStatus, paymentMethod, search, sort } = req.query;
       await sweepIfDue();
-
       const result = await gymfolioPaymentService.getAllOrders({
-        page: page ? parseInt(page) : 1,
-        limit: limit ? parseInt(limit) : 20,
+        page: page ? parseInt(page, 10) : 1,
+        limit: limit ? parseInt(limit, 10) : 20,
         status,
         paymentStatus,
+        paymentMethod,
         search,
         sort
       });
-
-      res.status(200).json({
-        success: true,
-        data: result.orders,
-        pagination: result.pagination
-      });
+      return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });
     } catch (error) {
-      console.error('Error fetching all orders:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to fetch orders'
-      });
+      return fail(res, error, 'Failed to fetch orders');
     }
   },
 
-  /**
-   * Update order status (admin only)
-   */
+  /** PUT /api/gymfolio/package-orders/:id/status (staff) -- a blunt override, kept for the desk. */
   async updateOrderStatus(req, res) {
     try {
-      const { orderId } = req.params;
-      const { status } = req.body;
+      const { id, orderId } = req.params;
+      const { status } = req.body || {};
+      if (!status) return res.status(400).json({ success: false, message: 'Status is required' });
 
-      if (!status) {
-        return res.status(400).json({
-          success: false,
-          message: 'Status is required'
-        });
-      }
-
-      const validStatuses = ['pending', 'active', 'expired', 'cancelled', 'suspended'];
+      const validStatuses = ['pending', 'active', 'expired', 'cancelled', 'suspended', 'frozen', 'past_due'];
       if (!validStatuses.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
-        });
+        return res.status(400).json({ success: false, message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
       }
 
-      const order = await gymfolioPaymentService.getOrderById(orderId);
-
-      if (!order) {
-        return res.status(404).json({
-          success: false,
-          message: 'Order not found'
-        });
-      }
+      const order = await PackageOrder.findById(orderId || id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
       order.status = status;
-
-      if (status === 'cancelled' || status === 'suspended') {
-        order.subscription.isActive = false;
-      }
-
+      if (status === 'cancelled' || status === 'suspended' || status === 'expired') order.subscription.isActive = false;
+      if (status === 'active') order.subscription.isActive = true;
       await order.save();
 
-      res.status(200).json({
-        success: true,
-        message: 'Order status updated successfully',
-        data: order
-      });
+      return res.status(200).json({ success: true, message: 'Order status updated successfully', data: order });
     } catch (error) {
-      console.error('Error updating order status:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to update order status'
-      });
+      return fail(res, error, 'Failed to update order status');
     }
   },
 
-  /**
-   * Cancel subscription
-   */
+  /** POST /api/gymfolio/package-orders/:id/cancel-subscription -- the member, for themselves. */
   async cancelSubscription(req, res) {
     try {
-      const { orderId } = req.params;
-      const userId = req.user ? (req.user._id || req.user.id) : null;
+      const { id, orderId } = req.params;
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-      if (!userId) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authentication required'
-        });
-      }
-
-      const order = await gymfolioPaymentService.cancelSubscription(orderId, userId);
-
-      res.status(200).json({
+      const order = await gymfolioPaymentService.cancelSubscription(orderId || id, userId, (req.body && req.body.reason) || '');
+      notify.membershipCancelled(order, await User.findById(userId).select('firstName lastName email').lean()).catch(() => {});
+      return res.status(200).json({
         success: true,
-        message: 'Subscription cancelled successfully',
+        message: order.status === 'cancelled' ? 'Subscription cancelled successfully' : 'Your membership will not renew.',
         data: order
       });
     } catch (error) {
-      console.error('Error cancelling subscription:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to cancel subscription'
-      });
+      return fail(res, error, 'Failed to cancel subscription');
     }
   },
 
-  /**
-   * Get subscription status
-   */
+  /** GET /api/gymfolio/package-orders/:id/subscription-status */
   async getSubscriptionStatus(req, res) {
     try {
-      const userId = req.user ? (req.user._id || req.user.id) : null;
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-      if (!userId) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authentication required'
-        });
-      }
-
-      const result = await gymfolioPaymentService.getUserOrders(userId, {
-        status: 'active',
-        limit: 10
-      });
-
-      const activeSubscriptions = result.orders.filter(order =>
-        order.isSubscriptionActive()
-      );
-
-      res.status(200).json({
-        success: true,
-        data: {
-          activeSubscriptions,
-          count: activeSubscriptions.length
-        }
-      });
+      const result = await gymfolioPaymentService.getUserOrders(userId, { status: 'active', limit: 10 });
+      const activeSubscriptions = result.orders.filter((order) => order.isSubscriptionActive());
+      return res.status(200).json({ success: true, data: { activeSubscriptions, count: activeSubscriptions.length } });
     } catch (error) {
-      console.error('Error fetching subscription status:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Failed to fetch subscription status'
-      });
+      return fail(res, error, 'Failed to fetch subscription status');
     }
   }
 };

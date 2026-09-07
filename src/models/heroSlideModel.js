@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 const heroSlideSchema = new mongoose.Schema({
   title: {
@@ -81,6 +82,6 @@ heroSlideSchema.pre('save', async function(next) {
   next();
 });
 
-const HeroSlide = mongoose.model('HeroSlide', heroSlideSchema);
+const HeroSlide = tenantModel('HeroSlide', heroSlideSchema);
 
 module.exports = HeroSlide;

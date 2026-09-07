@@ -1,6 +1,7 @@
 // createBlogsOnly.js - Create blogs using existing categories and authors
 
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const BlogCategory = require('../src/models/blogCategory');
 const Blog = require('../src/models/blogModel');
 const Author = require('../src/models/authorModel');
@@ -328,6 +329,8 @@ async function createBlogs() {
 async function main() {
   try {
     await connectDB();
+    // Every gym has its own database: --gym <slug> picks which one.
+    enterContext(await resolveGymContextFromArgs());
     console.log('🚀 Creating blogs with existing data...\n');
     
     const blogs = await createBlogs();

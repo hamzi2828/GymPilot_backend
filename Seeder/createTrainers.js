@@ -1,6 +1,7 @@
 // createTrainers.js - Create trainers with comprehensive data
 
 const mongoose = require('mongoose');
+const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const Trainer = require('../src/models/trainerModel');
 
 // Database connection
@@ -269,6 +270,8 @@ async function createTrainers() {
 async function main() {
   try {
     await connectDB();
+    // Every gym has its own database: --gym <slug> picks which one.
+    enterContext(await resolveGymContextFromArgs());
     console.log('🚀 Starting trainer seeder...\n');
 
     const trainers = await createTrainers();

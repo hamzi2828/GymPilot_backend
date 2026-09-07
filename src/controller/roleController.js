@@ -113,6 +113,17 @@ module.exports = {
       const permissions = await permissionsFor(account.role);
       const role = await Role.findOne({ slug: account.role }).lean();
 
+      // Whether the gym has been set up. The admin shell shows the wizard
+      // banner to anyone who can change settings until it has.
+      let setupCompleted = true;
+      try {
+        const Settings = require('../models/settings');
+        const settings = await Settings.getSettings();
+        setupCompleted = !!(settings && settings.setupCompletedAt);
+      } catch {
+        setupCompleted = true;
+      }
+
       return res.json({
         success: true,
         user: {
@@ -122,7 +133,8 @@ module.exports = {
           role: account.role,
           role_name: role ? role.name : account.role === ADMIN_SLUG ? 'Administrator' : account.role,
           is_staff: !!(account.employment && account.employment.isStaff),
-          job_title: (account.employment && account.employment.jobTitle) || ''
+          job_title: (account.employment && account.employment.jobTitle) || '',
+          setup_completed: setupCompleted
         },
         permissions,
         // A convenience the sidebar would otherwise recompute on every render.

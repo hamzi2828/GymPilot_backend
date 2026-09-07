@@ -1,5 +1,6 @@
 // src/models/blogModel.js
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 // Imported for its side effect: registering the 'Author' model that the
 // `author` field below refs.
@@ -106,6 +107,6 @@ blogSchema.pre('save', function(next) {
 });
 
 // Check if the model already exists before compiling it
-const Blog = mongoose.models.Blog || mongoose.model('Blog', blogSchema);
+const Blog = tenantModel('Blog', blogSchema);
 
 module.exports = Blog;

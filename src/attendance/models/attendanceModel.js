@@ -8,6 +8,7 @@
 // one desk and out at another, and both desks stay legible in the record.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../../platform/modelRegistry');
 
 // Who took this half of the punch, and from where. Repeated for in and out.
 const punchContextSchema = new mongoose.Schema(
@@ -23,7 +24,9 @@ const punchContextSchema = new mongoose.Schema(
     // to tell them apart.
     method: {
       type: String,
-      enum: ['fingerprint', 'manual'],
+      // qr: scanned from the member's account page; code: their member
+      // number typed at a kiosk or desk.
+      enum: ['fingerprint', 'manual', 'qr', 'code'],
       default: 'fingerprint'
     }
   },
@@ -108,4 +111,4 @@ attendanceSchema.index({ shiftDate: -1, personType: 1 });
 attendanceSchema.index({ checkInAt: -1 });
 
 module.exports =
-  mongoose.models.Attendance || mongoose.model('Attendance', attendanceSchema);
+  tenantModel('Attendance', attendanceSchema);

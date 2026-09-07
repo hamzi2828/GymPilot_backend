@@ -5,6 +5,7 @@
 // the public homepage renders whatever this collection says.
 
 const mongoose = require('mongoose');
+const { tenantModel } = require('../platform/modelRegistry');
 
 // Every section the homepage knows how to render. Adding a new section type
 // means: add its key here + a default below, teach the frontend to render it.
@@ -234,4 +235,4 @@ homeSectionSchema.statics.ensureDefaults = async function () {
 homeSectionSchema.statics.SECTION_KEYS = SECTION_KEYS;
 homeSectionSchema.statics.DEFAULT_SECTIONS = DEFAULT_SECTIONS;
 
-module.exports = mongoose.model('HomeSection', homeSectionSchema);
+module.exports = tenantModel('HomeSection', homeSectionSchema);
