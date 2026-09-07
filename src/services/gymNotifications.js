@@ -499,6 +499,47 @@ async function memberWelcome(member) {
   return deliver(m && m.email, built, 'member welcome', { member: m });
 }
 
+/* --------------------------- personal training -------------------------- */
+
+function ptVars(session, m, b) {
+  return {
+    ...b,
+    firstName: firstNameOf(m) || firstNameOf({ memberName: session.memberName }),
+    trainerName: session.trainerName || '',
+    date: t.dateLabel(session.date),
+    startTime: session.startTime,
+    endTime: session.endTime || '',
+    portalUrl: `${b.accountUrl}?tab=pt`
+  };
+}
+
+async function ptBooked(session, member) {
+  const m = await enrich(member);
+  const b = await brand();
+  const vars = ptVars(session, m, b);
+  const built = await templates.renderEmail('pt_booked', vars);
+  fanOut(m, 'pt_booked', vars, 'pt booked', vars.portalUrl);
+  return built ? deliver(m && m.email, built, 'pt booked', { member: m }) : { success: false, skipped: 'no template' };
+}
+
+async function ptCancelled(session, member, reason = '') {
+  const m = await enrich(member);
+  const b = await brand();
+  const vars = { ...ptVars(session, m, b), reason: reason || '' };
+  const built = await templates.renderEmail('pt_cancelled', vars);
+  fanOut(m, 'pt_cancelled', vars, 'pt cancelled', vars.portalUrl);
+  return built ? deliver(m && m.email, built, 'pt cancelled', { member: m }) : { success: false, skipped: 'no template' };
+}
+
+async function ptReminder(session, member) {
+  const m = await enrich(member);
+  const b = await brand();
+  const vars = ptVars(session, m, b);
+  const built = await templates.renderEmail('pt_reminder', vars);
+  fanOut(m, 'pt_reminder', vars, 'pt reminder', vars.portalUrl);
+  return built ? deliver(m && m.email, built, 'pt reminder', { member: m }) : { success: false, skipped: 'no template' };
+}
+
 /* ------------------------------ automations ----------------------------- */
 //
 // These have no built-in HTML of their own: the registry in templateService
@@ -552,5 +593,8 @@ module.exports = {
   membershipCancelled,
   absentNudge,
   winBack,
-  birthday
+  birthday,
+  ptBooked,
+  ptCancelled,
+  ptReminder
 };

@@ -262,6 +262,31 @@ const settingsSchema = new mongoose.Schema(
       }
     },
 
+    // Class booking policy. See gymfolio/services/bookingRules.js for the
+    // defaults and what each does.
+    booking: {
+      horizonDays: { type: Number, default: 30, min: 1 },
+      cutoffMinutes: { type: Number, default: 15, min: 0 },
+      cancelHours: { type: Number, default: 2, min: 0 },
+      requireActiveMembership: { type: Boolean, default: false },
+      useCredits: { type: Boolean, default: true },
+      noShowStrikes: { type: Number, default: 0, min: 0 },
+      noShowWindowDays: { type: Number, default: 30, min: 1 },
+      noShowBanDays: { type: Number, default: 7, min: 1 },
+      autoNoShow: { type: Boolean, default: false }
+    },
+    // Personal training.
+    pt: {
+      slotMinutes: { type: Number, default: 60, min: 15 },
+      defaultCommissionPercent: { type: Number, default: 0, min: 0, max: 100 },
+      allowMemberBooking: { type: Boolean, default: true },
+      requirePack: { type: Boolean, default: false },
+      cancelHours: { type: Number, default: 12, min: 0 },
+      horizonDays: { type: Number, default: 30, min: 1 }
+    },
+    // Named rooms / studios a class can be put in.
+    rooms: { type: [String], default: [] },
+
     // Site colour scheme. Stores a preset key; the frontend maps it to CSS
     // custom properties so the whole site recolours from one value.
     theme: {

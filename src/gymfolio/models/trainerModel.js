@@ -66,6 +66,13 @@ const trainerSchema = new mongoose.Schema({
     startTime: String,
     endTime: String
   }],
+  // Personal training: whether members can book them one-to-one, what a
+  // session costs when not on a pack, and their cut of each completed
+  // session (null = the gym's default in Settings).
+  acceptsPt: { type: Boolean, default: true },
+  ptRate: { type: Number, default: 0, min: 0 },
+  commissionPercent: { type: Number, default: null, min: 0, max: 100 },
+
   // Short human-readable staff ID the front desk can search by ("TR-004"),
   // used by the attendance app when the fingerprint reader is unavailable.
   // Assigned on demand -- see ensureStaffCode() in peopleDirectory.js.

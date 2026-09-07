@@ -75,6 +75,7 @@ const DEFAULT_ROLES = [
     permissions: fullPermissionMap({
       dashboard: 'view',
       classes: 'manage',
+      pt: 'manage',
       trainers: 'manage',
       packages: 'manage',
       'package-orders': 'manage',
@@ -106,6 +107,7 @@ const DEFAULT_ROLES = [
     permissions: fullPermissionMap({
       dashboard: 'view',
       classes: 'view',
+      pt: 'manage',
       trainers: 'view',
       packages: 'view',
       'package-orders': 'manage',
@@ -127,6 +129,7 @@ const DEFAULT_ROLES = [
     permissions: fullPermissionMap({
       dashboard: 'view',
       classes: 'view',
+      pt: 'view',
       trainers: 'view',
       attendance: 'view'
     })

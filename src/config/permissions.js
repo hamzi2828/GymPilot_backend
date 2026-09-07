@@ -23,6 +23,7 @@ const PERMISSION_TABS = [
 
   { key: 'classes',        label: 'Classes',         group: 'Fitness',   path: '/admin/classes' },
   { key: 'bookings',       label: 'Bookings',        group: 'Fitness',   path: '/admin/bookings' },
+  { key: 'pt',             label: 'Personal Training', group: 'Fitness', path: '/admin/pt' },
   { key: 'trainers',       label: 'Trainers',        group: 'Fitness',   path: '/admin/trainers' },
   { key: 'packages',       label: 'Packages',        group: 'Fitness',   path: '/admin/packages' },
 

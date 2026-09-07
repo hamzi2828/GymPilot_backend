@@ -266,7 +266,10 @@ const settingsController = {
         membership,
         ianaTimezone,
         setupCompleted,
-        messaging
+        messaging,
+        booking,
+        pt,
+        rooms
       } = req.body;
 
       // Prepare update data with only provided fields
@@ -324,6 +327,14 @@ const settingsController = {
       if (messaging && typeof messaging === 'object') {
         const currentDoc = await Settings.findOne({ isActive: true }).select('messaging').lean();
         updateData.messaging = mergeMessaging((currentDoc && currentDoc.messaging) || {}, messaging);
+      }
+      if ((booking && typeof booking === 'object') || (pt && typeof pt === 'object') || Array.isArray(rooms)) {
+        const rules = require('../gymfolio/services/bookingRules');
+        const currentDoc = await Settings.findOne({ isActive: true }).select('booking pt rooms').lean();
+        if (booking && typeof booking === 'object') updateData.booking = rules.normalizeBooking({ ...((currentDoc && currentDoc.booking) || {}), ...booking });
+        if (pt && typeof pt === 'object') updateData.pt = rules.normalizePt({ ...((currentDoc && currentDoc.pt) || {}), ...pt });
+        if (Array.isArray(rooms)) updateData.rooms = [...new Set(rooms.map((r) => String(r).trim()).filter(Boolean))].slice(0, 50);
+        rules.resetRulesCache();
       }
 
       // Update only provided fields

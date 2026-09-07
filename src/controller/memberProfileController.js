@@ -246,6 +246,7 @@ module.exports = {
           tags: user.tags || [],
           goals: user.goals || '',
           source: user.source || '',
+          assignedTrainerId: user.assignedTrainerId ? String(user.assignedTrainerId) : null,
           staffNotes: user.staffNotes || '',
           createdAt: user.createdAt,
           lastLogin: user.lastLogin || null,
@@ -286,6 +287,7 @@ module.exports = {
       if (Array.isArray(body.tags)) user.tags = [...new Set(body.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean))].slice(0, 30);
       if (body.goals !== undefined) user.goals = text(body.goals) || '';
       if (body.source !== undefined) user.source = text(body.source, 120) || '';
+      if (body.assignedTrainerId !== undefined) user.assignedTrainerId = isId(body.assignedTrainerId) ? body.assignedTrainerId : null;
       if (body.staffNotes !== undefined) user.staffNotes = text(body.staffNotes, 10000) || '';
       applyEmergencyContact(user, body.emergencyContact);
       applyMedical(user, body.medical);

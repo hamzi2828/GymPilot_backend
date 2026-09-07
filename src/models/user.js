@@ -246,6 +246,8 @@ const userSchema = new mongoose.Schema({
     },
     staffNotes: { type: String, default: '' },
     goals: { type: String, default: '', trim: true },
+    // The member's personal trainer, when they have one.
+    assignedTrainerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Trainer', default: null },
     // How they found the gym.
     source: { type: String, default: '', trim: true },
 

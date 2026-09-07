@@ -638,6 +638,25 @@ async function consumeSession(order, { by = null, note = '' } = {}) {
   return order;
 }
 
+/** Gives a session back -- a booking cancelled in time, a class the gym called off. */
+async function refundSession(order) {
+  if (!order.sessions || !order.sessions.total) return null;
+  if ((order.sessions.used || 0) <= 0) return order;
+  order.sessions.used -= 1;
+  order.sessions.log = order.sessions.log || [];
+  order.sessions.log.push({ at: new Date(), by: null, note: 'refunded' });
+  // A pack that had just run out is live again.
+  if (order.sessions.exhaustedAt && order.sessions.used < order.sessions.total) {
+    order.sessions.exhaustedAt = null;
+    if (order.status === 'expired' && order.subscription && order.subscription.endDate && new Date(order.subscription.endDate) >= new Date()) {
+      order.status = 'active';
+      order.subscription.isActive = true;
+    }
+  }
+  await order.save();
+  return order;
+}
+
 /* ---------------------------- stripe portal ---------------------------- */
 
 async function billingPortalUrl(order, returnUrl) {
@@ -672,6 +691,7 @@ module.exports = {
   renew,
   changePackage,
   consumeSession,
+  refundSession,
   billingPortalUrl,
   membershipSettings
 };

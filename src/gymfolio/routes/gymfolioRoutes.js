@@ -87,6 +87,33 @@ router.patch('/bookings/:id/status', auth, requirePermission('bookings', 'manage
 router.delete('/bookings/staff/:id', auth, requirePermission('bookings', 'manage'), asStaff, classBookingController.cancel);
 router.delete('/bookings/:id', auth, classBookingController.cancel);
 
+/* ----------------------------- Timetable changes ---------------------------- */
+//
+// Cancelled sessions, closed days, stand-in instructors and room changes --
+// see controller/classExceptionController.js. Reads are staff-only; the
+// public timetable already carries the effect of each change.
+const classExceptionController = require('../controller/classExceptionController');
+router.get('/class-exceptions', auth, requirePermission('classes'), classExceptionController.list);
+router.post('/class-exceptions', auth, requirePermission('classes', 'manage'), classExceptionController.create);
+router.delete('/class-exceptions/:id', auth, requirePermission('classes', 'manage'), classExceptionController.remove);
+
+/* ------------------------------ Personal training --------------------------- */
+//
+// See controller/ptController.js. Same shape as class bookings: a member
+// route that only ever acts for the caller, and staff routes behind the
+// permission that set req.isStaffBooking.
+const ptController = require('../controller/ptController');
+router.get('/pt/trainers', ptController.trainers);
+router.get('/pt/availability', optionalAuth, ptController.availability);
+router.post('/pt/sessions', auth, ptController.create);
+router.get('/pt/sessions/me', auth, ptController.mine);
+router.get('/pt/sessions', auth, requirePermission('pt'), ptController.list);
+router.get('/pt/summary', auth, requirePermission('pt'), ptController.summary);
+router.post('/pt/sessions/staff', auth, requirePermission('pt', 'manage'), asStaff, ptController.create);
+router.patch('/pt/sessions/:id/status', auth, requirePermission('pt', 'manage'), ptController.setStatus);
+router.delete('/pt/sessions/staff/:id', auth, requirePermission('pt', 'manage'), asStaff, ptController.cancel);
+router.delete('/pt/sessions/:id', auth, ptController.cancel);
+
 /* ---------------------------------- Trainers --------------------------------- */
 router.get('/trainers/active', trainerController.getActiveTrainers);
 router.get('/trainers/featured', trainerController.getFeaturedTrainers);

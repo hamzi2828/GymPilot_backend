@@ -3,22 +3,21 @@
 // Booking a place in a class, giving it up, and the roster the front desk
 // works from.
 //
-// One policy decision worth stating outright, because it is the kind of thing
-// that looks like an oversight otherwise: a member whose package has lapsed is
-// NOT refused a booking. The booking records what their membership looked like
-// at the time and says so, and the roster shows it in red.
-//
-// That is the same stance the attendance module already takes at the front
-// desk, and for the same reason: refusing loses the information that the
-// person tried, whereas recording it puts the fact in front of a human who can
-// act on it while the member is still reachable. A gym that wants a hard
-// refusal has one place to add it -- `membershipGate` below.
+// The gym's booking rules (Settings → General → Booking rules; see
+// services/bookingRules.js) decide the policy questions here: how far ahead
+// members may book, when booking closes, whether a lapsed membership is
+// refused or merely flagged, whether a session pack pays for a place, how
+// late a cancellation may be before the credit is lost, and whether repeat
+// no-shows are paused. Every one of them defaults to the behaviour the gym
+// had before the rules existed: record, warn, never refuse.
 
 const mongoose = require('mongoose');
 const GymClass = require('../models/gymClassModel');
 const ClassBooking = require('../models/classBookingModel');
+const PackageOrder = require('../models/packageOrderModel');
 const User = require('../../models/user');
 const sessions = require('../services/classSessions');
+const { consumeSession, refundSession } = require('../services/membershipService');
 const { membershipFor, ensureMemberCode } = require('../../attendance/services/peopleDirectory');
 const notify = require('../../services/gymNotifications');
 const T = require('../../attendance/services/timeUtils');
@@ -31,12 +30,55 @@ function fail(res, code, message, extra = {}) {
 }
 
 /**
- * Whether a lapsed membership blocks a booking. Currently never -- see the
- * note at the top of this file. Kept as one named function so the policy has
- * an obvious home rather than being spread through the handler.
+ * Whether a lapsed membership blocks a booking. Only when the gym has
+ * switched requireActiveMembership on; otherwise the booking records what
+ * the membership looked like and the roster shows it in red.
  */
-function membershipGate(/* membership */) {
-  return null;
+function membershipGate(membership, rules) {
+  if (!rules.requireActiveMembership || membership.status === 'active') return null;
+  return membership.status === 'expired'
+    ? 'Your membership has expired — please renew before booking.'
+    : 'An active membership is needed to book classes — please speak to the front desk.';
+}
+
+/**
+ * Repeat no-shows pause booking for a while, when the gym has asked for
+ * that (noShowStrikes > 0). Returns the message to show, or null.
+ */
+async function noShowBlock(userId, rules) {
+  if (!rules.noShowStrikes) return null;
+  const since = T.shiftDateKey(T.dateKey(), -rules.noShowWindowDays);
+  const misses = await ClassBooking.find({ userId, status: 'no_show', sessionDate: { $gte: since } })
+    .sort({ sessionDate: -1 })
+    .select('sessionDate')
+    .lean();
+  if (misses.length < rules.noShowStrikes) return null;
+  const until = T.shiftDateKey(misses[0].sessionDate, rules.noShowBanDays);
+  if (until <= T.dateKey()) return null;
+  return `Booking is paused until ${T.dateLabelForKey(until)} after ${misses.length} missed classes. Please speak to the front desk.`;
+}
+
+/**
+ * Takes one credit from a session pack for a place, when the member is on
+ * one and the gym uses credits. Throws MembershipError when the pack is
+ * empty. Memberships that are not packs cost nothing per class.
+ */
+async function takeCredit(membership, rules, by, note) {
+  if (!rules.useCredits || membership.sessionsLeft === null || membership.sessionsLeft === undefined || !membership.orderId) {
+    return { creditUsed: false, orderId: null };
+  }
+  const order = await PackageOrder.findById(membership.orderId);
+  if (!order || !order.sessions || !order.sessions.total) return { creditUsed: false, orderId: null };
+  // A personal-training pack pays for PT sessions, not for classes.
+  if (order.packageDetails && order.packageDetails.kind === 'pt_pack') return { creditUsed: false, orderId: null };
+  await consumeSession(order, { by, note });
+  return { creditUsed: true, orderId: order._id };
+}
+
+async function giveCreditBack(booking) {
+  if (!booking.creditUsed || !booking.orderId) return;
+  const order = await PackageOrder.findById(booking.orderId);
+  if (order) await refundSession(order).catch(() => {});
 }
 
 function bookingView(booking) {
@@ -55,10 +97,22 @@ function bookingView(booking) {
     waitlist_position: booking.waitlistPosition,
     membership_status: booking.membershipStatus,
     booked_by: booking.bookedBy,
+    credit_used: !!booking.creditUsed,
+    late_cancel: !!booking.lateCancel,
     notes: booking.notes || '',
     created_at: booking.createdAt,
     cancelled_at: booking.cancelledAt,
     attended_at: booking.attendedAt
+  };
+}
+
+function rulesView(rules) {
+  return {
+    horizon_days: rules.horizonDays,
+    cutoff_minutes: rules.cutoffMinutes,
+    cancel_hours: rules.cancelHours,
+    require_active_membership: rules.requireActiveMembership,
+    use_credits: rules.useCredits
   };
 }
 
@@ -73,13 +127,14 @@ module.exports = {
   async timetable(req, res) {
     try {
       const userId = req.user ? req.user.id || req.user._id : null;
-      const { range, sessions: list } = await sessions.timetable(req.query, userId);
+      const { range, sessions: list, rules } = await sessions.timetable(req.query, userId);
 
       return res.json({
         success: true,
         range,
         timezone: T.TIMEZONE,
-        horizon_days: sessions.BOOKING_HORIZON_DAYS,
+        horizon_days: rules.horizonDays,
+        rules: rulesView(rules),
         data: list
       });
     } catch (error) {
@@ -117,6 +172,7 @@ module.exports = {
   // Body: { classId, date, startTime }
   // -------------------------------------------------------------------------
   async create(req, res) {
+    let credit = { creditUsed: false, orderId: null };
     try {
       const actorId = req.user && (req.user.id || req.user._id);
       if (!actorId) return fail(res, 401, 'Please sign in to book a class');
@@ -141,9 +197,10 @@ module.exports = {
         return fail(res, 400, 'Invalid member id');
       }
 
-      const [gymClass, member] = await Promise.all([
+      const [gymClass, member, rules] = await Promise.all([
         GymClass.findById(classId),
-        User.findById(targetUserId)
+        User.findById(targetUserId),
+        sessions.rules()
       ]);
 
       if (!gymClass) return fail(res, 404, 'Class not found');
@@ -161,17 +218,35 @@ module.exports = {
         );
       }
 
-      if (sessions.isClosed(date, startTime)) {
+      // A session the gym has called off for that day.
+      const exception = sessions.exceptionFor(await sessions.exceptionsFor(date, date), gymClass._id, date, startTime);
+      if (exception && exception.kind === 'cancelled') {
+        return fail(res, 409, `This session has been cancelled${exception.note ? `: ${exception.note}` : ''}.`);
+      }
+
+      // Members book within the horizon; staff may book further out.
+      if (!req.isStaffBooking && date > T.shiftDateKey(T.dateKey(), rules.horizonDays)) {
+        return fail(res, 409, `Classes can be booked up to ${rules.horizonDays} days ahead.`);
+      }
+
+      if (sessions.isClosed(date, startTime, new Date(), rules)) {
         return fail(
           res,
           409,
-          `Booking for this session has closed. It opens ${sessions.CUTOFF_MINUTES} minutes before the class starts.`
+          rules.cutoffMinutes
+            ? `Booking for this session has closed. It closes ${rules.cutoffMinutes} minutes before the class starts.`
+            : 'This session has already started.'
         );
       }
 
       const membership = await membershipFor(member);
-      const blocked = membershipGate(membership);
+      const blocked = membershipGate(membership, rules);
       if (blocked) return fail(res, 402, blocked);
+
+      if (!req.isStaffBooking) {
+        const paused = await noShowBlock(member._id, rules);
+        if (paused) return fail(res, 403, paused);
+      }
 
       const capacity = Number(gymClass.capacity) || 0;
       const taken = await ClassBooking.countBooked(gymClass._id, date, startTime);
@@ -180,6 +255,10 @@ module.exports = {
       let waitlistPosition = null;
       if (full) {
         waitlistPosition = (await ClassBooking.countWaitlisted(gymClass._id, date, startTime)) + 1;
+      } else {
+        // A place on a session pack costs a credit; the waiting list costs
+        // nothing until a place actually comes free.
+        credit = await takeCredit(membership, rules, actorId, `${gymClass.name} ${date} ${startTime}`);
       }
 
       const booking = await ClassBooking.create({
@@ -191,12 +270,14 @@ module.exports = {
         sessionDate: date,
         sessionStart: startTime,
         sessionEnd: slot.endTime || '',
-        instructorName: slot.instructorName || '',
+        instructorName: (exception && exception.kind === 'substitute' && exception.instructorName) || slot.instructorName || '',
         status: full ? 'waitlisted' : 'booked',
         waitlistPosition,
         bookedBy: req.isStaffBooking ? 'staff' : 'member',
         bookedByUserId: actorId,
         membershipStatus: membership.status,
+        creditUsed: credit.creditUsed,
+        orderId: credit.orderId,
         notes: req.body.notes ? String(req.body.notes).trim() : ''
       });
 
@@ -208,7 +289,7 @@ module.exports = {
         success: true,
         message: full
           ? `${gymClass.name} is full — you are number ${waitlistPosition} on the waiting list and will be moved up automatically if someone cancels.`
-          : `Booked into ${gymClass.name} on ${T.dateLabelForKey(date)} at ${startTime}.`,
+          : `Booked into ${gymClass.name} on ${T.dateLabelForKey(date)} at ${startTime}.${credit.creditUsed ? ' One session was taken from your pack.' : ''}`,
         // Surfaced rather than swallowed: the member is booked either way, and
         // the desk should be told there is money to collect.
         membership_warning:
@@ -220,6 +301,11 @@ module.exports = {
         data: bookingView(booking)
       });
     } catch (error) {
+      // A credit taken for a place that was never written goes back.
+      if (credit.creditUsed && credit.orderId) {
+        PackageOrder.findById(credit.orderId).then((order) => order && refundSession(order)).catch(() => {});
+      }
+      if (error && error.name === 'MembershipError') return fail(res, 402, error.message);
       // The partial unique index is what enforces "one live booking per member
       // per slot", so a duplicate arrives here as a write error rather than as
       // a race the handler had to guess about.
@@ -250,13 +336,17 @@ module.exports = {
         filter.sessionDate = { $lt: today };
       }
 
-      const rows = await ClassBooking.find(filter)
-        .sort({ sessionDate: scope === 'past' ? -1 : 1, sessionStart: 1 })
-        .limit(200)
-        .lean();
+      const [rows, rules] = await Promise.all([
+        ClassBooking.find(filter)
+          .sort({ sessionDate: scope === 'past' ? -1 : 1, sessionStart: 1 })
+          .limit(200)
+          .lean(),
+        sessions.rules()
+      ]);
 
       return res.json({
         success: true,
+        rules: rulesView(rules),
         data: rows.map(bookingView),
         counts: {
           upcoming: await ClassBooking.countDocuments({
@@ -285,7 +375,7 @@ module.exports = {
 
       if (!mongoose.Types.ObjectId.isValid(id)) return fail(res, 400, 'Invalid booking id');
 
-      const booking = await ClassBooking.findById(id);
+      const [booking, rules] = await Promise.all([ClassBooking.findById(id), sessions.rules()]);
       if (!booking) return fail(res, 404, 'Booking not found');
 
       const isOwner = String(booking.userId) === String(actorId);
@@ -299,12 +389,21 @@ module.exports = {
 
       const heldAPlace = booking.status === 'booked';
 
+      // Inside the cancel-by window a member keeps nothing: the place is
+      // freed but the credit stays used. Staff cancelling never costs the
+      // member anything.
+      const startsAt = sessions.localInstant(booking.sessionDate, booking.sessionStart);
+      const late = rules.cancelHours > 0 && startsAt.getTime() - rules.cancelHours * 3600 * 1000 < Date.now();
+      booking.lateCancel = late && !req.isStaffBooking;
+
       booking.status = 'cancelled';
       booking.cancelledAt = new Date();
       booking.cancelledBy = actorId;
       booking.cancelReason = req.body && req.body.reason ? String(req.body.reason).trim() : '';
       booking.waitlistPosition = null;
       await booking.save();
+
+      if (!booking.lateCancel) await giveCreditBack(booking);
 
       // Only a real place frees a place. Cancelling from the waiting list
       // promotes nobody.
@@ -315,6 +414,24 @@ module.exports = {
           booking.sessionDate,
           booking.sessionStart
         );
+        // The promoted member's pack pays for the place now that they have it.
+        if (promoted) {
+          try {
+            const promotedUser = await User.findById(promoted.userId);
+            if (promotedUser) {
+              const credit = await takeCredit(await membershipFor(promotedUser), rules, actorId, `${promoted.className} ${promoted.sessionDate} ${promoted.sessionStart} (from waiting list)`);
+              if (credit.creditUsed) {
+                promoted.creditUsed = true;
+                promoted.orderId = credit.orderId;
+                await promoted.save();
+              }
+            }
+          } catch (error) {
+            // An empty pack does not lose them the place they waited for; the
+            // desk sees the booking without a credit and can sort it out.
+            console.error('[bookings] credit on promotion failed:', error.message);
+          }
+        }
       }
 
       // Two people to tell: whoever gave the place up, and whoever just got
@@ -336,7 +453,9 @@ module.exports = {
 
       return res.json({
         success: true,
-        message: 'Booking cancelled.',
+        message: booking.lateCancel
+          ? `Cancelled. This was inside the ${rules.cancelHours}-hour window, so the session credit stays used.`
+          : `Booking cancelled.${booking.creditUsed ? ' The session credit is back on the pack.' : ''}`,
         promoted: promoted
           ? { id: String(promoted._id), member_name: promoted.memberName }
           : null,

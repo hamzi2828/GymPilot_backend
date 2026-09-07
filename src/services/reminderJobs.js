@@ -169,6 +169,48 @@ async function sendClassReminders({ dryRun = false } = {}) {
   return { date: tomorrow, sent, skipped, counts: { sent: sent.length, skipped: skipped.length } };
 }
 
+/**
+ * Reminds members about tomorrow's personal training session, once.
+ */
+async function sendPtReminders({ dryRun = false } = {}) {
+  const PtSession = require('../gymfolio/models/ptSessionModel');
+  const tomorrow = T.shiftDateKey(T.dateKey(), 1);
+  const sessions = await PtSession.find({ date: tomorrow, status: 'scheduled', reminderSentAt: null }).lean();
+  const sent = [];
+  const skipped = [];
+  for (const session of sessions) {
+    const member = await User.findById(session.memberId).select('firstName lastName email phone isActive notificationPreferences').lean();
+    if (!member || member.isActive === false || !(member.email || member.phone)) {
+      skipped.push({ session: String(session._id), reason: 'no reachable member' });
+      continue;
+    }
+    if (dryRun) {
+      sent.push({ session: String(session._id), to: member.email || member.phone, dryRun: true });
+      continue;
+    }
+    await notify.ptReminder(session, member);
+    await PtSession.updateOne({ _id: session._id }, { $set: { reminderSentAt: new Date() } });
+    sent.push({ session: String(session._id), to: member.email || member.phone });
+  }
+  return { date: tomorrow, sent, skipped, counts: { sent: sent.length, skipped: skipped.length } };
+}
+
+/**
+ * Marks yesterday's unattended bookings as no-shows, when the gym has
+ * switched that on (Settings → booking rules → autoNoShow). Only bookings
+ * still sitting at "booked" after the session has passed are touched.
+ */
+async function markMissedBookings({ dryRun = false } = {}) {
+  const { bookingRules } = require('../gymfolio/services/bookingRules');
+  const rules = await bookingRules();
+  if (!rules.autoNoShow) return { enabled: false, marked: 0 };
+  const yesterday = T.shiftDateKey(T.dateKey(), -1);
+  const filter = { status: 'booked', sessionDate: { $lte: yesterday } };
+  if (dryRun) return { enabled: true, marked: await ClassBooking.countDocuments(filter), dryRun: true };
+  const result = await ClassBooking.updateMany(filter, { $set: { status: 'no_show' } });
+  return { enabled: true, marked: result.modifiedCount || 0 };
+}
+
 /** Everything the daily cron should do, in one call. */
 async function runDaily(options = {}) {
   const { expireLapsedOrders } = require('../gymfolio/services/membershipExpiry');
@@ -182,17 +224,21 @@ async function runDaily(options = {}) {
   const freezes = options.dryRun ? { resumed: 0 } : await resumeDueFreezes();
   const memberships = await sendExpiryReminders(options);
   const classes = await sendClassReminders(options);
+  const ptSessions = await sendPtReminders(options);
+  const missed = await markMissedBookings(options);
   // The automated nudges (absent, win-back, birthday); each is off until
   // the gym switches it on.
   const { runAutomations } = require('./automations');
   const automations = await runAutomations(options);
 
-  return { expired, freezes, memberships, classes, automations };
+  return { expired, freezes, memberships, classes, ptSessions, missed, automations };
 }
 
 module.exports = {
   EXPIRY_NOTICE_DAYS,
   sendExpiryReminders,
   sendClassReminders,
+  sendPtReminders,
+  markMissedBookings,
   runDaily
 };

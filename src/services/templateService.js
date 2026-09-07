@@ -123,6 +123,33 @@ const EVENTS = [
     text: '{{siteName}}: your {{packageName}} membership has been cancelled. You are welcome back any time: {{renewUrl}}'
   },
   {
+    key: 'pt_booked',
+    label: 'Personal training session booked',
+    group: 'Personal training',
+    vars: [...COMMON, 'trainerName', 'date', 'startTime', 'endTime'],
+    subject: 'Your session with {{trainerName}} is booked',
+    body: 'Hi {{firstName}},\n\nYou are booked with {{trainerName}} on {{date}} at {{startTime}}.\n\nNeed to change it? Manage your sessions at {{portalUrl}}',
+    text: '{{siteName}}: PT with {{trainerName}} booked for {{date}} at {{startTime}}.'
+  },
+  {
+    key: 'pt_cancelled',
+    label: 'Personal training session cancelled',
+    group: 'Personal training',
+    vars: [...COMMON, 'trainerName', 'date', 'startTime', 'reason'],
+    subject: 'Your session with {{trainerName}} was cancelled',
+    body: 'Hi {{firstName}},\n\nYour session with {{trainerName}} on {{date}} at {{startTime}} has been cancelled. {{reason}}\n\nBook another at {{portalUrl}}',
+    text: '{{siteName}}: your PT session with {{trainerName}} on {{date}} at {{startTime}} was cancelled. {{reason}}'
+  },
+  {
+    key: 'pt_reminder',
+    label: 'Personal training session tomorrow',
+    group: 'Personal training',
+    vars: [...COMMON, 'trainerName', 'date', 'startTime', 'endTime'],
+    subject: 'Tomorrow: your session with {{trainerName}}',
+    body: 'Hi {{firstName}},\n\nA reminder that you are training with {{trainerName}} tomorrow ({{date}}) at {{startTime}}.\n\nCan\'t make it? Cancel in time at {{portalUrl}} so the slot can go to someone else.',
+    text: '{{siteName}}: reminder — PT with {{trainerName}} tomorrow at {{startTime}}.'
+  },
+  {
     key: 'absent_nudge',
     label: 'We miss you (no visit for a while)',
     group: 'Automations',

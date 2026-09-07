@@ -122,6 +122,13 @@ const classBookingSchema = new mongoose.Schema(
       default: 'none'
     },
 
+    // A session-pack credit was taken for this place (booking rules →
+    // useCredits). Given back when the booking is cancelled in time.
+    creditUsed: { type: Boolean, default: false },
+    orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageOrder', default: null },
+    // Cancelled inside the cancel-by window: the credit stays used.
+    lateCancel: { type: Boolean, default: false },
+
     // When the day-before reminder was sent, or null if it has not been.
     // Same idempotence guard as PackageOrder.remindersSent: the cron may run
     // more than once and must not email the same member twice.

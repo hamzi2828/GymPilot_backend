@@ -87,6 +87,12 @@ const gymClassSchema = new mongoose.Schema({
     min: [1, 'Capacity must be at least 1'],
     default: 20
   },
+  // Where it runs -- one of the rooms in Settings, or free text.
+  room: {
+    type: String,
+    default: '',
+    trim: true
+  },
   features: {
     type: [String],
     default: []

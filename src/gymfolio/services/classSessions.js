@@ -9,20 +9,29 @@
 // 18:00". This module expands the rule over a date range on demand, which is
 // what lets a timetable be edited without migrating a table of pre-generated
 // sessions.
+//
+// One-off changes to a particular week -- a cancelled session, a closed day,
+// a stand-in instructor, a room change -- are ClassException rows and are
+// laid over the expanded sessions here, so every reader sees the same week.
+//
+// How far ahead members may book and how close to the start booking closes
+// come from the gym's booking rules (services/bookingRules.js).
 
 const mongoose = require('mongoose');
 const GymClass = require('../models/gymClassModel');
 const ClassBooking = require('../models/classBookingModel');
+const ClassException = require('../models/classExceptionModel');
+const { bookingRules, DEFAULTS } = require('./bookingRules');
 const T = require('../../attendance/services/timeUtils');
 
-// How far ahead a member may book. Long enough to plan a fortnight, short
-// enough that a timetable change does not invalidate months of bookings.
-const BOOKING_HORIZON_DAYS = 30;
+// The defaults, kept under their old names for the callers that report them.
+const BOOKING_HORIZON_DAYS = DEFAULTS.horizonDays;
+const CUTOFF_MINUTES = DEFAULTS.cutoffMinutes;
 
-// A session stops being bookable this long before it starts. Somebody
-// arriving as the class begins should talk to the desk, not book on their
-// phone in the doorway.
-const CUTOFF_MINUTES = 15;
+/** The gym's booking rules -- cached briefly per gym. */
+async function rules() {
+  return bookingRules();
+}
 
 /**
  * Every date within [from, to] falling on the given weekday.
@@ -61,18 +70,33 @@ function localInstant(dateKey, clock) {
 }
 
 /** Has this session already started (or come within the cutoff)? */
-function isClosed(sessionDate, sessionStart, now = new Date()) {
+function isClosed(sessionDate, sessionStart, now = new Date(), policy = null) {
+  const cutoff = policy ? policy.cutoffMinutes : CUTOFF_MINUTES;
   const startsAt = localInstant(sessionDate, sessionStart);
-  return startsAt.getTime() - CUTOFF_MINUTES * 60000 <= now.getTime();
+  return startsAt.getTime() - cutoff * 60000 <= now.getTime();
+}
+
+/** The exceptions touching a date range, oldest first. */
+async function exceptionsFor(from, to) {
+  return ClassException.find({ date: { $gte: from, $lte: to } }).lean();
+}
+
+/** The exception that applies to one session, if any. Cancellations win. */
+function exceptionFor(exceptions, classId, date, startTime) {
+  if (!exceptions || !exceptions.length) return null;
+  const hits = exceptions.filter((e) => ClassException.applies(e, classId, date, startTime));
+  if (!hits.length) return null;
+  return hits.find((e) => e.kind === 'cancelled') || hits[hits.length - 1];
 }
 
 /**
- * Expands one class's template across a date range.
+ * Expands one class's template across a date range, with any exceptions
+ * for those dates laid over it.
  *
  * Returns sessions with no booking counts attached -- withCounts() adds those
  * in one query rather than one per session.
  */
-function expand(gymClass, from, to) {
+function expand(gymClass, from, to, exceptions = []) {
   const schedule = Array.isArray(gymClass.schedule) ? gymClass.schedule : [];
   const sessions = [];
 
@@ -80,6 +104,9 @@ function expand(gymClass, from, to) {
     if (!slot || !slot.day || !slot.startTime) continue;
 
     for (const date of datesForWeekday(from, to, slot.day)) {
+      const exception = exceptionFor(exceptions, gymClass._id, date, slot.startTime);
+      const cancelled = !!(exception && exception.kind === 'cancelled');
+      const substitute = !!(exception && exception.kind === 'substitute');
       sessions.push({
         class_id: String(gymClass._id),
         class_name: gymClass.name,
@@ -89,13 +116,18 @@ function expand(gymClass, from, to) {
         start_time: slot.startTime,
         end_time: slot.endTime || '',
         instructor_name:
+          (substitute && exception.instructorName) ||
           slot.instructorName ||
           (slot.instructor && slot.instructor.name) ||
           '',
+        room: (substitute && exception.room) || gymClass.room || '',
         capacity: Number(gymClass.capacity) || 0,
         duration_minutes: Number(gymClass.duration) || null,
         difficulty: gymClass.difficulty || '',
-        starts_at: localInstant(date, slot.startTime)
+        starts_at: localInstant(date, slot.startTime),
+        is_cancelled: cancelled,
+        is_substitute: substitute,
+        change_note: exception ? exception.note || '' : ''
       });
     }
   }
@@ -114,8 +146,9 @@ function expand(gymClass, from, to) {
  * @param {string|null} forUserId when given, each session also says whether
  *        this member already holds a place on it
  */
-async function withCounts(sessions, forUserId = null) {
+async function withCounts(sessions, forUserId = null, policy = null) {
   if (!sessions.length) return [];
+  const rulesNow = policy || (await rules());
 
   const classIds = [...new Set(sessions.map((s) => s.class_id))];
   const dates = [...new Set(sessions.map((s) => s.date))];
@@ -177,7 +210,7 @@ async function withCounts(sessions, forUserId = null) {
     const own = mine.get(k) || null;
     const capacity = session.capacity;
     const spotsLeft = Math.max(0, capacity - count.booked);
-    const closed = isClosed(session.date, session.start_time, now);
+    const closed = isClosed(session.date, session.start_time, now, rulesNow);
 
     return {
       ...session,
@@ -189,7 +222,7 @@ async function withCounts(sessions, forUserId = null) {
       // Past, or inside the cutoff. The UI greys these rather than hiding
       // them, so a timetable still reads as a timetable earlier in the day.
       is_closed: closed,
-      can_book: !closed && !own,
+      can_book: !closed && !own && !session.is_cancelled,
       my_booking: own
         ? {
             id: String(own._id),
@@ -205,9 +238,10 @@ async function withCounts(sessions, forUserId = null) {
  * Clamps a requested range to something sane, defaulting to the booking
  * horizon starting today.
  */
-function readRange(query = {}) {
+function readRange(query = {}, policy = null) {
+  const horizon = policy ? policy.horizonDays : BOOKING_HORIZON_DAYS;
   const today = T.dateKey();
-  const maxTo = T.shiftDateKey(today, BOOKING_HORIZON_DAYS);
+  const maxTo = T.shiftDateKey(today, horizon);
 
   let from = /^\d{4}-\d{2}-\d{2}$/.test(String(query.from || '')) ? String(query.from) : today;
   let to = /^\d{4}-\d{2}-\d{2}$/.test(String(query.to || '')) ? String(query.to) : maxTo;
@@ -239,34 +273,43 @@ function findSlot(gymClass, sessionDate, sessionStart) {
 
 /** Sessions for one class over a range, counts included. */
 async function sessionsForClass(gymClass, query = {}, forUserId = null) {
-  const range = readRange(query);
-  return withCounts(expand(gymClass, range.from, range.to), forUserId);
+  const policy = await rules();
+  const range = readRange(query, policy);
+  const exceptions = await exceptionsFor(range.from, range.to);
+  return withCounts(expand(gymClass, range.from, range.to, exceptions), forUserId, policy);
 }
 
 /** Sessions across every active class -- the public timetable. */
 async function timetable(query = {}, forUserId = null) {
-  const range = readRange(query);
+  const policy = await rules();
+  const range = readRange(query, policy);
 
   const filter = { isActive: true };
   if (query.classId) filter._id = query.classId;
   if (query.category) filter.category = query.category;
 
-  const classes = await GymClass.find(filter)
-    .select('name slug schedule capacity duration difficulty category')
-    .populate('schedule.instructor', 'name')
-    .lean();
+  const [classes, exceptions] = await Promise.all([
+    GymClass.find(filter)
+      .select('name slug schedule capacity duration difficulty category room')
+      .populate('schedule.instructor', 'name')
+      .lean(),
+    exceptionsFor(range.from, range.to)
+  ]);
 
-  const all = classes.flatMap((gymClass) => expand(gymClass, range.from, range.to));
-  const sessions = await withCounts(all, forUserId);
+  const all = classes.flatMap((gymClass) => expand(gymClass, range.from, range.to, exceptions));
+  const sessions = await withCounts(all, forUserId, policy);
 
-  return { range, sessions };
+  return { range, sessions, rules: policy };
 }
 
 module.exports = {
   BOOKING_HORIZON_DAYS,
   CUTOFF_MINUTES,
+  rules,
   localInstant,
   isClosed,
+  exceptionsFor,
+  exceptionFor,
   expand,
   withCounts,
   readRange,
