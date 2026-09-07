@@ -215,6 +215,7 @@ const settingsController = {
       const { currentTenant } = require('../platform/tenantContext');
       const gym = currentTenant();
       data.ianaTimezone = (gym && gym.locale && gym.locale.timezone) || process.env.ATTENDANCE_TIMEZONE || 'UTC';
+      data.country = settings.country || (gym && gym.locale && gym.locale.country) || '';
       data.gymSlug = gym ? gym.slug : null;
       const apiBase = `${req.protocol}://${req.get('host')}`;
       data.stripeWebhookUrl = gym ? `${apiBase}/api/gymfolio/payment/webhook/${gym.slug}` : `${apiBase}/api/gymfolio/payment/webhook`;
@@ -269,6 +270,7 @@ const settingsController = {
         invoice,
         membership,
         ianaTimezone,
+        country,
         setupCompleted,
         messaging,
         booking,
@@ -450,6 +452,29 @@ const settingsController = {
           return res.status(400).json({ success: false, message: 'Currency must be a 3-letter ISO code such as USD, GBP or PKR' });
         }
         updateData.currency = code;
+      }
+      if (country !== undefined) {
+        const code = String(country || '').toUpperCase().trim();
+        if (code && !/^[A-Z]{2}$/.test(code)) {
+          return res.status(400).json({ success: false, message: 'Country must be a 2-letter ISO code such as GB, AE or PK' });
+        }
+        updateData.country = code;
+      }
+      // The gym's platform record carries the same country and currency (the
+      // panel shows them); keep the two in step.
+      if (updateData.currency !== undefined || updateData.country !== undefined) {
+        const { currentTenant } = require('../platform/tenantContext');
+        const gym = currentTenant();
+        if (gym) {
+          const Gym = require('../platform/models/gymModel');
+          const { invalidateTenantCache } = require('../platform/middleware/resolveTenant');
+          const set = {};
+          if (updateData.currency !== undefined) set['locale.currency'] = updateData.currency;
+          if (updateData.country !== undefined) set['locale.country'] = updateData.country;
+          await Gym.updateOne({ _id: gym._id }, { $set: set });
+          invalidateTenantCache();
+          gym.locale = { ...(gym.locale || {}), ...(updateData.currency !== undefined ? { currency: updateData.currency } : {}), ...(updateData.country !== undefined ? { country: updateData.country } : {}) };
+        }
       }
       if (taxRate !== undefined) updateData.taxRate = Number(taxRate);
       if (topSliderText !== undefined) updateData.topSliderText = topSliderText.trim();

@@ -97,6 +97,18 @@ const settingsSchema = new mongoose.Schema(
         message: 'Currency must be a 3-letter ISO code such as USD, GBP or PKR'
       }
     },
+    // Where the gym is (ISO 3166-1 alpha-2). Picked in Settings → General;
+    // fills the currency and timezone and is mirrored on the platform record.
+    country: {
+      type: String,
+      default: '',
+      uppercase: true,
+      trim: true,
+      validate: {
+        validator: (value) => !value || /^[A-Z]{2}$/.test(String(value)),
+        message: 'Country must be a 2-letter ISO code such as GB, AE or PK'
+      }
+    },
     taxRate: {
       type: Number,
       default: 0,

@@ -1,4 +1,5 @@
 const Package = require('../models/packageModel');
+const { currencyOr } = require('../../services/currency');
 
 const KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt_pack'];
 const INTERVALS = ['day', 'week', 'month', 'year'];
@@ -127,7 +128,8 @@ const createPackage = async (req, res) => {
     const packageData = {
       name,
       price,
-      currency: currency || 'PKR',
+      // The gym's own currency (Settings → General) unless one was given.
+      currency: await currencyOr(currency),
       period,
       features: parsedFeatures,
       theme: theme || 'light',

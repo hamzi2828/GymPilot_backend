@@ -19,6 +19,7 @@ const Role = require('../models/roleModel');
 const Attendance = require('../attendance/models/attendanceModel');
 const Trainer = require('../gymfolio/models/trainerModel');
 const { sendEmail } = require('../services/emailService');
+const { defaultCurrency, FALLBACK: FALLBACK_CURRENCY } = require('../services/currency');
 const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate } = require('../services/roleService');
 const T = require('../attendance/services/timeUtils');
 const { frontendOrigin: tenantOrigin } = require('../platform/tenantContext');
@@ -96,13 +97,13 @@ function cleanSchedule(input) {
   return rows.sort((a, b) => WEEKDAYS.indexOf(a.day) - WEEKDAYS.indexOf(b.day));
 }
 
-function cleanPayroll(input = {}) {
+function cleanPayroll(input = {}, fallbackCurrency = FALLBACK_CURRENCY) {
   const basis = input.basis === 'hourly' ? 'hourly' : 'salaried';
   return {
     basis,
     salary: Math.max(0, Number(input.salary) || 0),
     hourlyRate: Math.max(0, Number(input.hourlyRate) || 0),
-    currency: String(input.currency || 'PKR').trim().toUpperCase().slice(0, 8),
+    currency: String(input.currency || fallbackCurrency).trim().toUpperCase().slice(0, 8),
     cycle: PAY_CYCLES.includes(input.cycle) ? input.cycle : 'monthly',
     contractHoursPerWeek: Math.max(0, Number(input.contractHoursPerWeek) || 0),
     bankName: String(input.bankName || '').trim(),
@@ -112,7 +113,7 @@ function cleanPayroll(input = {}) {
   };
 }
 
-function cleanEmployment(input = {}, existing = {}) {
+function cleanEmployment(input = {}, existing = {}, fallbackCurrency = FALLBACK_CURRENCY) {
   return {
     isStaff: true,
     jobTitle: String(input.jobTitle ?? existing.jobTitle ?? '').trim(),
@@ -122,7 +123,7 @@ function cleanEmployment(input = {}, existing = {}) {
       : existing.employmentType || 'full_time',
     joinedAt: input.joinedAt ? new Date(input.joinedAt) : existing.joinedAt || new Date(),
     endedAt: input.endedAt ? new Date(input.endedAt) : existing.endedAt || null,
-    payroll: cleanPayroll(input.payroll || existing.payroll || {}),
+    payroll: cleanPayroll(input.payroll || existing.payroll || {}, fallbackCurrency),
     schedule: input.schedule !== undefined ? cleanSchedule(input.schedule) : existing.schedule || [],
     emergencyContact: {
       name: String((input.emergencyContact || {}).name ?? (existing.emergencyContact || {}).name ?? '').trim(),
@@ -328,6 +329,8 @@ module.exports = {
   create: async (req, res) => {
     try {
       await ensureDefaultRoles();
+      // Payroll is kept in the gym's currency unless the form says otherwise.
+      const fallbackCurrency = await defaultCurrency();
 
       const { firstName, lastName, email, phone, role } = req.body || {};
 
@@ -373,7 +376,7 @@ module.exports = {
         role: roleDoc.slug,
         isActive: true,
         staffCode: await nextStaffCode(),
-        employment: cleanEmployment(req.body.employment || req.body),
+        employment: cleanEmployment(req.body.employment || req.body, {}, fallbackCurrency),
         allowAttendanceApp: !!req.body.allowAttendanceApp,
         allowFingerprintEnrollment: !!req.body.allowFingerprintEnrollment,
         attendanceLocation: String(req.body.attendanceLocation || '').trim()
@@ -470,7 +473,8 @@ module.exports = {
       if (roleDoc && roleDoc.isStaff) {
         user.employment = cleanEmployment(
           req.body.employment || req.body,
-          (user.employment && user.employment.toObject ? user.employment.toObject() : user.employment) || {}
+          (user.employment && user.employment.toObject ? user.employment.toObject() : user.employment) || {},
+          await defaultCurrency()
         );
         if (!user.staffCode) user.staffCode = await nextStaffCode();
       }

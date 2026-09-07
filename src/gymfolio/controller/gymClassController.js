@@ -1,4 +1,5 @@
 const GymClass = require('../models/gymClassModel');
+const { currencyOr } = require('../../services/currency');
 const { checkLimit } = require('../../platform/planLimits');
 
 // Check if Vercel Blob is configured
@@ -290,7 +291,7 @@ const createClass = async (req, res) => {
       isFeatured: isFeatured !== undefined ? isFeatured === 'true' || isFeatured === true : false,
       order: order ? parseInt(order) : undefined,
       price: price ? parseFloat(price) : 0,
-      currency: currency || 'PKR'
+      currency: await currencyOr(currency)
     };
 
     // The gym's platform plan may cap how many classes it can run.
