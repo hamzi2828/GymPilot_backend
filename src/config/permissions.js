@@ -20,6 +20,7 @@ const LEVEL_RANK = { none: 0, view: 1, manage: 2 };
 // editor can be laid out the same way as the menu it controls.
 const PERMISSION_TABS = [
   { key: 'dashboard',      label: 'Dashboard',       group: 'Overview',  path: '/admin' },
+  { key: 'reports',        label: 'Reports',         group: 'Overview',  path: '/admin/reports' },
 
   { key: 'classes',        label: 'Classes',         group: 'Fitness',   path: '/admin/classes' },
   { key: 'bookings',       label: 'Bookings',        group: 'Fitness',   path: '/admin/bookings' },

@@ -101,6 +101,11 @@ router.post('/admin/users/import', auth, requirePermission('users', 'manage'), c
 const dashboardController = require('../controller/dashboardController');
 router.get('/admin/dashboard', auth, requirePermission('dashboard'), dashboardController.overview);
 
+// Reports and CSV exports -- see controller/reportsController.js.
+const reportsController = require('../controller/reportsController');
+router.get('/admin/reports/overview', auth, requirePermission('reports'), reportsController.overview);
+router.get('/admin/reports/export/:kind', auth, requirePermission('reports'), reportsController.export);
+
 // ---------------------------------------------------------------------------
 // Roles and access
 //
@@ -124,6 +129,26 @@ router.post('/staff', auth, requirePermission('staff', 'manage'), staffControlle
 router.put('/staff/:id', auth, requirePermission('staff', 'manage'), staffController.update);
 router.patch('/staff/:id/status', auth, requirePermission('staff', 'manage'), staffController.setStatus);
 router.delete('/staff/:id', auth, requirePermission('staff', 'manage'), staffController.remove);
+
+// ---------------------------------------------------------------------------
+// Leave, payslips and the roster -- see controller/hrController.js. The
+// /staff/me/* routes are self-service for any staff account; the rest sit
+// behind the staff permission like the staff records themselves.
+// ---------------------------------------------------------------------------
+const hrController = require('../controller/hrController');
+router.get('/staff/me/work', auth, hrController.myWork);
+router.post('/staff/me/leave', auth, hrController.requestLeave);
+router.delete('/staff/me/leave/:id', auth, hrController.withdrawLeave);
+router.get('/staff/me/payslips/:id/pdf', auth, hrController.myPayslipPdf);
+router.get('/staff/roster', auth, requirePermission('staff'), hrController.roster);
+router.get('/staff/leave', auth, requirePermission('staff'), hrController.listLeave);
+router.post('/staff/leave', auth, requirePermission('staff', 'manage'), hrController.createLeave);
+router.patch('/staff/leave/:id', auth, requirePermission('staff', 'manage'), hrController.decideLeave);
+router.get('/staff/payslips', auth, requirePermission('staff'), hrController.listPayslips);
+router.post('/staff/payslips/generate', auth, requirePermission('staff', 'manage'), hrController.generatePayslips);
+router.get('/staff/payslips/:id/pdf', auth, requirePermission('staff'), hrController.payslipPdf);
+router.put('/staff/payslips/:id', auth, requirePermission('staff', 'manage'), hrController.updatePayslip);
+router.post('/staff/payslips/:id/:action', auth, requirePermission('staff', 'manage'), hrController.setPayslipStatus);
 
 // Google OAuth 2.0 redirect flow
 router.get('/auth/google', userController.startGoogleOAuth);

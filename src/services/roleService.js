@@ -74,6 +74,7 @@ const DEFAULT_ROLES = [
     order: 1,
     permissions: fullPermissionMap({
       dashboard: 'view',
+      reports: 'view',
       classes: 'manage',
       pt: 'manage',
       trainers: 'manage',
@@ -150,6 +151,7 @@ const DEFAULT_ROLES = [
     order: 5,
     permissions: fullPermissionMap({
       dashboard: 'view',
+      reports: 'view',
       'package-orders': 'view',
       registrations: 'view',
       attendance: 'view',
