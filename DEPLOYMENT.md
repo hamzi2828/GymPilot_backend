@@ -51,8 +51,7 @@ online or staff recorded consent under Users.
 
 ## 5. After the first deploy
 
-1. Sign in at `/super-admin` (account `usman@ucademy.co.uk`; change the
-   password under **My account**, turn on two-factor once SMTP works).
+1. Sign in at `/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
 2. Create your platform plans (**Plans**) and put The Jymor on one.
 3. Provision new gyms from **Gyms → New gym**; each owner lands in the setup
    wizard at `/admin/setup`.
