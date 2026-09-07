@@ -11,6 +11,7 @@
 
 const mongoose = require('mongoose');
 const { ensureModelsOn } = require('./modelRegistry');
+const { databaseNameFor, isProtectedDatabase } = require('./dbNames');
 
 // Same shape as config/mongo.js uses for the primary connection.
 const CONNECTION_OPTIONS = {
@@ -21,11 +22,6 @@ const CONNECTION_OPTIONS = {
 };
 
 const dedicated = new Map(); // uri -> Connection
-
-function databaseNameFor(slug) {
-  const prefix = process.env.TENANT_DB_PREFIX || 'gympilot_';
-  return `${prefix}${String(slug).replace(/[^a-z0-9_-]/gi, '_')}`;
-}
 
 async function getTenantConnection(gym) {
   const database = (gym && gym.database) || {};
@@ -76,6 +72,13 @@ async function dropTenantDatabase(gym) {
   }
 
   const name = database.name || databaseNameFor(gym.slug);
+  if (isProtectedDatabase(name)) {
+    // The main database also holds the platform's own records (and the
+    // first gym); losing it would take every gym offline.
+    const error = new Error(`Database "${name}" is the platform database and cannot be dropped. Remove the gym without dropping its database.`);
+    error.status = 400;
+    throw error;
+  }
   await mongoose.connection.asPromise();
   await mongoose.connection.getClient().db(name).dropDatabase();
 }

@@ -13,7 +13,8 @@
 const bcrypt = require('bcryptjs');
 const Gym = require('./models/gymModel');
 const PlatformPlan = require('./models/platformPlanModel');
-const { databaseNameFor, dropTenantDatabase } = require('./connections');
+const { dropTenantDatabase } = require('./connections');
+const { databaseNameFor, isProtectedDatabase } = require('./dbNames');
 const { runWithTenant, originForHost } = require('./tenantContext');
 const { invalidateTenantCache } = require('./middleware/resolveTenant');
 
@@ -315,7 +316,12 @@ async function deleteGym(gym, { confirmSlug, dropDatabase = false } = {}) {
   }
   if (dropDatabase) {
     const withUri = await Gym.findById(gym._id).select('+database.uri').lean();
-    await dropTenantDatabase(withUri || gym);
+    const target = withUri || gym;
+    const name = (target.database && target.database.name) || databaseNameFor(gym.slug);
+    if (!(target.database && target.database.uri) && isProtectedDatabase(name)) {
+      throw new ProvisioningError(`"${name}" is the platform's main database and cannot be dropped. Remove the gym without dropping its database.`, 400);
+    }
+    await dropTenantDatabase(target);
   }
   await Gym.deleteOne({ _id: gym._id });
   invalidateTenantCache();

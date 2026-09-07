@@ -1,18 +1,20 @@
 // src/platform/platformDb.js
 //
-// The platform's own database: the list of gyms, the plans they are on, and
-// the super-admin accounts that manage them. Separate from every gym's
-// database, and never reachable through a gym's API token.
+// The platform's own collections: the list of gyms, the plans they are on,
+// and the super-admin accounts that manage them. They live in the main
+// database (the one MONGO_URI names -- see dbNames.js) and are never
+// reachable through a gym's API token.
 
 const mongoose = require('mongoose');
 const { lazyModel } = require('./modelRegistry');
-
-const PLATFORM_DB_NAME = process.env.PLATFORM_DB_NAME || 'gympilot_platform';
+const { platformDatabaseName } = require('./dbNames');
 
 function platformConnection() {
   // useDb queues the wiring until the primary connection is open, so this is
-  // safe to call before connect() has finished.
-  return mongoose.connection.useDb(PLATFORM_DB_NAME, { useCache: true });
+  // safe to call before connect() has finished. With useCache the platform
+  // and a gym that shares this database get the same Connection object; the
+  // model names do not overlap, so both sets compile on it side by side.
+  return mongoose.connection.useDb(platformDatabaseName(), { useCache: true });
 }
 
 /**
@@ -23,4 +25,4 @@ function platformModel(name, schema) {
   return lazyModel(name, schema, platformConnection, 'platform');
 }
 
-module.exports = { PLATFORM_DB_NAME, platformConnection, platformModel };
+module.exports = { platformDatabaseName, platformConnection, platformModel };

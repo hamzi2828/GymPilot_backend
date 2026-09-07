@@ -5,14 +5,21 @@ per gym**. A gym is served on its own domain(s); the platform owner manages
 every gym from a super-admin panel.
 
 ```
- gymA.com ─┐                                 ┌─ MongoDB  gympilot_gyma
- gymB.com ─┤   Next.js site (one deploy)     ├─ MongoDB  gympilot_gymb
- gymC.com ─┘          │                      ├─ MongoDB  gymwear        (the original gym)
+ gymA.com ─┐                                 ┌─ MongoDB  gymwear_gyma
+ gymB.com ─┤   Next.js site (one deploy)     ├─ MongoDB  gymwear_gymb
+ gymC.com ─┘          │                      │
                       ▼  Origin / X-Tenant-Host
               GymPilot_backend ───────────────┤
-              /api/platform  (super admin)    └─ MongoDB  gympilot_platform
-                                                  gyms · platform_plans · super_admins · platform_audit_logs
+              /api/platform  (super admin)    └─ MongoDB  gymwear   (the main database)
+                                                  the original gym's data
+                                                  + gyms · platform_plans · super_admins · platform_audit_logs
 ```
+
+**Database names** (`src/platform/dbNames.js`): the database in `MONGO_URI`
+is the main one. It holds the platform's own collections and the first gym.
+Every gym created from the panel gets `<main>_<slug>` — `gymwear_gym1`,
+`gymwear_gym2`, … — unless a different name is typed in the form. The main
+database can never be dropped through the panel.
 
 ## How a request finds its gym
 
@@ -101,6 +108,9 @@ node scripts/platform/provisionGym.js --name "Iron Works" --domain ironworks.com
 
 node scripts/platform/listGyms.js [--stats]
 node scripts/platform/deleteGym.js --gym <slug> --confirm <slug> [--drop-database]
+
+# Moving the platform collections between databases (one-off)
+node scripts/platform/movePlatformData.js --from gympilot_platform --to gymwear [--drop-source]
 ```
 
 Provisioning creates the database, the system roles, a settings row with the
@@ -116,8 +126,8 @@ the API allows the origin and serves the gym's database from the next request.
 
 ### Environment
 
-See `.env.example`: `PLATFORM_DB_NAME`, `TENANT_DB_PREFIX`,
-`DEFAULT_TENANT_SLUG`, `PLATFORM_ROOT_DOMAIN`, `PLATFORM_JWT_SECRET`,
+See `.env.example`: `PLATFORM_DB_NAME` and `TENANT_DB_PREFIX` (both optional,
+derived from `MONGO_URI`), `DEFAULT_TENANT_SLUG`, `PLATFORM_ROOT_DOMAIN`, `PLATFORM_JWT_SECRET`,
 `PLATFORM_TOKEN_TTL`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`,
 `PLATFORM_ADMIN_ORIGIN`, `SUBSCRIPTION_GRACE_DAYS`.
 

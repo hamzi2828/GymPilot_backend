@@ -13,7 +13,25 @@ const superAdminSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, required: true, select: false },
     isActive: { type: Boolean, default: true },
-    lastLogin: { type: Date, default: null }
+    lastLogin: { type: Date, default: null },
+
+    // Emailed six-digit code at sign-in, per account.
+    twoFactor: {
+      enabled: { type: Boolean, default: false },
+      pending: {
+        challengeId: { type: String, default: null, index: true },
+        codeHash: { type: String, default: null, select: false },
+        expiresAt: { type: Date, default: null },
+        attempts: { type: Number, default: 0 }
+      }
+    },
+
+    // Only the hash of an outstanding reset token is kept; the token itself
+    // is emailed and forgotten.
+    passwordReset: {
+      tokenHash: { type: String, default: null, select: false },
+      expiresAt: { type: Date, default: null }
+    }
   },
   {
     timestamps: true,
