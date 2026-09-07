@@ -35,8 +35,10 @@ Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).t
 
 ## 3. Frontend (Vercel)
 
-* Add every gym's domain to the frontend project (Settings → Domains) and to
-  the gym in `/super-admin`. Point DNS at Vercel.
+* Add every gym's domain to the gym in `/super-admin`. With `VERCEL_TOKEN`
+  and `VERCEL_PROJECT_ID` set on the API, the domain is added to the
+  frontend project for you and the panel shows the DNS record to create;
+  without them, add it under the project's Settings → Domains by hand.
 * `NEXT_PUBLIC_BACKEND_URL` unchanged.
 
 ## 4. Front-desk PCs

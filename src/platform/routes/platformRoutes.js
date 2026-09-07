@@ -58,6 +58,7 @@ router.delete('/gyms/:id', gymsController.remove);
 router.get('/gyms/:id/stats', gymsController.stats);
 router.get('/gyms/:id/admins', gymsController.listAdmins);
 router.put('/gyms/:id/domains', gymsController.updateDomains);
+router.get('/gyms/:id/domains/status', gymsController.domainsStatus);
 router.patch('/gyms/:id/status', gymsController.setStatus);
 router.put('/gyms/:id/subscription', gymsController.updateSubscription);
 router.post('/gyms/:id/reset-owner-password', gymsController.resetOwnerPassword);

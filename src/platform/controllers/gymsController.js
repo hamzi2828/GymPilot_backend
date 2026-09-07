@@ -257,10 +257,36 @@ module.exports = {
       const gym = await loadGym(req.params.id);
       if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
 
+      const before = new Set((gym.domains || []).map((d) => d.host));
       await replaceDomains(gym, (req.body || {}).domains);
       audit(req, 'gym_domains_updated', gym, { domains: gym.domains.map((d) => d.host) });
 
-      return res.json({ success: true, data: publicGym(gym) });
+      // Put new hosts on the website's Vercel project and take removed ones
+      // off, when Vercel is connected. Best effort: the domain is saved on the
+      // gym either way, and the panel shows what to do next.
+      const vercel = require('../vercelDomains');
+      const after = new Set(gym.domains.map((d) => d.host));
+      const hosting = {
+        connected: vercel.configured(),
+        added: await Promise.all([...after].filter((h) => !before.has(h) && !/^localhost(:\d+)?$/.test(h)).map((h) => vercel.addDomain(h))),
+        removed: await Promise.all([...before].filter((h) => !after.has(h) && !/^localhost(:\d+)?$/.test(h)).map((h) => vercel.removeDomain(h)))
+      };
+
+      return res.json({ success: true, data: publicGym(gym), hosting });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // GET /api/platform/gyms/:id/domains/status  -> is each domain live on Vercel?
+  domainsStatus: async (req, res) => {
+    try {
+      const gym = await loadGym(req.params.id);
+      if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
+      const vercel = require('../vercelDomains');
+      const hosts = (gym.domains || []).map((d) => d.host).filter((h) => !/^localhost(:\d+)?$/.test(h));
+      const data = await Promise.all(hosts.map((h) => vercel.domainStatus(h)));
+      return res.json({ success: true, connected: vercel.configured(), data });
     } catch (error) {
       return fail(res, error);
     }

@@ -287,6 +287,41 @@ const settingsSchema = new mongoose.Schema(
     // Named rooms / studios a class can be put in.
     rooms: { type: [String], default: [] },
 
+    // Search engines and social previews.
+    seo: {
+      title: { type: String, default: '', trim: true },
+      description: { type: String, default: '', trim: true },
+      keywords: { type: String, default: '', trim: true },
+      ogImage: { type: String, default: '', trim: true }
+    },
+    // Where the gym is, for the contact page map and the structured data.
+    maps: {
+      embedUrl: { type: String, default: '', trim: true },
+      placeUrl: { type: String, default: '', trim: true },
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null }
+    },
+    // Opening hours, shown on the site and in the structured data.
+    openingHours: {
+      type: [
+        new mongoose.Schema(
+          {
+            day: { type: String, enum: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'], required: true },
+            open: { type: String, default: '06:00' },
+            close: { type: String, default: '22:00' },
+            closed: { type: Boolean, default: false }
+          },
+          { _id: false }
+        )
+      ],
+      default: []
+    },
+    // The language the public site and portal read in, and its direction.
+    locale: {
+      language: { type: String, default: 'en', trim: true },
+      direction: { type: String, enum: ['ltr', 'rtl'], default: 'ltr' }
+    },
+
     // Site colour scheme. Stores a preset key; the frontend maps it to CSS
     // custom properties so the whole site recolours from one value.
     theme: {

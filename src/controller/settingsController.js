@@ -165,7 +165,11 @@ const settingsController = {
         whatsappButton: settings.messaging?.whatsappButton?.enabled && settings.messaging.whatsappButton.number
           ? { number: settings.messaging.whatsappButton.number, message: settings.messaging.whatsappButton.message || '' }
           : null,
-        pushPublicKey: settings.messaging?.push?.enabled ? settings.messaging.push.vapidPublicKey || '' : ''
+        pushPublicKey: settings.messaging?.push?.enabled ? settings.messaging.push.vapidPublicKey || '' : '',
+        seo: settings.seo || {},
+        maps: settings.maps || {},
+        openingHours: settings.openingHours || [],
+        locale: settings.locale || { language: 'en', direction: 'ltr' }
       };
 
       return res.status(200).json({
@@ -269,7 +273,11 @@ const settingsController = {
         messaging,
         booking,
         pt,
-        rooms
+        rooms,
+        seo,
+        maps,
+        openingHours,
+        locale
       } = req.body;
 
       // Prepare update data with only provided fields
@@ -327,6 +335,40 @@ const settingsController = {
       if (messaging && typeof messaging === 'object') {
         const currentDoc = await Settings.findOne({ isActive: true }).select('messaging').lean();
         updateData.messaging = mergeMessaging((currentDoc && currentDoc.messaging) || {}, messaging);
+      }
+      if (seo && typeof seo === 'object') {
+        updateData.seo = {
+          title: String(seo.title || '').trim().slice(0, 120),
+          description: String(seo.description || '').trim().slice(0, 300),
+          keywords: String(seo.keywords || '').trim().slice(0, 300),
+          ogImage: String(seo.ogImage || '').trim().slice(0, 500)
+        };
+      }
+      if (maps && typeof maps === 'object') {
+        const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
+        // Only an embed from Google's "share → embed a map" is accepted, so
+        // the contact page never frames an arbitrary site.
+        const embedUrl = String(maps.embedUrl || '').trim();
+        updateData.maps = {
+          embedUrl: /^https:\/\/www\.google\.com\/maps\/embed/.test(embedUrl) ? embedUrl.slice(0, 2000) : '',
+          placeUrl: /^https:\/\/(www\.google\.com\/maps|maps\.app\.goo\.gl|goo\.gl\/maps)/.test(String(maps.placeUrl || '').trim()) ? String(maps.placeUrl).trim().slice(0, 500) : '',
+          latitude: num(maps.latitude),
+          longitude: num(maps.longitude)
+        };
+      }
+      if (Array.isArray(openingHours)) {
+        const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        const clock = (v, fallback) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')) ? String(v) : fallback);
+        updateData.openingHours = DAYS.map((day) => {
+          const row = openingHours.find((r) => r && r.day === day) || {};
+          return { day, open: clock(row.open, '06:00'), close: clock(row.close, '22:00'), closed: row.closed === true || row.closed === 'true' };
+        });
+      }
+      if (locale && typeof locale === 'object') {
+        updateData.locale = {
+          language: String(locale.language || 'en').trim().toLowerCase().slice(0, 10) || 'en',
+          direction: locale.direction === 'rtl' ? 'rtl' : 'ltr'
+        };
       }
       if ((booking && typeof booking === 'object') || (pt && typeof pt === 'object') || Array.isArray(rooms)) {
         const rules = require('../gymfolio/services/bookingRules');
