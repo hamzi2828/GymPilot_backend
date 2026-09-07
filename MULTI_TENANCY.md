@@ -79,7 +79,7 @@ Connections: gyms on the platform cluster share the primary pool via
 
 ## The platform panel
 
-Website: `/super-admin` (login at `/super-admin/login`). API: `/api/platform/*`
+App: `GymPilot_frontendAdmin` -- the marketing site at `/` and the panel at `/super-admin` (login at `/super-admin/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `POST /api/platform/public/demo-requests`)
 (`src/platform/routes/platformRoutes.js`). Its accounts (`super_admins`) and
 session token are separate from every gym's.
 

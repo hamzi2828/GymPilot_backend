@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const Gym = require('../models/gymModel');
 const PlatformPlan = require('../models/platformPlanModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
+const DemoRequest = require('../models/demoRequestModel');
 const {
   ProvisioningError,
   provisionGym,
@@ -108,13 +109,34 @@ module.exports = {
       const subscriptions = {};
       for (const row of bySubscription) subscriptions[row._id || 'unknown'] = row.count;
 
+      // The gyms somebody should look at, for the panel's overview.
+      const brief = (g) => ({
+        id: String(g._id),
+        name: g.name,
+        slug: g.slug,
+        plan: g.plan && g.plan.name ? g.plan.name : null,
+        currentPeriodEnd: g.subscription && g.subscription.currentPeriodEnd
+      });
+      const [renewing, pastDue, suspendedGyms, newRequests] = await Promise.all([
+        Gym.find({ status: 'active', 'subscription.status': { $in: ['trialing', 'active'] }, 'subscription.currentPeriodEnd': { $ne: null, $gte: now, $lte: in30 } })
+          .sort({ 'subscription.currentPeriodEnd': 1 })
+          .limit(10)
+          .populate('plan', 'name')
+          .lean(),
+        Gym.find({ status: 'active', 'subscription.status': { $in: ['past_due', 'expired'] } }).sort({ 'subscription.currentPeriodEnd': 1 }).limit(10).populate('plan', 'name').lean(),
+        Gym.find({ status: 'suspended' }).sort({ updatedAt: -1 }).limit(10).populate('plan', 'name').lean(),
+        DemoRequest.countDocuments({ status: 'new' })
+      ]);
+
       return res.json({
         success: true,
         data: {
           gyms: { total, active, suspended },
           subscriptions,
           expiring_within_30_days: expiringSoon,
-          mrr: mrrRows.map((row) => ({ currency: row._id, amount: Math.round(row.mrr * 100) / 100, gyms: row.gyms }))
+          mrr: mrrRows.map((row) => ({ currency: row._id, amount: Math.round(row.mrr * 100) / 100, gyms: row.gyms })),
+          attention: { renewing: renewing.map(brief), past_due: pastDue.map(brief), suspended: suspendedGyms.map(brief) },
+          demo_requests_new: newRequests
         }
       });
     } catch (error) {
@@ -475,7 +497,7 @@ module.exports = {
   auditLog: async (req, res) => {
     try {
       const rows = await PlatformAuditLog.find({}).sort({ createdAt: -1 }).limit(200).lean();
-      return res.json({ success: true, data: rows });
+      return res.json({ success: true, data: rows.map((r) => ({ ...r, gymId: r.gymId ? String(r.gymId) : null })) });
     } catch (error) {
       return fail(res, error);
     }

@@ -115,10 +115,22 @@ const desktopLoginLimiter = rateLimit({
   message: 'Too many sign-in attempts from this location. Please wait a few minutes.'
 });
 
+/**
+ * Demo requests from the public marketing site. One person needs one; a
+ * script needs to be stopped before it fills the inbox.
+ */
+const demoRequestLimiter = rateLimit({
+  ...SHARED,
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: 'Too many requests from this address. Please try again later or email us directly.'
+});
+
 module.exports = {
   loginLimiter,
   passwordResetLimiter,
   passwordResetConfirmLimiter,
   signupLimiter,
-  desktopLoginLimiter
+  desktopLoginLimiter,
+  demoRequestLimiter
 };

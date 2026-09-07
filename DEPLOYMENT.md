@@ -13,7 +13,7 @@ it is code.
 | `TENANT_DB_PREFIX` | leave unset (= `gymwear_`) | New gyms get `gymwear_<slug>` on the same cluster. |
 | `PLATFORM_JWT_SECRET` | a fresh random 64-char string | Signs super-admin sessions separately from gym sessions. |
 | `QR_TOKEN_SECRET` | a fresh random 64-char string | Signs members' check-in QR codes. |
-| `PLATFORM_ADMIN_ORIGIN` | e.g. `https://thejymor.com` | Where `/super-admin` is opened; used for password-reset links and CORS. |
+| `PLATFORM_ADMIN_ORIGIN` | e.g. `https://gympilot.app` | Where the marketing site + platform panel (`GymPilot_frontendAdmin`) is served; used for CORS, password-reset links and demo-request emails. |
 | `SUBSCRIPTION_GRACE_DAYS` | `7` | Days a gym is served after its platform subscription lapses. |
 | `FINGERPRINT_ENCRYPTION_KEY` | **leave as it is** | Existing templates were encrypted with the current secret (JWT_SECRET fallback). Changing it makes them unreadable. |
 | `SMTP_*` | working credentials | The current ones are rejected (`535`). Nothing emails until this is fixed — including 2FA codes and password resets. |
@@ -35,7 +35,7 @@ Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).t
 
 ## 3. Frontend (Vercel)
 
-* Add every gym's domain to the gym in `/super-admin`. With `VERCEL_TOKEN`
+* Add every gym's domain to the gym in the platform panel (`<PLATFORM_ADMIN_ORIGIN>/super-admin`). With `VERCEL_TOKEN`
   and `VERCEL_PROJECT_ID` set on the API, the domain is added to the
   frontend project for you and the panel shows the DNS record to create;
   without them, add it under the project's Settings → Domains by hand.
@@ -51,7 +51,7 @@ online or staff recorded consent under Users.
 
 ## 5. After the first deploy
 
-1. Sign in at `/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
+1. Deploy `GymPilot_frontendAdmin` (marketing site + platform panel) with `NEXT_PUBLIC_BACKEND_URL` and `NEXT_PUBLIC_SITE_URL` set, and put its origin in the API's `PLATFORM_ADMIN_ORIGIN`. Sign in at `<that origin>/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
 2. Create your platform plans (**Plans**) and put The Jymor on one.
 3. Provision new gyms from **Gyms → New gym**; each owner lands in the setup
    wizard at `/admin/setup`.

@@ -58,6 +58,31 @@ async function withGymCounts(plans) {
 
 module.exports = {
   // GET /api/platform/plans
+  // GET /api/platform/public/plans -- the price list for the marketing site:
+  // active plans only, and nothing about who is on them.
+  publicPlans: async (req, res) => {
+    try {
+      const plans = await PlatformPlan.find({ isActive: true }).sort({ order: 1, createdAt: 1 }).lean();
+      return res.json({
+        success: true,
+        data: plans.map((plan) => ({
+          id: String(plan._id),
+          name: plan.name,
+          slug: plan.slug,
+          description: plan.description || '',
+          price: plan.price,
+          limits: plan.limits,
+          features: plan.features || [],
+          trialDays: plan.trialDays,
+          order: plan.order
+        }))
+      });
+    } catch (error) {
+      console.error('[platform] public plans:', error);
+      return res.status(500).json({ success: false, message: 'Could not load plans' });
+    }
+  },
+
   list: async (req, res) => {
     try {
       const plans = await PlatformPlan.find({}).sort({ order: 1, createdAt: 1 }).lean();

@@ -17,6 +17,7 @@ setting is on the gym's `settings` document.
 | Reports & exports | `controller/reportsController.js`, `services/csv.js` | `/admin/reports` | — | `reports` |
 | Website: SEO, map, hours, language, embed, domains | `settings.seo/maps/openingHours/locale`, `platform/vercelDomains.js` | Settings → General → Website; platform panel domains | `/embed/timetable`, JSON-LD, language switcher | `settings` |
 | PWA | — | — | `manifest.ts`, `public/sw.js` | — |
+| Marketing site + platform panel (plans, gyms, demo requests) | `platform/routes/platformRoutes.js`, `platform/controllers/{gymsController,plansController,demoRequestsController}.js`, `platform/models/demoRequestModel.js` | `GymPilot_frontendAdmin` (`/` landing, `/super-admin` panel) | — | super admin session |
 
 ## Daily job
 

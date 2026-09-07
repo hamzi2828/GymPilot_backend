@@ -8,13 +8,14 @@ const express = require('express');
 const router = express.Router();
 
 const { platformAuth } = require('../middleware/platformAuth');
-const { loginLimiter, passwordResetLimiter, passwordResetConfirmLimiter } = require('../../middleware/rateLimit');
+const { loginLimiter, passwordResetLimiter, passwordResetConfirmLimiter, demoRequestLimiter } = require('../../middleware/rateLimit');
 const { warmPlatformModels } = require('../models');
 const { platformDatabaseName, tenantDatabasePrefix } = require('../dbNames');
 
 const authController = require('../controllers/platformAuthController');
 const gymsController = require('../controllers/gymsController');
 const plansController = require('../controllers/plansController');
+const demoRequestsController = require('../controllers/demoRequestsController');
 
 router.use((req, res, next) => {
   warmPlatformModels();
@@ -29,6 +30,11 @@ router.post('/auth/reset-password', passwordResetConfirmLimiter, authController.
 router.get('/auth/me', platformAuth, authController.me);
 router.put('/auth/password', platformAuth, authController.changePassword);
 router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
+
+// Public: what the marketing site (GymPilot_frontendAdmin) reads and posts.
+// No session; nothing here says anything about a gym.
+router.get('/public/plans', plansController.publicPlans);
+router.post('/public/demo-requests', demoRequestLimiter, demoRequestsController.submit);
 
 router.use(platformAuth);
 
@@ -68,5 +74,9 @@ router.get('/plans', plansController.list);
 router.post('/plans', plansController.create);
 router.put('/plans/:id', plansController.update);
 router.delete('/plans/:id', plansController.remove);
+
+// Demo requests from the marketing site
+router.get('/demo-requests', demoRequestsController.list);
+router.patch('/demo-requests/:id', demoRequestsController.update);
 
 module.exports = router;
