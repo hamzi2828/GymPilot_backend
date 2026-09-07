@@ -163,5 +163,24 @@ module.exports = {
       console.error('[platform] demo request update failed:', error);
       return res.status(500).json({ success: false, message: error.message || 'Request failed' });
     }
+  },
+
+  // DELETE /api/platform/demo-requests/:id -- spam, duplicates, test entries.
+  remove: async (req, res) => {
+    try {
+      const doc = await DemoRequest.findByIdAndDelete(req.params.id);
+      if (!doc) return res.status(404).json({ success: false, message: 'Demo request not found' });
+      PlatformAuditLog.record({
+        actorId: req.superAdmin._id,
+        actorEmail: req.superAdmin.email,
+        action: 'demo_request_deleted',
+        meta: { id: String(doc._id), email: doc.email, gymName: doc.gymName },
+        ip: clientIp(req)
+      });
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('[platform] demo request delete failed:', error);
+      return res.status(500).json({ success: false, message: error.message || 'Request failed' });
+    }
   }
 };

@@ -3,7 +3,8 @@
 //   node scripts/platform/createSuperAdmin.js owner@gympilot.com "a strong password" --name "Your Name"
 //
 // Super admins live in the platform database, not in any gym's. They sign in
-// at /super-admin on the website and see every gym, its plan and its numbers.
+// at /login on the platform site (GymPilot_frontendAdmin) and see every gym,
+// its plan and its numbers.
 //
 // On a host with no shell (Vercel), set SUPER_ADMIN_EMAIL and
 // SUPER_ADMIN_PASSWORD in the environment instead: the first sign-in attempt
@@ -44,7 +45,7 @@ async function main() {
     admin = await SuperAdmin.create({ email: normalised, password: hashed, name, isActive: true });
     console.log(`\nSuper admin created: ${admin.email}`);
   }
-  console.log('Sign in at <your website>/super-admin\n');
+  console.log('Sign in at <platform site>/login\n');
 }
 
 main()

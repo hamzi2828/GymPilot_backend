@@ -190,7 +190,7 @@ module.exports = {
       admin.passwordReset = { tokenHash: hashToken(token), expiresAt: new Date(Date.now() + RESET_TTL_MS) };
       await admin.save();
 
-      const url = `${await panelOrigin(req)}/super-admin/reset?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
+      const url = `${await panelOrigin(req)}/reset?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
       const body = [
         paragraph(`Hi ${escapeHtml(admin.name || 'there')}, someone asked to reset the password for your ${PLATFORM_NAME} platform account.`),
         button(url, 'Choose a new password'),

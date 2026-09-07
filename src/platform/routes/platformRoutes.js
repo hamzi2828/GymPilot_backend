@@ -78,5 +78,6 @@ router.delete('/plans/:id', plansController.remove);
 // Demo requests from the marketing site
 router.get('/demo-requests', demoRequestsController.list);
 router.patch('/demo-requests/:id', demoRequestsController.update);
+router.delete('/demo-requests/:id', demoRequestsController.remove);
 
 module.exports = router;
