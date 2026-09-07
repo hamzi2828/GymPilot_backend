@@ -31,10 +31,12 @@ const PERMISSION_TABS = [
   { key: 'package-orders', label: 'Package Orders',  group: 'Sales',     path: '/admin/package-orders' },
   { key: 'registrations',  label: 'Registrations',   group: 'Sales',     path: '/admin/package-registrations' },
   { key: 'coupons',        label: 'Coupons',         group: 'Sales',     path: '/admin/coupons' },
+  { key: 'pos',            label: 'Shop / POS',      group: 'Sales',     path: '/admin/pos' },
 
   { key: 'attendance',     label: 'Attendance',      group: 'Operations', path: '/admin/attendance' },
   { key: 'accounts',       label: 'Accounts',        group: 'Operations', path: '/admin/accounts' },
   { key: 'staff',          label: 'Staff',           group: 'Operations', path: '/admin/staff' },
+  { key: 'lockers',        label: 'Lockers',         group: 'Operations', path: '/admin/lockers' },
   { key: 'roles',          label: 'Roles & Access',  group: 'Operations', path: '/admin/roles' },
 
   { key: 'users',          label: 'Users',           group: 'Customers', path: '/admin/users' },

@@ -173,7 +173,9 @@ module.exports = {
       const base = await L.baseCurrency();
       const { grain, buckets } = L.buildBuckets(range.from, range.to);
 
-      const [orders, expenses, assets, payroll] = await Promise.all([
+      // Till sales (shop / POS) are money in beside memberships.
+      const Sale = require('../../models/saleModel');
+      const [orders, expenses, assets, payroll, sales] = await Promise.all([
         PackageOrder.find({
           'payment.status': { $in: ['paid', 'refunded'] },
           $expr: {
@@ -193,11 +195,24 @@ module.exports = {
 
         Asset.find({ status: { $nin: ['sold', 'lost'] } }).lean(),
 
-        payrollFor(range)
+        payrollFor(range),
+
+        Sale.find({ status: 'paid', paidAt: { $gte: range.start, $lt: range.end } })
+          .select('total currency paidAt paymentMethod items')
+          .lean()
+          .catch(() => [])
       ]);
 
       // ---- Money in ----
       const revenue = {};
+      // Shop takings, kept as their own line and also folded into revenue so
+      // the net figure counts every sale the system recorded.
+      const shop = {};
+      for (const sale of sales) {
+        const currency = String(sale.currency || base).toUpperCase();
+        L.addTo(shop, currency, Number(sale.total) || 0);
+        L.addTo(revenue, currency, Number(sale.total) || 0);
+      }
       const refunds = {};
       const byPackage = new Map();
       const byMethod = new Map();
@@ -257,6 +272,11 @@ module.exports = {
         if (String(order.payment.currency || base).toUpperCase() !== base) continue;
         const point = series.get(L.bucketKeyFor(orderPaidDate(order), grain));
         if (point) point.revenue += Number(order.payment.amount) || 0;
+      }
+      for (const sale of sales) {
+        if (String(sale.currency || base).toUpperCase() !== base) continue;
+        const point = series.get(L.bucketKeyFor(sale.paidAt, grain));
+        if (point) point.revenue += Number(sale.total) || 0;
       }
 
       for (const expense of expenses) {

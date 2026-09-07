@@ -101,6 +101,29 @@ router.post('/admin/users/import', auth, requirePermission('users', 'manage'), c
 const dashboardController = require('../controller/dashboardController');
 router.get('/admin/dashboard', auth, requirePermission('dashboard'), dashboardController.overview);
 
+// ---------------------------------------------------------------------------
+// Shop / POS, stock and lockers -- see controller/posController.js
+// ---------------------------------------------------------------------------
+const posController = require('../controller/posController');
+router.get('/user/purchases', auth, posController.myPurchases);
+router.get('/user/locker', auth, posController.myLocker);
+router.get('/admin/pos/products', auth, requirePermission('pos'), posController.listProducts);
+router.post('/admin/pos/products', auth, requirePermission('pos', 'manage'), posController.createProduct);
+router.get('/admin/pos/products/movements', auth, requirePermission('pos'), posController.movements);
+router.get('/admin/pos/products/:id/movements', auth, requirePermission('pos'), posController.movements);
+router.put('/admin/pos/products/:id', auth, requirePermission('pos', 'manage'), posController.updateProduct);
+router.post('/admin/pos/products/:id/stock', auth, requirePermission('pos', 'manage'), posController.adjustStock);
+router.delete('/admin/pos/products/:id', auth, requirePermission('pos', 'manage'), posController.deleteProduct);
+router.get('/admin/pos/sales', auth, requirePermission('pos'), posController.listSales);
+router.post('/admin/pos/sales', auth, requirePermission('pos', 'manage'), posController.createSale);
+router.post('/admin/pos/sales/:id/refund', auth, requirePermission('pos', 'manage'), posController.refundSale);
+router.get('/admin/lockers', auth, requirePermission('lockers'), posController.listLockers);
+router.post('/admin/lockers', auth, requirePermission('lockers', 'manage'), posController.createLockers);
+router.put('/admin/lockers/:id', auth, requirePermission('lockers', 'manage'), posController.updateLocker);
+router.post('/admin/lockers/:id/assign', auth, requirePermission('lockers', 'manage'), posController.assignLocker);
+router.post('/admin/lockers/:id/release', auth, requirePermission('lockers', 'manage'), posController.releaseLocker);
+router.delete('/admin/lockers/:id', auth, requirePermission('lockers', 'manage'), posController.deleteLocker);
+
 // Reports and CSV exports -- see controller/reportsController.js.
 const reportsController = require('../controller/reportsController');
 router.get('/admin/reports/overview', auth, requirePermission('reports'), reportsController.overview);

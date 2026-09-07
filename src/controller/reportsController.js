@@ -10,6 +10,7 @@ const ClassBooking = require('../gymfolio/models/classBookingModel');
 const PtSession = require('../gymfolio/models/ptSessionModel');
 const Attendance = require('../attendance/models/attendanceModel');
 const Expense = require('../accounts/models/expenseModel');
+const Sale = require('../models/saleModel');
 const Payslip = require('../models/payslipModel');
 const Lead = require('../models/leadModel');
 const User = require('../models/user');
@@ -52,7 +53,7 @@ module.exports = {
       const now = new Date();
       const soon = new Date(now.getTime() + EXPIRING_WINDOW_DAYS * 86400000);
 
-      const [revenueRows, revenueByPackage, otherCurrencies, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows] = await Promise.all([
+      const [revenueRows, revenueByPackage, otherCurrencies, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts] = await Promise.all([
         PackageOrder.aggregate([
           { $match: { 'payment.status': 'paid', 'payment.currency': new RegExp(`^${base}$`, 'i'), $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } } },
           { $group: { _id: dateBucketExpr(paidAtExpr(), grain, tz), total: { $sum: '$payment.amount' }, n: { $sum: 1 } } }
@@ -100,6 +101,17 @@ module.exports = {
         Expense.aggregate([
           { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, currency: new RegExp(`^${base}$`, 'i') } },
           { $group: { _id: dateBucketExpr('$incurredOn', grain, tz), total: { $sum: '$amount' } } }
+        ]),
+        Sale.aggregate([
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: new RegExp(`^${base}$`, 'i') } },
+          { $group: { _id: dateBucketExpr('$paidAt', grain, tz), total: { $sum: '$total' }, n: { $sum: 1 } } }
+        ]),
+        Sale.aggregate([
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: new RegExp(`^${base}$`, 'i') } },
+          { $unwind: '$items' },
+          { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, total: { $sum: '$items.total' }, cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unitCost', 0] }] } } } },
+          { $sort: { total: -1 } },
+          { $limit: 8 }
         ])
       ]);
 
@@ -108,6 +120,7 @@ module.exports = {
       const members = fill(buckets, newMembers, (r) => r._id, (r) => r.n);
       const visits = fill(buckets, attendanceRows, (r) => r._id, (r) => r.n);
       const expenses = fill(buckets, expenseRows, (r) => r._id, (r) => r.total);
+      const shop = fill(buckets, shopRows, (r) => r._id, (r) => r.total);
       const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${String(h).padStart(2, '0')}:00`, value: 0 }));
       for (const row of hourRows) if (row._id >= 0 && row._id < 24) hours[row._id].value = row.n;
 
@@ -124,7 +137,8 @@ module.exports = {
       const leadTotal = Object.values(leads).reduce((a, b) => a + b, 0);
 
       const [activeMemberships, expiring, memberCount] = memberships;
-      const revenueTotal = revenue.reduce((s, b) => s + b.value, 0);
+      const shopTotal = shop.reduce((s, b) => s + b.value, 0);
+      const revenueTotal = revenue.reduce((s, b) => s + b.value, 0) + shopTotal;
       const expenseTotal = expenses.reduce((s, b) => s + b.value, 0);
       const visitTotal = visits.reduce((s, b) => s + b.value, 0);
 
@@ -134,6 +148,9 @@ module.exports = {
         base_currency: base,
         kpis: {
           revenue: Math.round(revenueTotal * 100) / 100,
+          membership_revenue: Math.round((revenueTotal - shopTotal) * 100) / 100,
+          shop_revenue: Math.round(shopTotal * 100) / 100,
+          shop_sales: shopRows.reduce((s, r) => s + r.n, 0),
           expenses: Math.round(expenseTotal * 100) / 100,
           net: Math.round((revenueTotal - expenseTotal) * 100) / 100,
           paid_orders: orders.reduce((s, b) => s + b.value, 0),
@@ -148,7 +165,8 @@ module.exports = {
           retention_rate: renewals + lapsedInRange ? Math.round((renewals / (renewals + lapsedInRange)) * 100) : null,
           lead_conversion_rate: leadTotal ? Math.round((leads.won / leadTotal) * 100) : null
         },
-        series: { revenue, expenses, orders, new_members: members, visits, peak_hours: hours },
+        series: { revenue: revenue.map((b, i) => ({ ...b, value: Math.round((b.value + shop[i].value) * 100) / 100 })), membership_revenue: revenue, shop_revenue: shop, expenses, orders, new_members: members, visits, peak_hours: hours },
+        top_products: topProducts.map((r) => ({ name: r._id || '—', quantity: r.quantity, total: Math.round(r.total * 100) / 100, margin: Math.round((r.total - r.cost) * 100) / 100 })),
         revenue_by_package: revenueByPackage.map((r) => ({ name: r._id || '—', total: Math.round(r.total * 100) / 100, orders: r.n })),
         other_currencies: otherCurrencies.map((r) => ({ currency: String(r._id || '').toUpperCase(), total: Math.round(r.total * 100) / 100, orders: r.n })),
         classes: classRows.map((r) => ({ name: r._id || '—', booked: r.booked, attended: r.attended, no_show: r.no_show, waitlisted: r.waitlisted, attendance_rate: r.booked ? Math.round((r.attended / r.booked) * 100) : null })),
