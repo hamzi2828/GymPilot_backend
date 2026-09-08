@@ -95,6 +95,7 @@ router.delete('/addons/:id', addonsController.remove);
 
 // Demo requests from the marketing site
 router.get('/demo-requests', demoRequestsController.list);
+router.get('/demo-requests/:id', demoRequestsController.get);
 router.patch('/demo-requests/:id', demoRequestsController.update);
 router.delete('/demo-requests/:id', demoRequestsController.remove);
 

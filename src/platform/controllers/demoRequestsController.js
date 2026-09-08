@@ -213,6 +213,21 @@ module.exports = {
     }
   },
 
+  // GET /api/platform/demo-requests/:id
+  //
+  // One request, so the new-gym form can be filled in from it rather than
+  // from somebody reading it off a screen and retyping.
+  get: async (req, res) => {
+    try {
+      const doc = await DemoRequest.findById(req.params.id).lean();
+      if (!doc) return res.status(404).json({ success: false, message: 'Demo request not found' });
+      return res.json({ success: true, data: publicRow(doc) });
+    } catch (error) {
+      console.error('[platform] demo request get failed:', error);
+      return res.status(500).json({ success: false, message: error.message || 'Request failed' });
+    }
+  },
+
   // PATCH /api/platform/demo-requests/:id   { status?, notes? }
   update: async (req, res) => {
     try {
