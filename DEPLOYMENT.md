@@ -9,8 +9,8 @@ it is code.
 | Variable | Value | Why |
 |---|---|---|
 | `DEFAULT_TENANT_SLUG` | `thejymor` **for now** | The pre-platform gym keeps using the env `STRIPE_*` keys and `FRONTEND_ORIGIN` only while it is the default gym. Unset it once The Jymor has its own Stripe keys in Settings → Stripe and you run more than one gym. |
-| `PLATFORM_DB_NAME` | leave unset (= `gymwear`, the `MONGO_URI` database) | Gyms, plans and super admins live in the main database beside the first gym's data. |
-| `TENANT_DB_PREFIX` | leave unset (= `gymwear_`) | New gyms get `gymwear_<slug>` on the same cluster. |
+| `PLATFORM_DB_NAME` | leave unset (= `GymPilot`, the `MONGO_URI` database) | Gyms, plans and super admins live in the main database beside the first gym's data. |
+| `TENANT_DB_PREFIX` | leave unset (= `GymPilot_`) | New gyms get `GymPilot_<slug>` on the same cluster. |
 | `PLATFORM_JWT_SECRET` | a fresh random 64-char string | Signs super-admin sessions separately from gym sessions. |
 | `QR_TOKEN_SECRET` | a fresh random 64-char string | Signs members' check-in QR codes. |
 | `PLATFORM_ADMIN_ORIGIN` | e.g. `https://gympilot.app` | Where the marketing site + platform panel (`GymPilot_frontendAdmin`) is served; used for CORS, password-reset links and demo-request emails. |

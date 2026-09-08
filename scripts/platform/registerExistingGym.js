@@ -8,7 +8,7 @@
 // the running app already does on first use.
 //
 //   node scripts/platform/registerExistingGym.js \
-//        --name "The Jymor" --slug thejymor --db gymwear \
+//        --name "The Jymor" --slug thejymor --db GymPilot \
 //        --domain thejymor.com --domain localhost:3000 \
 //        --timezone Asia/Karachi --currency PKR \
 //        [--owner-email owner@thejymor.com] [--plan <plan-slug>]

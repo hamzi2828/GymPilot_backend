@@ -1,6 +1,6 @@
 // scripts/platform/movePlatformData.js
 //
-//   node scripts/platform/movePlatformData.js --from gympilot_platform [--to gymwear] [--drop-source]
+//   node scripts/platform/movePlatformData.js --from gympilot_platform [--to GymPilot] [--drop-source]
 //
 // Copies the platform collections (gyms, platform_plans, super_admins,
 // platform_audit_logs) from one database to another on the MONGO_URI

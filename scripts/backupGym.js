@@ -7,7 +7,7 @@
 // per line, in MongoDB Extended JSON, so `mongoimport --gzip` restores it:
 //
 //   gunzip -c backups/thejymor/2026-09-07T05-00-00/users.jsonl.gz | \
-//     mongoimport --uri "$MONGO_URI" --db gymwear --collection users
+//     mongoimport --uri "$MONGO_URI" --db GymPilot --collection users
 //
 // Schedule it (cron, Task Scheduler, a GitHub Action) and copy the folder
 // somewhere off the server; the file is only a backup once it lives

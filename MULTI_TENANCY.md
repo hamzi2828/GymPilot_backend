@@ -5,20 +5,20 @@ per gym**. A gym is served on its own domain(s); the platform owner manages
 every gym from a super-admin panel.
 
 ```
- gymA.com ─┐                                 ┌─ MongoDB  gymwear_gyma
- gymB.com ─┤   Next.js site (one deploy)     ├─ MongoDB  gymwear_gymb
+ gymA.com ─┐                                 ┌─ MongoDB  GymPilot_gyma
+ gymB.com ─┤   Next.js site (one deploy)     ├─ MongoDB  GymPilot_gymb
  gymC.com ─┘          │                      │
                       ▼  Origin / X-Tenant-Host
               GymPilot_backend ───────────────┤
-              /api/platform  (super admin)    └─ MongoDB  gymwear   (the main database)
+              /api/platform  (super admin)    └─ MongoDB  GymPilot  (the main database)
                                                   the original gym's data
                                                   + gyms · platform_plans · super_admins · platform_audit_logs
 ```
 
 **Database names** (`src/platform/dbNames.js`): the database in `MONGO_URI`
 is the main one. It holds the platform's own collections and the first gym.
-Every gym created from the panel gets `<main>_<slug>` — `gymwear_gym1`,
-`gymwear_gym2`, … — unless a different name is typed in the form. The main
+Every gym created from the panel gets `<main>_<slug>` — `GymPilot_gym1`,
+`GymPilot_gym2`, … — unless a different name is typed in the form. The main
 database can never be dropped through the panel.
 
 ## How a request finds its gym
@@ -94,7 +94,7 @@ session token are separate from every gym's.
 
 ```bash
 # 1. Register the gym that already exists (its data stays where it is)
-node scripts/platform/registerExistingGym.js --name "The Jymor" --slug thejymor --db gymwear \
+node scripts/platform/registerExistingGym.js --name "The Jymor" --slug thejymor --db GymPilot \
      --domain thejymor.com --domain localhost:3000 --timezone Asia/Karachi --currency PKR
 #    then in .env:  DEFAULT_TENANT_SLUG=thejymor   (single-gym / dev only)
 
@@ -110,7 +110,10 @@ node scripts/platform/listGyms.js [--stats]
 node scripts/platform/deleteGym.js --gym <slug> --confirm <slug> [--drop-database]
 
 # Moving the platform collections between databases (one-off)
-node scripts/platform/movePlatformData.js --from gympilot_platform --to gymwear [--drop-source]
+node scripts/platform/movePlatformData.js --from gympilot_platform --to GymPilot [--drop-source]
+
+# Renaming the main database (copy, switch .env, verify, then drop the old one)
+node scripts/platform/copyDatabase.js --from <old> --to <new> [--dry-run]
 ```
 
 Provisioning creates the database, the system roles, a settings row with the
