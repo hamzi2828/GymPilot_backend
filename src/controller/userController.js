@@ -30,7 +30,7 @@ function generatePassword(length = 14) {
   return chars.join('');
 }
 
-function welcomeEmailHtml({ firstName, email, password, siteName, loginUrl }) {
+function welcomeEmailHtml({ firstName, email, username, password, siteName, loginUrl }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
     <h2 style="margin:0 0 16px;font-size:20px">Welcome to ${siteName}, ${firstName}</h2>
@@ -38,10 +38,12 @@ function welcomeEmailHtml({ firstName, email, password, siteName, loginUrl }) {
     <table style="width:100%;border-collapse:collapse;background:#fafafa;border:1px solid #e4e4e7;border-radius:8px;margin-bottom:16px">
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Email</td>
           <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${email}</td></tr>
+      ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username <span style="color:#a1a1aa">(phone app)</span></td>
+          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${username}</td></tr>` : ''}
       <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
           <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${password}</td></tr>
     </table>
-    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.</p>
+    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' On the GymPilot phone app, sign in with your username and the same password.' : ''}</p>
     <a href="${loginUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
   </div>`;
@@ -154,7 +156,7 @@ const userController = {
                 const result = await sendEmail(
                     normalisedEmail,
                     `Your ${siteName} account`,
-                    welcomeEmailHtml({ firstName: user.firstName, email: normalisedEmail, password, siteName, loginUrl })
+                    welcomeEmailHtml({ firstName: user.firstName, email: normalisedEmail, username: user.username, password, siteName, loginUrl })
                 );
                 emailed = !!result.success;
                 if (!result.success) emailError = result.error;
@@ -176,6 +178,24 @@ const userController = {
                 return res.status(409).json({ message: 'Email already in use' });
             }
             return res.status(400).json({ message: 'Error creating user', error: error.message });
+        }
+    },
+
+    // POST /admin/users/:id/username - Issue a fresh username
+    //
+    // For the rare case where a member does not want the one they were given,
+    // or two members with the same name keep confusing each other. The old
+    // username stops working immediately, so the member has to be told.
+    regenerateUsername: async (req, res) => {
+        try {
+            const user = await User.findById(req.params.id);
+            if (!user) return res.status(404).json({ message: 'User not found' });
+
+            const { assignUsername } = require('../services/username');
+            const username = await assignUsername(user, { force: true });
+            return res.json({ message: 'New username issued', data: { id: String(user._id), username } });
+        } catch (error) {
+            return res.status(400).json({ message: 'Could not issue a new username', error: error.message });
         }
     },
 

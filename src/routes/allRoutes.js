@@ -60,6 +60,7 @@ router.delete('/user', auth, userController.deleteUser);
 router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile);
 router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
 router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
+router.post('/admin/users/:id/username', auth, requirePermission('users', 'manage'), userController.regenerateUsername);
 
 // ---------------------------------------------------------------------------
 // Member profiles (photo, health, agreement, documents, tags, notes) and the

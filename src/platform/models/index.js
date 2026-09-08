@@ -10,6 +10,7 @@ const PlatformPlan = require('./platformPlanModel');
 const SuperAdmin = require('./superAdminModel');
 const PlatformAuditLog = require('./platformAuditLogModel');
 const DemoRequest = require('./demoRequestModel');
+const MemberDirectory = require('./memberDirectoryModel');
 
 let warmed = false;
 
@@ -21,7 +22,8 @@ function warmPlatformModels() {
   void SuperAdmin.schema;
   void PlatformAuditLog.schema;
   void DemoRequest.schema;
+  void MemberDirectory.schema;
   warmed = true;
 }
 
-module.exports = { Gym, PlatformPlan, SuperAdmin, PlatformAuditLog, DemoRequest, warmPlatformModels };
+module.exports = { Gym, PlatformPlan, SuperAdmin, PlatformAuditLog, DemoRequest, MemberDirectory, warmPlatformModels };

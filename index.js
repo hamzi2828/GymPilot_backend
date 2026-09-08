@@ -168,6 +168,24 @@ app.use('/api/platform', async (req, res, next) => {
 }, platformRoutes);
 
 // ---------------------------------------------------------------------------
+// Phone app sign-in
+//
+// Also before the tenant gate, and for the same reason in reverse: a member
+// opening the app has given us a username and nothing else, so which gym they
+// belong to is exactly what this has to work out.
+// ---------------------------------------------------------------------------
+const mobileRoutes = require('./src/routes/mobileRoutes');
+app.use('/api/mobile', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({ success: false, message: 'Database connection failed. Please try again in a moment.' });
+  }
+}, mobileRoutes);
+
+// ---------------------------------------------------------------------------
 // Tenant gate
 //
 // Everything past this point runs for exactly one gym: the one whose website

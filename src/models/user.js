@@ -127,6 +127,11 @@ const userSchema = new mongoose.Schema({
     firstName: { type: String, required: true, trim: true },
     lastName: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    // What the gym reads out to a member so they can sign in on the phone
+    // app: their name (or email) plus three digits, unique across the whole
+    // platform. Filled in by the hook below wherever an account is created,
+    // so no caller has to remember. See services/username.js.
+    username: { type: String, trim: true, lowercase: true },
     password: { type: String, required: false, default: null },
     provider: { type: String, enum: ['local', 'google'], default: 'local' },
     googleId: { type: String, default: null, index: true },
@@ -332,5 +337,42 @@ userSchema.index(
     { staffCode: 1 },
     { unique: true, partialFilterExpression: { staffCode: { $type: 'string' } } }
 );
+
+// Sparse: accounts created before usernames existed have no field at all and
+// must not all collide on `null` until the backfill runs
+// (scripts/assignUsernames.js).
+userSchema.index({ username: 1 }, { unique: true, sparse: true });
+
+// Every account gets a username, whoever created it -- the admin screen, the
+// sign-up form, a CSV import, Google, a lead being converted, or the owner
+// account made when a gym is provisioned. Doing it here rather than at each
+// of those call sites is what stops one of them being forgotten.
+userSchema.pre('save', async function assignUsernameBeforeSave(next) {
+  try {
+    if (!this.username) {
+      const { generateUsername } = require('../services/username');
+      this.username = await generateUsername(this);
+    }
+    // Publishing to the platform directory is a write to another database,
+    // so it only happens when the username is actually new or changed.
+    this.$locals.publishUsername = this.isNew || this.isModified('username');
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+userSchema.post('save', async function publishUsernameAfterSave(doc) {
+  if (!doc || !doc.$locals || !doc.$locals.publishUsername) return;
+  try {
+    const MemberDirectory = require('../platform/models/memberDirectoryModel');
+    await MemberDirectory.publish(doc);
+  } catch (error) {
+    // The account is saved either way; a member who cannot be found by the
+    // app is a smaller problem than a failed sign-up, and the backfill
+    // script repairs it.
+    console.error('[username] could not publish to the member directory:', error.message);
+  }
+});
 
 module.exports = tenantModel('User', userSchema);

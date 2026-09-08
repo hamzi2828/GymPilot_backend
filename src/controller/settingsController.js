@@ -136,9 +136,16 @@ const settingsController = {
       const settings = await Settings.getSettings();
 
       // Return only public-safe settings
+      const { themeFor } = require('../config/themes');
+      const theme = themeFor(settings.theme);
+
       const publicSettings = {
         siteName: settings.siteName,
-        theme: settings.theme || 'electric-lime',
+        theme: theme.key,
+        // The six colours behind that theme, so a client that cannot read the
+        // website's own palette file -- the phone app -- can still paint
+        // itself in the gym's colours.
+        themeTokens: theme.tokens,
         // Publishable key only — the secret and webhook values must never
         // leave the server through a public endpoint.
         stripePublishableKey: settings.stripe?.enabled ? (settings.stripe?.publishableKey || '') : '',
