@@ -4,6 +4,8 @@
 // honeypot-checked); `list` and `update` are the panel's view of them.
 
 const DemoRequest = require('../models/demoRequestModel');
+const PlatformPlan = require('../models/platformPlanModel');
+const PlatformAddon = require('../models/platformAddonModel');
 const SuperAdmin = require('../models/superAdminModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
 const { sendEmail } = require('../../services/emailService');
@@ -25,6 +27,43 @@ function text(value, max) {
 }
 
 /**
+ * What a checkout chose, priced here rather than trusted from the form.
+ * Returns null when no plan was picked (an ordinary demo request).
+ */
+async function priceSelection(data) {
+  if (!data.planSlug) return null;
+  const plan = await PlatformPlan.findOne({ slug: data.planSlug, isActive: true }).lean();
+  if (!plan) return null;
+
+  const yearly = data.billingCycle === 'yearly';
+  const included = (plan.includedAddons || []).map((s) => String(s).toLowerCase());
+  const wanted = [...new Set([...included, ...data.addonSlugs])];
+
+  const addons = wanted.length
+    ? await PlatformAddon.find({ slug: { $in: wanted }, isActive: true }).lean()
+    : [];
+  const usable = addons.filter(
+    (addon) => included.includes(addon.slug) || !addon.planSlugs || !addon.planSlugs.length || addon.planSlugs.includes(plan.slug)
+  );
+
+  const amount = usable.reduce(
+    (total, addon) => total + (included.includes(addon.slug) ? 0 : (yearly ? addon.price.yearly : addon.price.monthly) || 0),
+    (yearly ? plan.price.yearly : plan.price.monthly) || 0
+  );
+
+  return {
+    slug: plan.slug,
+    name: plan.name,
+    billingCycle: data.billingCycle,
+    addonSlugs: usable.map((a) => a.slug),
+    addonNames: usable.map((a) => a.name),
+    amount,
+    currency: plan.price.currency,
+    trialDays: plan.trialDays || 0
+  };
+}
+
+/**
  * Checks and trims a submission. Returns { spam: true } for a filled
  * honeypot, otherwise { errors: [...], data: {...} }.
  */
@@ -34,6 +73,19 @@ function validateDemoRequest(body) {
   if (text(b.website, 10)) return { spam: true, errors: [], data: null };
 
   const data = {
+    kind: b.kind === 'trial' ? 'trial' : 'demo',
+    // Only ever a suggestion; the slug a gym actually gets is decided when it
+    // is set up.
+    preferredSlug: text(b.preferredSlug, 60)
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, ''),
+    planSlug: text(b.planSlug, 60).toLowerCase(),
+    billingCycle: b.billingCycle === 'yearly' ? 'yearly' : 'monthly',
+    addonSlugs: (Array.isArray(b.addonSlugs) ? b.addonSlugs : [])
+      .map((slug) => text(slug, 60).toLowerCase())
+      .filter(Boolean)
+      .slice(0, 10),
     name: text(b.name, 120),
     email: text(b.email, 200).toLowerCase(),
     phone: text(b.phone, 40),
@@ -61,7 +113,11 @@ async function notifyAdmins(request) {
   const admins = await SuperAdmin.find({ isActive: true }).select('email').lean();
   if (!admins.length) return;
   const body = [
-    paragraph(`A gym asked for a demo on the ${escapeHtml(PLATFORM_NAME)} website.`),
+    paragraph(
+      request.kind === 'trial'
+        ? `A gym filled in checkout on the ${escapeHtml(PLATFORM_NAME)} website and wants to start a trial.`
+        : `A gym asked for a demo on the ${escapeHtml(PLATFORM_NAME)} website.`
+    ),
     detailTable([
       ['Name', request.name],
       ['Email', request.email],
@@ -70,10 +126,19 @@ async function notifyAdmins(request) {
       ['Size', request.gymSize],
       ['Country / city', request.country]
     ]),
+    request.plan && request.plan.slug
+      ? detailTable([
+          ['Plan', `${request.plan.name} (${request.plan.billingCycle})`],
+          ['Add-ons', (request.plan.addonNames || []).join(', ') || 'none'],
+          ['Price', `${request.plan.currency} ${Number(request.plan.amount || 0).toLocaleString('en-US')} / ${request.plan.billingCycle === 'yearly' ? 'year' : 'month'}`],
+          ['Trial', request.plan.trialDays ? `${request.plan.trialDays} days` : 'none'],
+          ['Web address wanted', request.preferredSlug || '—']
+        ])
+      : '',
     request.message ? paragraph(`“${escapeHtml(request.message)}”`) : '',
     paragraph(`Record where it goes in the panel: <a href="${panelUrl()}">${panelUrl()}</a>`)
   ].join('');
-  const subject = `New demo request: ${request.gymName || request.name}`;
+  const subject = `${request.kind === 'trial' ? 'New trial signup' : 'New demo request'}: ${request.gymName || request.name}`;
   await Promise.all(admins.map((a) => sendEmail(a.email, subject, shell(PLATFORM_NAME, 'New demo request', body))));
 }
 
@@ -87,6 +152,9 @@ function publicRow(doc) {
     gymSize: doc.gymSize || '',
     country: doc.country || '',
     message: doc.message || '',
+    kind: doc.kind || 'demo',
+    preferredSlug: doc.preferredSlug || '',
+    plan: doc.plan && doc.plan.slug ? doc.plan : null,
     source: doc.source || '',
     status: doc.status,
     notes: doc.notes || '',
@@ -111,7 +179,14 @@ module.exports = {
         .lean();
       if (recent) return res.status(201).json({ success: true, message: THANKS, id: String(recent._id) });
 
-      const doc = await DemoRequest.create({ ...result.data, ip: clientIp(req), userAgent: text(req.headers['user-agent'], 500) });
+      const { planSlug, billingCycle, addonSlugs, ...fields } = result.data;
+      const plan = await priceSelection(result.data);
+      const doc = await DemoRequest.create({
+        ...fields,
+        plan: plan || undefined,
+        ip: clientIp(req),
+        userAgent: text(req.headers['user-agent'], 500)
+      });
       notifyAdmins(doc).catch((err) => console.error('[platform] demo request email failed:', err.message));
       return res.status(201).json({ success: true, message: THANKS, id: String(doc._id) });
     } catch (error) {
