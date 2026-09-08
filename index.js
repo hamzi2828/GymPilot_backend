@@ -107,11 +107,14 @@ app.use(cors({
 // received.
 // ---------------------------------------------------------------------------
 const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
+// The platform's own webhook (GymPilot charging gyms) needs the same
+// untouched body as a gym's does.
+const PLATFORM_WEBHOOK_PATH = '/api/platform/stripe/webhook';
 
 app.use((req, res, next) => {
   const path = req.originalUrl.split('?')[0];
   // Both the legacy path and the per-gym one (/webhook/<slug>).
-  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/')) {
+  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/') || path === PLATFORM_WEBHOOK_PATH) {
     next();
   } else {
     express.json({ limit: '50mb' })(req, res, next);

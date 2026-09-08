@@ -16,6 +16,7 @@ const authController = require('../controllers/platformAuthController');
 const gymsController = require('../controllers/gymsController');
 const plansController = require('../controllers/plansController');
 const addonsController = require('../controllers/addonsController');
+const platformSettingsController = require('../controllers/platformSettingsController');
 const demoRequestsController = require('../controllers/demoRequestsController');
 
 router.use((req, res, next) => {
@@ -36,6 +37,10 @@ router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
 // No session; nothing here says anything about a gym.
 router.get('/public/plans', plansController.publicPlans);
 router.get('/public/addons', addonsController.publicAddons);
+
+// Stripe's callback. Public by necessity -- the signature is the proof --
+// and raw, because a parsed body no longer matches what was signed.
+router.post('/stripe/webhook', express.raw({ type: 'application/json' }), platformSettingsController.webhook);
 router.post('/public/demo-requests', demoRequestLimiter, demoRequestsController.submit);
 
 router.use(platformAuth);
@@ -76,6 +81,11 @@ router.get('/plans', plansController.list);
 router.post('/plans', plansController.create);
 router.put('/plans/:id', plansController.update);
 router.delete('/plans/:id', plansController.remove);
+
+// The platform's own Stripe keys
+router.get('/settings', platformSettingsController.get);
+router.put('/settings', platformSettingsController.update);
+router.post('/settings/stripe/test', platformSettingsController.testStripe);
 
 // Add-ons sold beside the plans
 router.get('/addons', addonsController.list);
