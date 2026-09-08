@@ -10,6 +10,7 @@
 // If any step fails the platform record is removed again, so a half-made gym
 // never lingers in the list.
 
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const Gym = require('./models/gymModel');
 const PlatformPlan = require('./models/platformPlanModel');
@@ -105,6 +106,41 @@ async function assertSlugAvailable(slug) {
   }
   const existing = await Gym.findOne({ slug }).select('_id').lean();
   if (existing) throw new ProvisioningError(`A gym with the slug "${slug}" already exists`, 409);
+}
+
+/**
+ * A free slug built from the gym's name. Nobody types one any more -- the
+ * name is the only thing anyone should have to decide -- so a second "Iron
+ * Works" becomes iron-works-2 rather than an error somebody has to resolve.
+ *
+ * Only used when the caller did not name a slug itself; an explicit one that
+ * is taken is still refused, because that was a decision, not a guess.
+ */
+async function freeSlugFrom(name) {
+  const base = slugify(name).slice(0, 44) || 'gym';
+  if (!Gym.SLUG_PATTERN.test(base)) {
+    throw new ProvisioningError('The gym name needs at least two letters or digits');
+  }
+
+  const taken = new Set(
+    (await Gym.find({ slug: new RegExp(`^${base}(-\\d+)?$`) }).select('slug').lean()).map((g) => g.slug)
+  );
+  if (!taken.has(base)) return base;
+
+  for (let n = 2; n <= 200; n += 1) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${base}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+/**
+ * The database this gym's data lives in. The slug alone would be reused if a
+ * gym were ever deleted and another took its name, so a short id goes on the
+ * end: two gyms can never end up pointed at one database.
+ */
+function uniqueDatabaseNameFor(slug) {
+  return `${databaseNameFor(slug)}_${crypto.randomBytes(3).toString('hex')}`;
 }
 
 /**
@@ -257,6 +293,7 @@ function validateOwner(owner, { required }) {
  * @param {string} [input.slug]         defaults to a slug of the name
  * @param {Array}  [input.domains]      hosts or {host, isPrimary}
  * @param {object} input.owner          { firstName, lastName, email, phone, password }
+ * @param {string} [input.preferredSlug] the address they asked for, if free
  * @param {string} [input.planId]
  * @param {object} [input.locale]       { timezone, currency, country }
  * @param {object} [input.database]     { name, uri } -- both optional
@@ -270,8 +307,12 @@ async function provisionGym(input, { createdBy = null } = {}) {
   const name = String(input.name || '').trim();
   if (!name) throw new ProvisioningError('Gym name is required');
 
-  const slug = slugify(input.slug || name);
-  await assertSlugAvailable(slug);
+  // Three ways in. `slug` is a decision -- a script adopting a database that
+  // already exists means that exact one, so a clash is an error. Anything
+  // else is a preference: the address a buyer asked for at checkout, or just
+  // the gym's name, and a clash only means a number on the end.
+  const slug = input.slug ? slugify(input.slug) : await freeSlugFrom(input.preferredSlug || name);
+  if (input.slug) await assertSlugAvailable(slug);
 
   const domains = normalizeDomains(input.domains);
   await assertDomainsAvailable(domains);
@@ -297,7 +338,7 @@ async function provisionGym(input, { createdBy = null } = {}) {
   }
 
   const database = {
-    name: String((input.database && input.database.name) || databaseNameFor(slug)).trim(),
+    name: String((input.database && input.database.name) || uniqueDatabaseNameFor(slug)).trim(),
     uri: String((input.database && input.database.uri) || '').trim()
   };
 
@@ -372,6 +413,8 @@ async function deleteGym(gym, { confirmSlug, dropDatabase = false } = {}) {
 
 module.exports = {
   ProvisioningError,
+  freeSlugFrom,
+  uniqueDatabaseNameFor,
   provisionGym,
   replaceDomains,
   deleteGym,
