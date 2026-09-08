@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const Gym = require('../models/gymModel');
 const PlatformPlan = require('../models/platformPlanModel');
+const { resolveAddons } = require('./addonsController');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
 const DemoRequest = require('../models/demoRequestModel');
 const {
@@ -370,16 +371,32 @@ module.exports = {
         }
       }
 
+      // Add-ons the gym keeps unless this request names a different set.
+      let addons;
+      try {
+        addons = await resolveAddons(
+          body.addonSlugs !== undefined ? body.addonSlugs : (gym.subscription && gym.subscription.addons || []).map((a) => a.slug),
+          plan
+        );
+      } catch (error) {
+        return res.status(error.status || 400).json({ success: false, message: error.message });
+      }
+
       const current = gym.subscription || {};
       const next = subscriptionFor(plan, {
         status: body.status || current.status,
         billingCycle: body.billingCycle || current.billingCycle,
-        amount: body.amount !== undefined ? body.amount : plan && body.planId === undefined && body.billingCycle === undefined ? current.amount : undefined,
+        amount:
+          body.amount !== undefined
+            ? body.amount
+            : plan && body.planId === undefined && body.billingCycle === undefined
+            ? current.planAmount ?? current.amount
+            : undefined,
         currency: body.currency || current.currency,
         startedAt: body.startedAt || current.startedAt,
         currentPeriodEnd: body.currentPeriodEnd || current.currentPeriodEnd,
         notes: body.notes !== undefined ? body.notes : current.notes
-      });
+      }, addons);
       if (next.status === 'cancelled' && !current.cancelledAt) next.cancelledAt = new Date();
       if (next.status !== 'cancelled') next.cancelledAt = null;
 

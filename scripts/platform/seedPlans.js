@@ -1,4 +1,5 @@
-// The price list the platform sells: four plans, priced for Pakistan.
+// The price list the platform sells: four plans and the add-ons that go
+// beside them, priced for Pakistan.
 //
 //   node scripts/platform/seedPlans.js            -- show what would change
 //   node scripts/platform/seedPlans.js --apply    -- write it
@@ -16,6 +17,7 @@
 const mongoose = require('mongoose');
 const { connect, hasFlag } = require('../lib/tenantScript');
 const PlatformPlan = require('../../src/platform/models/platformPlanModel');
+const PlatformAddon = require('../../src/platform/models/platformAddonModel');
 const Gym = require('../../src/platform/models/gymModel');
 
 // Priced for the market rather than converted from a dollar list. Yearly is
@@ -29,10 +31,11 @@ const PLANS = [
     limits: { maxMembers: 150, maxStaff: 3, maxTrainers: 3, maxClasses: 15 },
     trialDays: 14,
     order: 1,
+    includedAddons: [],
     features: [
       'Up to 150 members',
       '3 staff, 3 trainers, 15 classes a week',
-      'Your own website and member phone app',
+      'Your own website on your own domain',
       'Billing, class booking, messaging and reports',
       'Email support'
     ]
@@ -45,10 +48,11 @@ const PLANS = [
     limits: { maxMembers: 300, maxStaff: 5, maxTrainers: 5, maxClasses: 30 },
     trialDays: 14,
     order: 2,
+    includedAddons: [],
     features: [
       'Up to 300 members',
       '5 staff, 5 trainers, 30 classes a week',
-      'Everything in Basic, member app included',
+      'Everything in Basic',
       'Email support'
     ]
   },
@@ -60,10 +64,11 @@ const PLANS = [
     limits: { maxMembers: 1500, maxStaff: 20, maxTrainers: 20, maxClasses: 0 },
     trialDays: 14,
     order: 3,
+    includedAddons: [],
     features: [
       'Up to 1,500 members',
       '20 staff, 20 trainers, as many classes as you like',
-      'Everything in Starter, member app included',
+      'Everything in Starter',
       'Your members brought over for you',
       'Priority support'
     ]
@@ -76,13 +81,29 @@ const PLANS = [
     limits: { maxMembers: 0, maxStaff: 0, maxTrainers: 0, maxClasses: 0 },
     trialDays: 30,
     order: 4,
+    includedAddons: ['member-app'],
     features: [
       'Unlimited members, staff and trainers',
       'As many classes and rooms as you run',
-      'Everything in Growth, member app included',
+      'Everything in Growth',
       'Set up and moved in with you',
       'Phone and WhatsApp support'
     ]
+  }
+];
+
+// Sold beside a plan, on top of it. `planSlugs` says which tiers may buy it;
+// a plan's own `includedAddons` says which tiers simply come with it.
+const ADDONS = [
+  {
+    slug: 'member-app',
+    name: 'Member app',
+    description: 'Your gym in your members\' pockets: bookings, membership, check-in code, in your colours.',
+    price: { monthly: 1500, yearly: 15000, currency: 'PKR' },
+    planSlugs: ['starter', 'growth'],
+    isPublic: true,
+    isActive: true,
+    order: 1
   }
 ];
 
@@ -120,8 +141,32 @@ async function main() {
       existing.price = wanted.price;
       existing.limits = wanted.limits;
       existing.features = wanted.features;
+      existing.includedAddons = wanted.includedAddons || [];
       existing.trialDays = wanted.trialDays;
       existing.order = wanted.order;
+      await existing.save();
+      console.log('  written');
+    }
+  }
+
+  for (const wanted of ADDONS) {
+    const existing = await PlatformAddon.findOne({ slug: wanted.slug });
+    const on = wanted.planSlugs.length ? wanted.planSlugs.join(', ') : 'every plan';
+    const label = `${wanted.name} (${wanted.slug}) -- add-on, ${money(wanted.price.monthly, wanted.price.currency)}/mo, sold on ${on}`;
+
+    if (!existing) {
+      console.log(`\n${label} -- new`);
+      if (apply) {
+        await PlatformAddon.create(wanted);
+        console.log('  created');
+      }
+      continue;
+    }
+
+    console.log(`\n${label}`);
+    console.log(`  was    ${money(existing.price.monthly, existing.price.currency)}/mo, ${money(existing.price.yearly, existing.price.currency)}/yr`);
+    if (apply) {
+      Object.assign(existing, wanted);
       await existing.save();
       console.log('  written');
     }

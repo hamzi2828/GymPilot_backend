@@ -15,6 +15,7 @@ const { platformDatabaseName, tenantDatabasePrefix } = require('../dbNames');
 const authController = require('../controllers/platformAuthController');
 const gymsController = require('../controllers/gymsController');
 const plansController = require('../controllers/plansController');
+const addonsController = require('../controllers/addonsController');
 const demoRequestsController = require('../controllers/demoRequestsController');
 
 router.use((req, res, next) => {
@@ -34,6 +35,7 @@ router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
 // Public: what the marketing site (GymPilot_frontendAdmin) reads and posts.
 // No session; nothing here says anything about a gym.
 router.get('/public/plans', plansController.publicPlans);
+router.get('/public/addons', addonsController.publicAddons);
 router.post('/public/demo-requests', demoRequestLimiter, demoRequestsController.submit);
 
 router.use(platformAuth);
@@ -74,6 +76,12 @@ router.get('/plans', plansController.list);
 router.post('/plans', plansController.create);
 router.put('/plans/:id', plansController.update);
 router.delete('/plans/:id', plansController.remove);
+
+// Add-ons sold beside the plans
+router.get('/addons', addonsController.list);
+router.post('/addons', addonsController.create);
+router.put('/addons/:id', addonsController.update);
+router.delete('/addons/:id', addonsController.remove);
 
 // Demo requests from the marketing site
 router.get('/demo-requests', demoRequestsController.list);

@@ -107,26 +107,55 @@ async function assertSlugAvailable(slug) {
   if (existing) throw new ProvisioningError(`A gym with the slug "${slug}" already exists`, 409);
 }
 
-function subscriptionFor(plan, input = {}) {
+/**
+ * The subscription a gym is put on: a plan, whatever add-ons were switched on
+ * with it, and the total of the two.
+ *
+ * @param {object|null} plan    the plan document, or null for no plan
+ * @param {object} input        status, billingCycle, amount, currency, dates
+ * @param {Array} addons        add-on documents already resolved by the caller
+ */
+function subscriptionFor(plan, input = {}, addons = []) {
   const now = new Date();
   const sub = {
     status: input.status || (plan ? 'trialing' : 'active'),
     billingCycle: input.billingCycle || 'monthly',
     amount: 0,
-    currency: (plan && plan.price && plan.price.currency) || 'USD',
+    planAmount: 0,
+    addons: [],
+    currency: (plan && plan.price && plan.price.currency) || 'PKR',
     startedAt: input.startedAt ? new Date(input.startedAt) : now,
     currentPeriodEnd: input.currentPeriodEnd ? new Date(input.currentPeriodEnd) : null,
     notes: input.notes || ''
   };
 
   if (plan) {
-    sub.amount = sub.billingCycle === 'yearly' ? plan.price.yearly : plan.price.monthly;
+    sub.planAmount = sub.billingCycle === 'yearly' ? plan.price.yearly : plan.price.monthly;
     if (!sub.currentPeriodEnd) {
       const days = sub.status === 'trialing' ? Number(plan.trialDays) || 0 : sub.billingCycle === 'yearly' ? 365 : 30;
       sub.currentPeriodEnd = days ? new Date(now.getTime() + days * 86400000) : null;
     }
   }
-  if (input.amount !== undefined && input.amount !== null && input.amount !== '') sub.amount = Number(input.amount) || 0;
+  // `amount` has always meant the plan's price; a hand-typed one still does.
+  if (input.amount !== undefined && input.amount !== null && input.amount !== '') {
+    sub.planAmount = Number(input.amount) || 0;
+  }
+
+  // What the plan already includes costs nothing on top of it.
+  const included = new Set(((plan && plan.includedAddons) || []).map((slug) => String(slug).toLowerCase()));
+  sub.addons = (addons || [])
+    .filter(Boolean)
+    .map((addon) => ({
+      slug: addon.slug,
+      name: addon.name,
+      amount: included.has(addon.slug)
+        ? 0
+        : typeof addon.amountFor === 'function'
+        ? addon.amountFor(sub.billingCycle)
+        : Number((sub.billingCycle === 'yearly' ? addon.price && addon.price.yearly : addon.price && addon.price.monthly) || 0)
+    }));
+
+  sub.amount = sub.addons.reduce((total, addon) => total + (Number(addon.amount) || 0), sub.planAmount);
   if (input.currency) sub.currency = String(input.currency).toUpperCase();
 
   return sub;
@@ -231,7 +260,9 @@ function validateOwner(owner, { required }) {
  * @param {string} [input.planId]
  * @param {object} [input.locale]       { timezone, currency, country }
  * @param {object} [input.database]     { name, uri } -- both optional
- * @param {object} [input.subscription] overrides for status / cycle / period end
+ * @param {object} [input.subscription] overrides for status / cycle / period end,
+ *                                  plus `addonSlugs` for anything sold beside
+ *                                  the plan (see controllers/addonsController)
  * @param {boolean}[input.adoptExisting] true to register a database that already
  *                                       holds a gym (the pre-platform deployment)
  */
@@ -254,6 +285,17 @@ async function provisionGym(input, { createdBy = null } = {}) {
     if (!plan) throw new ProvisioningError('Plan not found', 404);
   }
 
+  // Required here rather than at the top: addonsController requires this file
+  // for slugify, and two modules requiring each other at load time is how you
+  // get an empty object at three in the morning.
+  const { resolveAddons } = require('./controllers/addonsController');
+  let addons = [];
+  try {
+    addons = await resolveAddons((input.subscription || {}).addonSlugs, plan);
+  } catch (error) {
+    throw new ProvisioningError(error.message, error.status || 400);
+  }
+
   const database = {
     name: String((input.database && input.database.name) || databaseNameFor(slug)).trim(),
     uri: String((input.database && input.database.uri) || '').trim()
@@ -267,7 +309,7 @@ async function provisionGym(input, { createdBy = null } = {}) {
     database,
     owner: owner ? { firstName: owner.firstName, lastName: owner.lastName, email: owner.email, phone: owner.phone } : {},
     plan: plan ? plan._id : null,
-    subscription: subscriptionFor(plan, input.subscription || {}),
+    subscription: subscriptionFor(plan, input.subscription || {}, addons),
     locale: {
       timezone: (input.locale && input.locale.timezone) || 'UTC',
       currency: String((input.locale && input.locale.currency) || 'USD').toUpperCase(),

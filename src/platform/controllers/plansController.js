@@ -42,6 +42,11 @@ function applyBody(plan, body) {
       .map((f) => String(f).trim())
       .filter(Boolean);
   }
+  if (body.includedAddons !== undefined) {
+    plan.includedAddons = (Array.isArray(body.includedAddons) ? body.includedAddons : String(body.includedAddons || '').split(','))
+      .map((s) => slugify(s))
+      .filter(Boolean);
+  }
   if (body.trialDays !== undefined) plan.trialDays = Math.floor(nonNegative(body.trialDays, 14));
   if (body.isActive !== undefined) plan.isActive = !!body.isActive;
   if (body.order !== undefined) plan.order = nonNegative(body.order);
@@ -73,6 +78,7 @@ module.exports = {
           price: plan.price,
           limits: plan.limits,
           features: plan.features || [],
+          includedAddons: plan.includedAddons || [],
           trialDays: plan.trialDays,
           order: plan.order
         }))

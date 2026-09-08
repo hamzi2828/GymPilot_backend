@@ -76,7 +76,25 @@ const gymSchema = new mongoose.Schema(
     subscription: {
       status: { type: String, enum: SUBSCRIPTION_STATUSES, default: 'trialing' },
       billingCycle: { type: String, enum: BILLING_CYCLES, default: 'monthly' },
+      // What the gym pays a cycle, all in. `planAmount` and `addons` are the
+      // breakdown of it: reports read `amount`, invoices read the parts.
       amount: { type: Number, default: 0, min: 0 },
+      planAmount: { type: Number, default: 0, min: 0 },
+      // Snapshots, not references: the price agreed when the add-on went on
+      // does not change because the price list did.
+      addons: {
+        type: [
+          new mongoose.Schema(
+            {
+              slug: { type: String, required: true, lowercase: true, trim: true },
+              name: { type: String, default: '', trim: true },
+              amount: { type: Number, default: 0, min: 0 }
+            },
+            { _id: false }
+          )
+        ],
+        default: []
+      },
       currency: { type: String, default: 'USD', uppercase: true, trim: true },
       startedAt: { type: Date, default: null },
       currentPeriodEnd: { type: Date, default: null },

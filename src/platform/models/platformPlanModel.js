@@ -30,6 +30,9 @@ const platformPlanSchema = new mongoose.Schema(
       maxClasses: { type: Number, default: 0, min: 0 }
     },
     features: { type: [String], default: [] },
+    // Add-ons this plan gives away: the gym has them, at no extra charge.
+    // Anything not listed here is bought separately (see platformAddonModel).
+    includedAddons: { type: [String], default: [] },
     trialDays: { type: Number, default: 14, min: 0 },
     isActive: { type: Boolean, default: true },
     order: { type: Number, default: 0 }
