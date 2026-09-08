@@ -7,18 +7,38 @@
 
 const Settings = require('../models/settings');
 const { themeFor } = require('../config/themes');
-const { currentTenant } = require('../platform/tenantContext');
+const { currentTenant, frontendOrigin } = require('../platform/tenantContext');
 
 /**
- * A logo path that a phone can actually load. Uploaded logos already live on
- * blob storage (absolute); anything still relative is resolved against this
- * API, which is the only origin the app is configured with.
+ * A logo path that a phone can actually load.
+ *
+ * Uploaded logos already live on blob storage and are absolute, so they pass
+ * straight through. A relative path -- the default '/images/logo.png', and
+ * anything else typed into Settings -- is served by the gym's OWN website and
+ * not by this API, so it is resolved against the first origin offered that is
+ * actually set: the gym's registered domain, then whatever siteUrl Settings
+ * carries, and only then this API. The registered domain leads because it is
+ * the platform's own record of where the gym lives, while siteUrl is a field
+ * an operator typed once and may never have revisited.
  */
-function absoluteAsset(url, apiOrigin) {
+function absoluteAsset(url, ...origins) {
   const value = String(url || '').trim();
   if (!value) return '';
   if (/^https?:\/\//i.test(value)) return value;
-  return `${String(apiOrigin || '').replace(/\/+$/, '')}/${value.replace(/^\/+/, '')}`;
+  const base = origins.map((o) => String(o || '').trim().replace(/\/+$/, '')).find(Boolean);
+  if (!base) return value;
+  return `${base}/${value.replace(/^\/+/, '')}`;
+}
+
+/** Where the gym's website lives, which is where its relative assets are. */
+function siteOrigin() {
+  try {
+    return frontendOrigin();
+  } catch {
+    // No gym in context (a platform-level call): there is no website to
+    // resolve against, so the caller's own fallback is used instead.
+    return '';
+  }
 }
 
 /**
@@ -33,7 +53,7 @@ async function branding(apiOrigin = '') {
   return {
     gym: gym ? { slug: gym.slug, name: gym.name } : null,
     siteName: settings.siteName || (gym && gym.name) || 'GymPilot',
-    logoUrl: absoluteAsset(settings.logoUrl, apiOrigin),
+    logoUrl: absoluteAsset(settings.logoUrl, siteOrigin(), settings.siteUrl, apiOrigin),
     logoWidth: settings.logoWidth || 160,
     logoHeight: settings.logoHeight || 56,
     theme: theme.key,

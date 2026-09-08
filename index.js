@@ -55,6 +55,11 @@ app.use(
 // ---------------------------------------------------------------------------
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 const GYMFOLIO_URL = process.env.GYMFOLIO_URL || 'http://localhost:3000';
+//
+// EXTRA_CORS_ORIGINS is a comma-separated list for anything else that has to
+// reach this API from a browser -- the member app's web build, which Expo
+// serves from http://localhost:8081, is the usual one. The app on a phone
+// sends no Origin header at all, so it never needs an entry here.
 const STATIC_ORIGINS = new Set(
   [
     FRONTEND_ORIGIN,
@@ -63,7 +68,10 @@ const STATIC_ORIGINS = new Set(
     'http://localhost:3000',
     'http://localhost:3001',
     'https://www.thejymor.com',
-    'https://thejymor.com'
+    'https://thejymor.com',
+    ...String(process.env.EXTRA_CORS_ORIGINS || '')
+      .split(',')
+      .map((entry) => entry.trim().replace(/\/+$/, ''))
   ].filter(Boolean)
 );
 const { isRegisteredOrigin } = require('./src/platform/middleware/resolveTenant');

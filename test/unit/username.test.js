@@ -9,6 +9,7 @@ mongoose.set('bufferCommands', false);
 
 const { baseFor, clean } = require('../../src/services/username');
 const { themeFor, DEFAULT_THEME_KEY, THEMES } = require('../../src/config/themes');
+const { absoluteAsset } = require('../../src/services/branding');
 
 test('a username reads like the member, not like a machine', () => {
   assert.equal(baseFor({ firstName: 'Sara', lastName: 'Malik', email: 'sara.malik@example.com' }), 'saramalik');
@@ -50,4 +51,19 @@ test('an unknown or missing colour scheme falls back to the default', () => {
   assert.equal(themeFor('no-such-theme').key, DEFAULT_THEME_KEY);
   assert.equal(themeFor(undefined).key, DEFAULT_THEME_KEY);
   assert.equal(themeFor('royal-violet').tokens.accent, '#8b5cf6');
+});
+
+test('a gym logo the phone app can load', () => {
+  // Uploaded logos are already absolute and are left exactly as they are.
+  const blob = 'https://blob.example.com/logos/lift.png';
+  assert.equal(absoluteAsset(blob, 'https://thejymor.com', 'https://api.gympilot.app'), blob);
+
+  // A relative path belongs to the gym's own website, not to the API, and the
+  // first origin offered wins.
+  assert.equal(absoluteAsset('/images/logo.png', 'https://thejymor.com/', ''), 'https://thejymor.com/images/logo.png');
+  assert.equal(absoluteAsset('images/logo.png', '', 'https://thejymor.com'), 'https://thejymor.com/images/logo.png');
+
+  // Nothing to resolve against, and nothing to resolve.
+  assert.equal(absoluteAsset('/images/logo.png'), '/images/logo.png');
+  assert.equal(absoluteAsset('', 'https://thejymor.com'), '');
 });
