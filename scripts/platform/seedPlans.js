@@ -98,7 +98,7 @@ const ADDONS = [
   {
     slug: 'member-app',
     name: 'Member app',
-    description: 'Your gym in your members\' pockets: bookings, membership, check-in code, in your colours.',
+    description: 'Bookings, membership and check-in code, in your colours.',
     price: { monthly: 1500, yearly: 15000, currency: 'PKR' },
     planSlugs: ['starter', 'growth'],
     isPublic: true,
