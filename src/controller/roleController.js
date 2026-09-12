@@ -73,6 +73,23 @@ module.exports = {
     });
   },
 
+  // GET /api/roles/options
+  //
+  // Just the names, for the role pickers on the Users and Staff tabs. Open to
+  // any staff account (see requirePermission.requireStaff), because a
+  // receptionist who may edit users must be able to pick a role without
+  // holding the `roles` tab that would let them edit the roles themselves.
+  options: async (_req, res) => {
+    try {
+      await ensureDefaultRoles();
+      const roles = await Role.find({ isActive: true }).select('slug name order').sort({ order: 1, name: 1 }).lean();
+      return res.json({ success: true, data: roles.map((role) => ({ slug: role.slug, name: role.name })) });
+    } catch (error) {
+      console.error('[roles] options failed:', error);
+      return res.status(500).json({ message: 'Could not load roles', error: error.message });
+    }
+  },
+
   // GET /api/roles
   list: async (_req, res) => {
     try {

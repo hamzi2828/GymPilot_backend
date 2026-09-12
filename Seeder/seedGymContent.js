@@ -387,12 +387,12 @@ async function run() {
   let category = await BlogCategory.findOne({ name: 'Training' });
   if (!category) category = await BlogCategory.create({ name: 'Training', slug: 'training' });
 
-  let author = await Author.findOne({ name: 'The Jymor Team' });
+  let author = await Author.findOne({ name: 'The Coaching Team' });
   if (!author) {
     author = await Author.create({
-      name: 'The Jymor Team',
-      slug: 'the-jymor-team',
-      email: 'coaches@jymor.co.uk',
+      name: 'The Coaching Team',
+      slug: 'the-coaching-team',
+      email: 'coaches@yourgym.com',
       bio: 'Coaching staff writing about training, recovery and everything in between.',
       isActive: true,
     });

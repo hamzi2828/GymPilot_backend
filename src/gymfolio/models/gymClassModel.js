@@ -156,9 +156,10 @@ const gymClassSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes for performance
+// Indexes for performance. `slug` already has a unique index from its field
+// definition above; declaring it again here made Mongoose warn about a
+// duplicate on every start.
 gymClassSchema.index({ isActive: 1, order: 1 });
-gymClassSchema.index({ slug: 1 });
 gymClassSchema.index({ isFeatured: 1 });
 gymClassSchema.index({ category: 1 });
 gymClassSchema.index({ difficulty: 1 });

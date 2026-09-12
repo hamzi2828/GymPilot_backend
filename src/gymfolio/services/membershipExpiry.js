@@ -61,6 +61,37 @@ function lapsedFilter(now) {
 }
 
 /**
+ * The one query that defines "live": paid, in a status that grants access
+ * (frozen and past-due members are still members), and not past its end.
+ * The dashboard, the reports and the campaign audiences all count from this
+ * so they cannot disagree about how many members the gym has.
+ */
+const LIVE_STATUSES = ['active', 'frozen', 'past_due'];
+
+function liveFilter(now = new Date()) {
+  return {
+    'payment.status': 'paid',
+    status: { $in: LIVE_STATUSES },
+    'subscription.endDate': { $gte: now }
+  };
+}
+
+/**
+ * How many distinct PEOPLE hold a live order -- a member with a membership
+ * and a session pack is one member, not two. Guest orders (no userId) are
+ * told apart by email. `extra` narrows the live filter (an end-date window
+ * for "expiring", say).
+ */
+async function countLiveMembers(now = new Date(), extra = {}) {
+  const rows = await PackageOrder.aggregate([
+    { $match: { ...liveFilter(now), ...extra } },
+    { $group: { _id: { $ifNull: ['$userId', { $toLower: { $ifNull: ['$customerInfo.email', ''] } }] } } },
+    { $count: 'n' }
+  ]);
+  return rows.length ? rows[0].n : 0;
+}
+
+/**
  * Flips every lapsed membership to 'expired'.
  *
  * Idempotent -- running it twice changes nothing the second time, because the
@@ -139,5 +170,8 @@ module.exports = {
   expireLapsedOrders,
   sweepIfDue,
   countLapsed,
+  liveFilter,
+  countLiveMembers,
+  LIVE_STATUSES,
   THROTTLE_MS
 };

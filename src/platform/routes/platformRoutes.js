@@ -37,6 +37,11 @@ router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
 // No session; nothing here says anything about a gym.
 router.get('/public/plans', plansController.publicPlans);
 router.get('/public/addons', addonsController.publicAddons);
+// The domain gyms get their web address under (`<slug>.<root>`), so checkout
+// can show it -- or say there is none yet. Nothing secret.
+router.get('/public/config', (req, res) => {
+  res.json({ success: true, data: { root_domain: process.env.PLATFORM_ROOT_DOMAIN || '' } });
+});
 
 // Stripe's callback. Public by necessity -- the signature is the proof --
 // and raw, because a parsed body no longer matches what was signed.

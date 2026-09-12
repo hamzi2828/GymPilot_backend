@@ -185,6 +185,16 @@ const packageOrderSchema = new mongoose.Schema(
       immediate: { type: Boolean, default: false },
       resumedAt: { type: Date, default: null }
     },
+    // Money given back, and by whom. Set once, when payment.status becomes
+    // 'refunded'; stripeRefundId is null for cash, bank and terminal refunds,
+    // which move by hand and are only recorded here.
+    refund: {
+      amount: { type: Number, default: null },
+      reason: { type: String, default: '' },
+      at: { type: Date, default: null },
+      byUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      stripeRefundId: { type: String, default: null }
+    },
     // Session packs: how many are on it and how many have been used.
     sessions: {
       total: { type: Number, default: 0 },
@@ -238,27 +248,48 @@ const packageOrderSchema = new mongoose.Schema(
   }
 );
 
-// Generate order number
+// Order numbers: PKG<yy><mm><sequence>, one gap-free sequence per gym per
+// month, taken from the Counter collection with a single atomic increment.
+//
+// The old way -- regex for this month's numbers, sort descending, add one --
+// handed the same number to two checkouts that started in the same instant,
+// and the unique index then failed one of them. It also broke past 9999
+// orders a month: 'PKG260910000' sorts below 'PKG26099999' as a string.
+//
+// The sequence is now padded to five digits. Older four-digit numbers stay
+// valid (they are just strings); the first time a month's counter is used it
+// is seeded from the highest number already issued that month, so numbering
+// carries on from where the old scheme left off rather than restarting.
+const ORDER_PREFIX = 'PKG';
+const ORDER_SEQUENCE_WIDTH = 5;
+
+function legacySequenceOf(orderNumber, monthPrefix) {
+  const tail = String(orderNumber || '').slice(monthPrefix.length);
+  const parsed = parseInt(tail, 10);
+  return /^\d+$/.test(tail) && !Number.isNaN(parsed) ? parsed : 0;
+}
+
 packageOrderSchema.statics.generateOrderNumber = async function() {
-  const prefix = 'PKG';
+  const Counter = require('./counterModel');
   const date = new Date();
-  const year = date.getFullYear().toString().substr(-2);
+  const year = date.getFullYear().toString().slice(-2);
   const month = String(date.getMonth() + 1).padStart(2, '0');
+  const monthPrefix = `${ORDER_PREFIX}${year}${month}`;
+  const key = `package-order-${year}${month}`;
 
-  // Find the last order number for today
-  const lastOrder = await this.findOne({
-    orderNumber: new RegExp(`^${prefix}${year}${month}`)
-  })
-  .sort({ orderNumber: -1 })
-  .select('orderNumber');
-
-  let sequence = 1;
-  if (lastOrder) {
-    const lastSequence = parseInt(lastOrder.orderNumber.substr(-4));
-    sequence = lastSequence + 1;
+  // First use this month: start the counter after whatever the old scheme
+  // already issued. $setOnInsert makes two first-callers agree on one seed.
+  const existing = await Counter.findOne({ key }).select('_id').lean();
+  if (!existing) {
+    // Numeric maximum, not string maximum: a month holding both four- and
+    // five-digit numbers does not sort the way it counts.
+    const issued = await this.find({ orderNumber: new RegExp(`^${monthPrefix}\\d+$`) }).select('orderNumber').lean();
+    const seed = issued.reduce((max, row) => Math.max(max, legacySequenceOf(row.orderNumber, monthPrefix)), 0);
+    await Counter.updateOne({ key }, { $setOnInsert: { key, seq: seed } }, { upsert: true });
   }
 
-  return `${prefix}${year}${month}${String(sequence).padStart(4, '0')}`;
+  const sequence = await Counter.next(key);
+  return `${monthPrefix}${String(sequence).padStart(ORDER_SEQUENCE_WIDTH, '0')}`;
 };
 
 // Indexes for better query performance
@@ -268,6 +299,15 @@ packageOrderSchema.index({ status: 1 });
 packageOrderSchema.index({ 'payment.stripeSessionId': 1 });
 packageOrderSchema.index({ 'customerInfo.email': 1 });
 packageOrderSchema.index({ createdAt: -1 });
+// What the front desk, the expiry sweep, the dashboard and the reports all
+// ask: which orders are live, and which are ending when.
+packageOrderSchema.index({ 'subscription.endDate': 1 });
+packageOrderSchema.index({ status: 1, 'payment.status': 1, 'subscription.endDate': 1 });
+// The webhook's lookup for one-off card payments; sparse because most orders
+// (subscriptions, bank transfers, cash) never have one.
+packageOrderSchema.index({ 'payment.stripePaymentIntentId': 1 }, { sparse: true });
+// Revenue over a period is read by when the money arrived.
+packageOrderSchema.index({ 'payment.paidAt': -1 });
 
 // Virtual for subscription duration
 packageOrderSchema.virtual('subscriptionDuration').get(function() {

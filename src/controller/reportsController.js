@@ -17,6 +17,7 @@ const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 const { sendCsv } = require('../services/csv');
+const { countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
 const EXPIRING_WINDOW_DAYS = 14;
 const EXPORT_LIMIT = 20000;
@@ -53,7 +54,12 @@ module.exports = {
       const now = new Date();
       const soon = new Date(now.getTime() + EXPIRING_WINDOW_DAYS * 86400000);
 
-      const [revenueRows, revenueByPackage, otherCurrencies, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts] = await Promise.all([
+      // Rows in a currency other than the gym's cannot be added to the base
+      // totals (there is no exchange rate here), but they must not vanish
+      // either: they are counted so the report can say what it left out.
+      const notBase = { $not: new RegExp(`^${base}$`, 'i') };
+
+      const [revenueRows, revenueByPackage, otherCurrencies, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts, otherExpenses, otherSales] = await Promise.all([
         PackageOrder.aggregate([
           { $match: { 'payment.status': 'paid', 'payment.currency': new RegExp(`^${base}$`, 'i'), $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } } },
           { $group: { _id: dateBucketExpr(paidAtExpr(), grain, tz), total: { $sum: '$payment.amount' }, n: { $sum: 1 } } }
@@ -91,9 +97,11 @@ module.exports = {
           { $group: { _id: '$status', n: { $sum: 1 }, value: { $sum: '$price' }, commission: { $sum: '$commission.amount' } } }
         ]),
         Lead.aggregate([{ $match: { createdAt: { $gte: range.start, $lt: range.end } } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
+        // Distinct members with a live order, the same count the dashboard
+        // shows (membershipExpiry.countLiveMembers).
         Promise.all([
-          PackageOrder.countDocuments({ 'payment.status': 'paid', status: { $in: ['active', 'frozen', 'past_due'] }, 'subscription.endDate': { $gte: now } }),
-          PackageOrder.countDocuments({ 'payment.status': 'paid', status: 'active', 'subscription.endDate': { $gte: now, $lt: soon } }),
+          countLiveMembers(now),
+          countLiveMembers(now, { 'subscription.endDate': { $gte: now, $lt: soon } }),
           User.countDocuments({ role: 'user', isActive: true })
         ]),
         PackageOrder.countDocuments({ 'payment.status': 'paid', renewedFrom: { $ne: null }, $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } }),
@@ -112,8 +120,21 @@ module.exports = {
           { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, total: { $sum: '$items.total' }, cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unitCost', 0] }] } } } },
           { $sort: { total: -1 } },
           { $limit: 8 }
+        ]),
+        Expense.aggregate([
+          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, currency: notBase } },
+          { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
+        ]),
+        Sale.aggregate([
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: notBase } },
+          { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
         ])
       ]);
+
+      const otherOrderCount = otherCurrencies.reduce((s, r) => s + r.n, 0);
+      const otherExpenseCount = otherExpenses.reduce((s, r) => s + r.n, 0);
+      const otherSaleCount = otherSales.reduce((s, r) => s + r.n, 0);
+      const otherCodes = [...new Set([...otherCurrencies, ...otherExpenses, ...otherSales].map((r) => String(r._id || '').toUpperCase()).filter(Boolean))].sort();
 
       const revenue = fill(buckets, revenueRows, (r) => r._id, (r) => r.total);
       const orders = fill(buckets, revenueRows, (r) => r._id, (r) => r.n);
@@ -169,6 +190,14 @@ module.exports = {
         top_products: topProducts.map((r) => ({ name: r._id || '—', quantity: r.quantity, total: Math.round(r.total * 100) / 100, margin: Math.round((r.total - r.cost) * 100) / 100 })),
         revenue_by_package: revenueByPackage.map((r) => ({ name: r._id || '—', total: Math.round(r.total * 100) / 100, orders: r.n })),
         other_currencies: otherCurrencies.map((r) => ({ currency: String(r._id || '').toUpperCase(), total: Math.round(r.total * 100) / 100, orders: r.n })),
+        // Everything the base-currency totals above had to leave out.
+        other_currency: {
+          count: otherOrderCount + otherExpenseCount + otherSaleCount,
+          currencies: otherCodes,
+          orders: otherOrderCount,
+          expenses: otherExpenseCount,
+          shop_sales: otherSaleCount
+        },
         classes: classRows.map((r) => ({ name: r._id || '—', booked: r.booked, attended: r.attended, no_show: r.no_show, waitlisted: r.waitlisted, attendance_rate: r.booked ? Math.round((r.attended / r.booked) * 100) : null })),
         pt,
         leads: { ...leads, total: leadTotal }

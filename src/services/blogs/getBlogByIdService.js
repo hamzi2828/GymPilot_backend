@@ -47,9 +47,12 @@ const getBlogByIdService = async (identifier, incrementView = false) => {
         ? blog.author.name
         : 'Unknown',
       authorBio: blog.author ? blog.author.bio : '',
-      excerpt: blog.content 
-        ? blog.content.replace(/<[^>]*>?/gm, '').slice(0, 200) + '...' 
-        : '',
+      // The stored summary when the editor wrote one, else the first lines.
+      excerpt: blog.excerpt
+        ? blog.excerpt
+        : blog.content
+          ? blog.content.replace(/<[^>]*>?/gm, '').slice(0, 200) + '...'
+          : '',
       readingTime: calculateReadingTime(blog.content || ''),
       publishedDate: blog.status === 'published' ? blog.createdAt : null,
       lastModified: blog.updatedAt,

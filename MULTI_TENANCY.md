@@ -53,6 +53,17 @@ Connections: gyms on the platform cluster share the primary pool via
 `mongoose.connection.useDb(name, { useCache: true })`; a gym with its own
 `database.uri` gets a dedicated cached connection (`src/platform/connections.js`).
 
+**Dedicated-cluster contract.** `database.uri` is `select: false` on the Gym
+schema, so a plain `Gym.findOne()` does not return it — and a gym looked up
+that way is silently served from the *shared* cluster. Every lookup that
+leads to a connection must therefore go through one of the statics that
+re-select it: **`Gym.findBySlug(slug)`, `Gym.findByHost(host)` and
+`Gym.findByIdWithUri(id)` return the uri** (lean documents). `resolveTenant`,
+`tenantFromPayload`, `jobs.js`, `tenantStats.js` and the panel's controllers
+all do; the mobile sign-in must use `findByIdWithUri` / `findBySlug` too.
+Nothing may serialise such a document to a client: the panel goes through
+`publicGym()`, which replaces `database` with `{ name }`.
+
 ### Exempt paths
 
 | Path | Why |
@@ -67,8 +78,18 @@ Connections: gyms on the platform cluster share the primary pool via
 
 * **JWTs** carry `tid` (the gym id). `middleware/auth` refuses a token on any
   other gym's request; platform tokens are refused on every gym route.
-* **Links in emails and redirects** (`frontendOrigin()`) come from the
-  gym's *registered* domain, never from a raw header.
+* **Links in emails and redirects** (`frontendOrigin()` / `siteUrlFor(gym)`)
+  come from the gym's *registered* primary domain, never from a raw header.
+  A gym with no registered domain gets `https://<slug>.<PLATFORM_ROOT_DOMAIN>`
+  when a root domain is set; only without one does the env `FRONTEND_ORIGIN`
+  fallback apply (so local development with no root domain behaves as before).
+  The panel returns the same answer as `siteUrl` on every gym.
+* **Entitlements** (`src/platform/entitlements.js`): `gymHasAddon(gym, slug)`
+  is true when the gym has no plan (an unconfigured or free-hosted platform),
+  when its plan's `includedAddons` lists the slug, or when `subscription.addons`
+  carries it. The member app is the add-on `member-app`; the mobile sign-in
+  asks `gymHasAddon(gym, 'member-app')`. `planFor(gym)` returns the (cached)
+  plan document behind `gym.plan`.
 * **Timezone** comes from `gym.locale.timezone` (`timeUtils.timezone()`), so
   attendance, timetables and reminders run on each gym's clock.
 * **Uploads** land in `uploads/<slug>/…` (disk) or `<slug>/<folder>/…` (Vercel Blob).
@@ -79,9 +100,17 @@ Connections: gyms on the platform cluster share the primary pool via
 
 ## The platform panel
 
-App: `GymPilot_frontendAdmin` -- the marketing site at `/` and the panel at `/super-admin` (sign in at `/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `POST /api/platform/public/demo-requests`)
+App: `GymPilot_frontendAdmin` -- the marketing site at `/` and the panel at `/super-admin` (sign in at `/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `/api/platform/public/addons`, `/api/platform/public/config` → `{ root_domain }`, `POST /api/platform/public/demo-requests`)
 (`src/platform/routes/platformRoutes.js`). Its accounts (`super_admins`) and
 session token are separate from every gym's.
+
+Demo requests are de-duplicated per **email and kind** inside a ten-minute
+window: a checkout (`kind: 'trial'`) after a demo request is a new record; a
+second checkout inside the window updates the first one's plan, cycle,
+add-ons, preferred slug and message and answers 201 with its id. Checkout
+stores `firstName` / `lastName` separately (the owner account is created from
+them) beside the single `name`. An add-on priced in another currency than the
+plan is left off and noted in the request's `warnings`.
 
 * **Overview** — gyms, subscription states, renewals due, MRR
 * **Gyms** — list with live numbers from each gym's database; per gym:
@@ -117,9 +146,35 @@ node scripts/platform/copyDatabase.js --from <old> --to <new> [--dry-run]
 ```
 
 Provisioning creates the database, the system roles, a settings row with the
-gym's name and website, the homepage sections, the legal pages, and the
-owner's administrator account (`src/platform/provisioning.js`). If any step
-fails the platform record is rolled back.
+gym's name, website, currency (any ISO code) and country (ISO-2 only), the
+homepage sections, the legal pages, and the owner's administrator account
+(`src/platform/provisioning.js`). If any step fails the platform record is
+rolled back **and the database is dropped when this run created it** (a
+database that existed before, a dedicated-URI one, or one whose existence
+could not be checked is left alone).
+
+Rules the API applies to `POST /api/platform/gyms` (`validateDatabaseInput`;
+the scripts that adopt an existing deployment are exempt):
+
+* `database.name` may not be the platform database and must start with the
+  tenant prefix (`TENANT_DB_PREFIX`) → otherwise `400`.
+* `database.uri` is refused unless `ALLOW_DEDICATED_DB_URI=1` → `400`.
+* An explicit `slug` from the reserved list (`api www app admin mail platform
+  static assets cdn help support docs blog status login checkout panel`) →
+  `400`; a *preferred* slug or gym name that lands on one gets a number on
+  the end instead, like any taken name.
+
+**The owner's email.** After a successful provisioning (and from
+`POST /gyms/:id/reset-owner-password`) the owner is emailed the gym's name,
+the sign-in address (`<siteUrl>/authentication`), their email, and a
+**set-password link** — the same single-use hashed token the site's
+forgot-password flow issues (`src/platform/ownerInvite.js`, link
+`/authentication?mode=reset&token=…&email=…`, valid `OWNER_INVITE_TTL_HOURS`,
+default 72). The password never travels. A delivery problem is never a 500:
+the response carries `ownerInviteSent: false` and
+`warnings: ['Owner email could not be sent']`. `reset-owner-password` without
+a `password` only re-sends the link ("Resend owner invite" in the panel);
+with one it sets the password *and* sends the link.
 
 ### Domains
 
@@ -127,12 +182,24 @@ Point the gym's domain at the website deployment (on Vercel: add it to the
 frontend project). Add the same domain to the gym in the panel. That is all;
 the API allows the origin and serves the gym's database from the next request.
 
+When `PLATFORM_ROOT_DOMAIN` is set, provisioning also registers
+`<slug>.<root>` as a domain of the new gym (primary only when the gym has no
+other domain) and, when `VERCEL_TOKEN` / `VERCEL_PROJECT_ID` are set, adds it
+to the Vercel project best-effort (a failure is a `warning` on the response,
+not an error). `GET /api/platform/gyms/:id/domains/status` reports each
+domain's Vercel state (on the project, verified, misconfigured, DNS record to
+add); the panel shows it on the gym page.
+
 ### Environment
 
 See `.env.example`: `PLATFORM_DB_NAME` and `TENANT_DB_PREFIX` (both optional,
 derived from `MONGO_URI`), `DEFAULT_TENANT_SLUG`, `PLATFORM_ROOT_DOMAIN`, `PLATFORM_JWT_SECRET`,
 `PLATFORM_TOKEN_TTL`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`,
-`PLATFORM_ADMIN_ORIGIN`, `SUBSCRIPTION_GRACE_DAYS`.
+`PLATFORM_ADMIN_ORIGIN`, `SUBSCRIPTION_GRACE_DAYS`; and for the pieces above:
+`ALLOW_DEDICATED_DB_URI` (`1` to accept `database.uri` from the panel),
+`PLATFORM_NAME` (branding on platform emails, default `GymPilot`),
+`PLATFORM_CONTACT_EMAIL` (shown to gym admins on their billing page),
+`OWNER_INVITE_TTL_HOURS` (default 72).
 
 ### Scripts and seeders
 
@@ -147,8 +214,10 @@ npm run seed:classes -- --gym demo-gym
 ```
 
 The daily cron (`/api/jobs/reminders`) rolls platform subscriptions
-(`active → past_due → expired` after `SUBSCRIPTION_GRACE_DAYS`) and then runs
-the reminders for every active gym.
+(`active → past_due → expired` after `SUBSCRIPTION_GRACE_DAYS`), emails gym
+owners whose trial is ending or whose payment is late
+(`sendOwnerBillingNotices`, see BILLING.md → *Platform billing*), and then
+runs the reminders for every active gym.
 
 ### The front-desk app
 

@@ -40,13 +40,23 @@ const blogSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    // Optional: a post can be drafted before its cover photo exists and get
+    // the image on a later update.
     image: {
       type: String,
-      required: [true, 'Blog image is required']
+      default: null
     },
     thumbnail: {
       type: String,
       default: null
+    },
+    // The listing summary. Left empty, the first 150 characters of the
+    // content are shown instead (getAllBlogsService).
+    excerpt: {
+      type: String,
+      default: '',
+      trim: true,
+      maxLength: [500, 'Excerpt cannot exceed 500 characters']
     },
     author: {
       type: mongoose.Schema.Types.ObjectId,

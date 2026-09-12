@@ -116,9 +116,13 @@ const classBookingSchema = new mongoose.Schema(
     // What the member's membership looked like when they booked. Snapshotted
     // for the same reason attendance snapshots it: a renewal next week must
     // not rewrite the fact that this booking was taken on an expired package.
+    //
+    // The same superset the attendance row uses: whatever
+    // peopleDirectory.membershipFor can answer must be storable here, or a
+    // frozen member's booking fails validation instead of being recorded.
     membershipStatus: {
       type: String,
-      enum: ['active', 'expired', 'none'],
+      enum: ['active', 'expiring', 'expired', 'none', 'frozen', 'past_due', 'pending', 'suspended', 'cancelled'],
       default: 'none'
     },
 

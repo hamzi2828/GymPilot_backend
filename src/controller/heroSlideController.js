@@ -1,13 +1,43 @@
 const HeroSlide = require('../models/heroSlideModel');
 const path = require('path');
 const fs = require('fs');
-const { localUploadPath } = require('../helper/upload');
+const { localUploadPath, MAX_HERO_FILE_BYTES } = require('../helper/upload');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 let blobUpload;
 if (USE_BLOB_STORAGE) {
   blobUpload = require('../helper/blobUpload');
+}
+
+// Hero images are the biggest pictures on the site; they get the same ceiling
+// the blog hero does rather than the 5 MB default.
+const HERO_UPLOAD_OPTIONS = { kind: 'image', maxBytes: MAX_HERO_FILE_BYTES };
+
+// The admin page and the model grew different names for the same three
+// fields (subtitle/description, ctaText/buttonText, ctaLink/buttonLink).
+// Both spellings are read here and both are served (see the virtuals on the
+// model), so the old page and the corrected one work against one API.
+function firstProvided(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+  }
+  return values.find((value) => value !== undefined);
+}
+
+function readAliases(body = {}) {
+  return {
+    description: firstProvided(body.description, body.subtitle),
+    buttonText: firstProvided(body.buttonText, body.ctaText),
+    buttonLink: firstProvided(body.buttonLink, body.ctaLink)
+  };
+}
+
+function readBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
 }
 
 // Get all active hero slides (public endpoint)
@@ -83,22 +113,20 @@ const createSlide = async (req, res) => {
   try {
     const {
       title,
-      description,
-      buttonText,
-      buttonLink,
       secondButtonText,
       secondButtonLink,
       isActive,
       order,
       ariaLabel
     } = req.body;
+    const { description, buttonText, buttonLink } = readAliases(req.body);
 
     // Handle file upload
     let imageUrl = '';
     if (req.file) {
       if (USE_BLOB_STORAGE && blobUpload) {
         imageUrl = await blobUpload.uploadToBlob(
-          req.file.buffer, req.file.originalname, req.file.mimetype, 'hero-slides'
+          req.file.buffer, req.file.originalname, req.file.mimetype, 'hero-slides', HERO_UPLOAD_OPTIONS
         );
       } else {
         imageUrl = `/uploads/${req.file.filename}`;
@@ -110,6 +138,7 @@ const createSlide = async (req, res) => {
       });
     }
 
+    const active = readBoolean(isActive);
     const slideData = {
       title,
       description,
@@ -118,7 +147,7 @@ const createSlide = async (req, res) => {
       buttonLink: buttonLink || undefined,
       secondButtonText: secondButtonText || undefined,
       secondButtonLink: secondButtonLink || undefined,
-      isActive: isActive !== undefined ? isActive === 'true' : true,
+      isActive: active === null ? true : active,
       order: order ? parseInt(order) : undefined,
       ariaLabel: ariaLabel || undefined
     };
@@ -164,15 +193,13 @@ const updateSlide = async (req, res) => {
     const { id } = req.params;
     const {
       title,
-      description,
-      buttonText,
-      buttonLink,
       secondButtonText,
       secondButtonLink,
       isActive,
       order,
       ariaLabel
     } = req.body;
+    const { description, buttonText, buttonLink } = readAliases(req.body);
 
     const slide = await HeroSlide.findById(id);
     if (!slide) {
@@ -184,6 +211,7 @@ const updateSlide = async (req, res) => {
 
     const oldImagePath = slide.imageUrl;
 
+    const active = readBoolean(isActive);
     const updateData = {
       title: title || slide.title,
       description: description || slide.description,
@@ -191,16 +219,16 @@ const updateSlide = async (req, res) => {
       buttonLink: buttonLink !== undefined ? buttonLink : slide.buttonLink,
       secondButtonText: secondButtonText !== undefined ? secondButtonText : slide.secondButtonText,
       secondButtonLink: secondButtonLink !== undefined ? secondButtonLink : slide.secondButtonLink,
-      isActive: isActive !== undefined ? isActive === 'true' : slide.isActive,
+      isActive: active === null ? slide.isActive : active,
       order: order ? parseInt(order) : slide.order,
       ariaLabel: ariaLabel !== undefined ? ariaLabel : slide.ariaLabel
     };
-    
+
     // Handle new image upload
     if (req.file) {
       if (USE_BLOB_STORAGE && blobUpload) {
         updateData.imageUrl = await blobUpload.uploadToBlob(
-          req.file.buffer, req.file.originalname, req.file.mimetype, 'hero-slides'
+          req.file.buffer, req.file.originalname, req.file.mimetype, 'hero-slides', HERO_UPLOAD_OPTIONS
         );
       } else {
         updateData.imageUrl = `/uploads/${req.file.filename}`;
@@ -252,32 +280,30 @@ const updateSlide = async (req, res) => {
   }
 };
 
-// Toggle hero slide active status
+// Toggle hero slide active status.
+//
+// An explicit boolean in the body is honoured; a body with none (which is
+// what the admin page's toggle button sends) flips the current value.
 const toggleSlideStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { isActive } = req.body;
-    
-    if (typeof isActive !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isActive must be a boolean value'
-      });
-    }
-    
-    const slide = await HeroSlide.findByIdAndUpdate(
-      id,
-      { isActive },
-      { new: true, runValidators: true }
-    );
-    
-    if (!slide) {
+    const wanted = readBoolean((req.body || {}).isActive);
+
+    const current = await HeroSlide.findById(id);
+    if (!current) {
       return res.status(404).json({
         success: false,
         message: 'Hero slide not found'
       });
     }
-    
+
+    const isActive = wanted === null ? !current.isActive : wanted;
+    const slide = await HeroSlide.findByIdAndUpdate(
+      id,
+      { isActive },
+      { new: true, runValidators: true }
+    );
+
     res.status(200).json({
       success: true,
       message: `Hero slide ${isActive ? 'activated' : 'deactivated'} successfully`,

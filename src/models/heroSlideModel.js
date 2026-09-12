@@ -62,6 +62,22 @@ const heroSlideSchema = new mongoose.Schema({
 heroSlideSchema.index({ isActive: 1, order: 1 });
 heroSlideSchema.index({ order: 1 });
 
+// The admin page reads these names for the same fields; serving both keeps
+// the old page and the corrected one working against one API. (toJSON has
+// virtuals on, so they appear in every response.)
+heroSlideSchema.virtual('image').get(function () {
+  return this.imageUrl;
+});
+heroSlideSchema.virtual('subtitle').get(function () {
+  return this.description;
+});
+heroSlideSchema.virtual('ctaText').get(function () {
+  return this.buttonText;
+});
+heroSlideSchema.virtual('ctaLink').get(function () {
+  return this.buttonLink;
+});
+
 // Static method to get active slides sorted by order
 heroSlideSchema.statics.getActiveSlides = function() {
   return this.find({ isActive: true }).sort({ order: 1, createdAt: 1 });

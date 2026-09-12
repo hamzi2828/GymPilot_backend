@@ -10,6 +10,113 @@ const {
 } = require('../services/blogs');
 const Blog = require('../models/blogModel');
 const BlogCategory = require('../models/BlogCategory');
+const mongoose = require('mongoose');
+
+// ---------------------------------------------------------------------------
+// Categories
+//
+// Managed from the blog admin (Blogs → categories). The slug is derived from
+// the name and must be unique; a category still in use by posts cannot be
+// deleted, or those posts would point at nothing.
+// ---------------------------------------------------------------------------
+
+const categorySlug = (name) =>
+  String(name || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+
+const categoryView = (category) => ({ _id: category._id, name: category.name, slug: category.slug });
+
+const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
+
+// GET /admin/blogs/categories
+exports.listCategories = async (req, res) => {
+  try {
+    const categories = await BlogCategory.find().sort({ name: 1 }).lean();
+    return res.status(200).json({ success: true, data: categories.map(categoryView) });
+  } catch (error) {
+    console.error('Error listing blog categories:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load categories', error: error.message });
+  }
+};
+
+// POST /admin/blogs/categories { name }
+exports.createCategory = async (req, res) => {
+  try {
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 80);
+    if (!name) return res.status(400).json({ success: false, message: 'A category name is required' });
+
+    const slug = categorySlug(name);
+    if (!slug) return res.status(400).json({ success: false, message: 'That name does not make a usable category' });
+
+    const clash = await BlogCategory.findOne({ $or: [{ slug }, { name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }] }).lean();
+    if (clash) return res.status(409).json({ success: false, message: 'A category with that name already exists' });
+
+    const category = await BlogCategory.create({ name, slug });
+    return res.status(201).json({ success: true, data: categoryView(category) });
+  } catch (error) {
+    if (error && error.code === 11000) {
+      return res.status(409).json({ success: false, message: 'A category with that name already exists' });
+    }
+    console.error('Error creating blog category:', error);
+    return res.status(500).json({ success: false, message: 'Failed to create category', error: error.message });
+  }
+};
+
+// PUT /admin/blogs/categories/:id { name }
+exports.updateCategory = async (req, res) => {
+  try {
+    if (!isId(req.params.id)) return res.status(404).json({ success: false, message: 'Category not found' });
+    const category = await BlogCategory.findById(req.params.id);
+    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
+
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 80);
+    if (!name) return res.status(400).json({ success: false, message: 'A category name is required' });
+
+    const slug = categorySlug(name);
+    if (!slug) return res.status(400).json({ success: false, message: 'That name does not make a usable category' });
+
+    const clash = await BlogCategory.findOne({ _id: { $ne: category._id }, slug }).lean();
+    if (clash) return res.status(409).json({ success: false, message: 'A category with that name already exists' });
+
+    category.name = name;
+    category.slug = slug;
+    await category.save();
+    return res.status(200).json({ success: true, data: categoryView(category) });
+  } catch (error) {
+    if (error && error.code === 11000) {
+      return res.status(409).json({ success: false, message: 'A category with that name already exists' });
+    }
+    console.error(`Error updating blog category ${req.params.id}:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to update category', error: error.message });
+  }
+};
+
+// DELETE /admin/blogs/categories/:id
+exports.deleteCategory = async (req, res) => {
+  try {
+    if (!isId(req.params.id)) return res.status(404).json({ success: false, message: 'Category not found' });
+    const category = await BlogCategory.findById(req.params.id);
+    if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
+
+    const inUse = await Blog.countDocuments({ categoryId: category._id });
+    if (inUse) {
+      return res.status(409).json({
+        success: false,
+        message: `${inUse} post${inUse === 1 ? ' is' : 's are'} still in this category. Move them to another category first.`
+      });
+    }
+
+    await category.deleteOne();
+    return res.status(200).json({ success: true, message: 'Category deleted', data: categoryView(category) });
+  } catch (error) {
+    console.error(`Error deleting blog category ${req.params.id}:`, error);
+    return res.status(500).json({ success: false, message: 'Failed to delete category', error: error.message });
+  }
+};
 
 
 // Get featured blogs (latest 3 published blogs)

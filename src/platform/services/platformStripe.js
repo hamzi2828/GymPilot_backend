@@ -15,8 +15,8 @@ const { API_VERSION } = require('../../services/stripeClient');
 const clients = new Map();
 
 class PlatformStripeNotConfiguredError extends Error {
-  constructor() {
-    super('The platform has no Stripe keys yet. Add them under System → Stripe.');
+  constructor(message) {
+    super(message || 'The platform has no Stripe keys yet. Add them under System → Stripe.');
     this.code = 'PLATFORM_STRIPE_NOT_CONFIGURED';
     this.status = 409;
   }
@@ -32,6 +32,18 @@ async function platformStripeConfig() {
     webhookSecret: s.webhookSecret || '',
     enabled: !!s.enabled
   };
+}
+
+/**
+ * Whether gyms can pay the platform by card right now: keys saved AND the
+ * "charge gyms through Stripe" switch on. The switch is what lets keys sit
+ * in the panel, tested, before anyone is sent to a checkout.
+ */
+async function platformBillingAvailable() {
+  const cfg = await platformStripeConfig();
+  if (!cfg.secretKey) return { available: false, reason: 'The platform has no Stripe keys yet. Add them under System → Stripe.' };
+  if (!cfg.enabled) return { available: false, reason: 'Charging gyms through Stripe is switched off under System → Stripe.' };
+  return { available: true, reason: '' };
 }
 
 /** A Stripe client on the platform's own account, or throws. */
@@ -56,6 +68,7 @@ function forgetPlatformStripe() {
 module.exports = {
   getPlatformStripe,
   platformStripeConfig,
+  platformBillingAvailable,
   forgetPlatformStripe,
   PlatformStripeNotConfiguredError
 };

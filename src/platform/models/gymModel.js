@@ -99,7 +99,26 @@ const gymSchema = new mongoose.Schema(
       startedAt: { type: Date, default: null },
       currentPeriodEnd: { type: Date, default: null },
       cancelledAt: { type: Date, default: null },
-      notes: { type: String, default: '', trim: true }
+      notes: { type: String, default: '', trim: true },
+
+      // Self-serve billing through the PLATFORM's Stripe account (see
+      // services/platformBilling.js). Empty for gyms billed by hand.
+      stripeCustomerId: { type: String, default: '', trim: true },
+      stripeSubscriptionId: { type: String, default: '', trim: true },
+      // "Growth (GymPilot) + Member app · PKR 10,400 / month" -- what Stripe
+      // is charging, in words, for the panel.
+      stripePriceSummary: { type: String, default: '', trim: true },
+
+      // When each lifecycle email went to the owner, so every one of them is
+      // sent once per period (see jobs.js sendOwnerBillingNotices). Reset
+      // whenever a new period starts.
+      notices: {
+        trial7: { type: Date, default: null },
+        trial3: { type: Date, default: null },
+        trial1: { type: Date, default: null },
+        pastDue: { type: Date, default: null },
+        expired: { type: Date, default: null }
+      }
     },
 
     locale: {
@@ -121,6 +140,7 @@ const gymSchema = new mongoose.Schema(
 
 gymSchema.index({ 'domains.host': 1 });
 gymSchema.index({ 'subscription.status': 1, 'subscription.currentPeriodEnd': 1 });
+gymSchema.index({ 'subscription.stripeSubscriptionId': 1 }, { sparse: true });
 
 gymSchema.statics.SLUG_PATTERN = SLUG_PATTERN;
 gymSchema.statics.GYM_STATUSES = GYM_STATUSES;
@@ -128,15 +148,27 @@ gymSchema.statics.SUBSCRIPTION_STATUSES = SUBSCRIPTION_STATUSES;
 gymSchema.statics.BILLING_CYCLES = BILLING_CYCLES;
 gymSchema.statics.normalizeHost = normalizeHost;
 
+// The lookups that decide which database a request, job or sign-in runs
+// against. `database.uri` is select:false so it never rides along in an API
+// response, but the CONNECTION needs it -- a gym on its own cluster looked
+// up without it would silently be served from the shared cluster. These
+// three always include it; anything handed to a client must go through a
+// projection (see controllers/gymsController.js publicGym) rather than
+// serialising the document.
 gymSchema.statics.findByHost = function (host) {
   const normalized = normalizeHost(host);
   if (!normalized) return Promise.resolve(null);
-  return this.findOne({ 'domains.host': normalized }).lean();
+  return this.findOne({ 'domains.host': normalized }).select('+database.uri').lean();
 };
 
 gymSchema.statics.findBySlug = function (slug) {
   if (!slug) return Promise.resolve(null);
-  return this.findOne({ slug: String(slug).toLowerCase().trim() }).lean();
+  return this.findOne({ slug: String(slug).toLowerCase().trim() }).select('+database.uri').lean();
+};
+
+gymSchema.statics.findByIdWithUri = function (id) {
+  if (!id || !mongoose.Types.ObjectId.isValid(String(id))) return Promise.resolve(null);
+  return this.findById(id).select('+database.uri').lean();
 };
 
 /**

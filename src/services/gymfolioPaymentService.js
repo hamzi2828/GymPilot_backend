@@ -9,9 +9,12 @@
 //                 renewals, failed payments and cancellations then arrive on
 //                 the webhook and are applied to the same order.
 //
-// The order is created pending when the session is opened and activated when
-// Stripe confirms the money -- by the success page's verify call or by the
-// webhook, whichever comes first; both are idempotent.
+// The order is created pending BEFORE the Checkout session is opened, so a
+// session can never exist without the order it belongs to; it is activated
+// when Stripe confirms the money -- by the success page's verify call or by
+// the webhook, whichever comes first. Activation is claimed with one
+// conditional update (see gymfolio/services/activationClaim.js), so two of
+// those arriving together produce one activation, not two.
 
 const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const Package = require('../gymfolio/models/packageModel');
@@ -22,6 +25,8 @@ const { frontendOrigin, currentTenantSlug } = require('../platform/tenantContext
 const { getStripe } = require('./stripeClient');
 const membership = require('../gymfolio/services/membershipService');
 const notify = require('./gymNotifications');
+const { idOf, subscriptionIdOf, periodOf, invoicePeriodOf } = require('../gymfolio/services/stripeShapes');
+const claim = require('../gymfolio/services/activationClaim');
 
 const SESSION_TYPE = 'gymfolio_package_subscription';
 const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf']);
@@ -40,13 +45,29 @@ async function memberFor(order) {
   return User.findById(order.userId).select('firstName lastName email').lean();
 }
 
-function idOf(value) {
-  return typeof value === 'string' ? value : value && value.id;
+// The order number Stripe was told about, wherever the event carries it:
+// on the PaymentIntent's metadata for one-off sales, on the subscription's
+// metadata (surfaced on its invoices) for recurring ones.
+function orderNumberOf(object) {
+  if (!object) return null;
+  const meta = object.metadata || {};
+  const subDetails = object.subscription_details || (object.parent && object.parent.subscription_details) || {};
+  const subMeta = subDetails.metadata || {};
+  return meta.orderNumber || subMeta.orderNumber || null;
+}
+
+async function orderForSubscription(subId, object) {
+  const clauses = [];
+  if (subId) clauses.push({ 'payment.stripeSubscriptionId': subId });
+  const orderNumber = orderNumberOf(object);
+  if (orderNumber) clauses.push({ orderNumber });
+  if (!clauses.length) return null;
+  return PackageOrder.findOne(clauses.length === 1 ? clauses[0] : { $or: clauses });
 }
 
 class GymfolioPaymentService {
   /**
-   * Opens a Stripe Checkout session for a package and records a pending order.
+   * Records a pending order, then opens a Stripe Checkout session for it.
    */
   async createPackageCheckoutSession(userId, packageId, customerInfo, options = {}) {
     const stripe = await getStripe();
@@ -66,9 +87,47 @@ class GymfolioPaymentService {
 
     const { coupon, discount } = await membership.applyCoupon(options.couponCode, packageData, listPrice);
 
+    // A signed-in member who is already on a subscription is sent to their
+    // account page rather than sold a second one that overlaps it.
+    if (userId) {
+      await membership.assertNoActiveSubscription({ userId, email: customerInfo.email, snapshot });
+    }
+
     const orderNumber = await PackageOrder.generateOrderNumber();
     const siteOrigin = frontendOrigin();
     const tenantSlug = currentTenantSlug() || '';
+
+    // The order exists before Stripe hears about it, so a session id always
+    // has an order to land on -- and a crash between the two leaves a
+    // pending order rather than an orphaned session.
+    const order = new PackageOrder({
+      orderNumber,
+      userId: userId || null,
+      packageId: packageData._id,
+      packageDetails: snapshot,
+      customerInfo: {
+        fullName: customerInfo.fullName,
+        email: customerInfo.email,
+        phone: customerInfo.phone,
+        country: customerInfo.country,
+        address: customerInfo.address || '',
+        city: customerInfo.city || '',
+        state: customerInfo.state || '',
+        zipCode: customerInfo.zipCode || ''
+      },
+      payment: {
+        method: 'stripe',
+        amount: round2(Math.max(0, listPrice + joiningFee - discount)),
+        subtotal: round2(listPrice + joiningFee),
+        discountAmount: discount,
+        couponCode: coupon ? coupon.code : '',
+        currency,
+        status: 'pending'
+      },
+      subscription: { autoRenew: recurring },
+      status: 'pending'
+    });
+    await order.save();
 
     const lineItems = [
       {
@@ -112,6 +171,7 @@ class GymfolioPaymentService {
         packageId: String(packageData._id),
         packageName: packageData.name,
         orderNumber,
+        orderId: String(order._id),
         customerInfo: JSON.stringify(customerInfo),
         type: SESSION_TYPE,
         tenantSlug,
@@ -120,21 +180,6 @@ class GymfolioPaymentService {
       billing_address_collection: 'auto',
       phone_number_collection: { enabled: true }
     };
-
-    // The gym's own coupon becomes a one-off Stripe coupon on the session.
-    // Stripe does not allow its own promotion-code box alongside a discount,
-    // so the box is only offered when no gym coupon is in play.
-    if (coupon && discount > 0) {
-      const duration = recurring && coupon.appliesToRenewals ? 'forever' : 'once';
-      const stripeCoupon = await stripe.coupons.create(
-        coupon.type === 'percent'
-          ? { percent_off: coupon.value, duration, name: coupon.code }
-          : { amount_off: toMinorUnits(discount, currency), currency, duration, name: coupon.code }
-      );
-      params.discounts = [{ coupon: stripeCoupon.id }];
-    } else {
-      params.allow_promotion_codes = true;
-    }
 
     // The gym rides along in metadata so the webhook -- which arrives with no
     // site attached -- can find it again.
@@ -145,39 +190,68 @@ class GymfolioPaymentService {
       params.payment_intent_data = { metadata: { tenantSlug, orderNumber } };
     }
 
-    const session = await stripe.checkout.sessions.create(params);
+    let session;
+    try {
+      // The gym's own coupon becomes a one-off Stripe coupon on the session.
+      // Always a fixed amount, computed on the package price alone: a
+      // percent_off coupon at Stripe would also take its cut of the joining
+      // fee, charging less than the checkout page showed and than
+      // payment.amount records. Stripe does not allow its own promotion-code
+      // box alongside a discount, so the box is only offered when no gym
+      // coupon is in play.
+      const amountOff = coupon && discount > 0 ? toMinorUnits(discount, currency) : 0;
+      if (amountOff > 0) {
+        const duration = recurring && coupon.appliesToRenewals ? 'forever' : 'once';
+        const stripeCoupon = await stripe.coupons.create({ amount_off: amountOff, currency, duration, name: coupon.code });
+        params.discounts = [{ coupon: stripeCoupon.id }];
+      } else {
+        params.allow_promotion_codes = true;
+      }
 
-    const order = new PackageOrder({
-      orderNumber,
-      userId: userId || null,
-      packageId: packageData._id,
-      packageDetails: snapshot,
-      customerInfo: {
-        fullName: customerInfo.fullName,
-        email: customerInfo.email,
-        phone: customerInfo.phone,
-        country: customerInfo.country,
-        address: customerInfo.address || '',
-        city: customerInfo.city || '',
-        state: customerInfo.state || '',
-        zipCode: customerInfo.zipCode || ''
-      },
-      payment: {
-        method: 'stripe',
-        stripeSessionId: session.id,
-        amount: round2(Math.max(0, listPrice + joiningFee - discount)),
-        subtotal: round2(listPrice + joiningFee),
-        discountAmount: discount,
-        couponCode: coupon ? coupon.code : '',
-        currency,
-        status: 'pending'
-      },
-      subscription: { autoRenew: recurring },
-      status: 'pending'
-    });
+      session = await stripe.checkout.sessions.create(params);
+    } catch (error) {
+      // Same end state as a session that expired unpaid or a payment that
+      // failed: the order is closed rather than left pending forever.
+      order.payment.status = 'failed';
+      order.payment.lastPaymentError = error.message || 'Could not open the Stripe checkout';
+      order.status = 'cancelled';
+      await order.save().catch(() => {});
+      throw error;
+    }
+
+    order.payment.stripeSessionId = session.id;
     await order.save();
 
     return { success: true, sessionId: session.id, url: session.url, orderNumber };
+  }
+
+  /**
+   * Activates an order exactly once. `prepare(order)` sets whatever Stripe
+   * told us onto the order and returns the options for markPaidAndActivate;
+   * it only runs for the caller that won the claim. The loser gets back the
+   * order as the winner left it.
+   *
+   * @returns {Promise<{ activated: boolean, order }>}
+   */
+  async activateOnce(order, prepare) {
+    const claimed = await PackageOrder.findOneAndUpdate(claim.claimFilter(order._id), claim.claimUpdate(), { new: false });
+    if (!claimed) {
+      const current = await PackageOrder.findById(order._id);
+      return { activated: false, order: current || order };
+    }
+
+    const previous = claimed.payment.status;
+    try {
+      const activation = (await prepare(order)) || {};
+      await membership.markPaidAndActivate(order, { paidAt: new Date(), ...activation });
+      notify.membershipConfirmed(order, await memberFor(order)).catch(() => {});
+      return { activated: true, order };
+    } catch (error) {
+      // Give the claim back so a retry (the webhook, or the member refreshing
+      // the success page) can complete what this attempt could not.
+      await PackageOrder.updateOne(claim.releaseFilter(order._id), claim.releaseUpdate(previous)).catch(() => {});
+      throw error;
+    }
   }
 
   /**
@@ -188,37 +262,34 @@ class GymfolioPaymentService {
     const stripe = await getStripe();
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent', 'subscription'] });
 
-    const order = await PackageOrder.findOne({ 'payment.stripeSessionId': sessionId });
+    let order = await PackageOrder.findOne({ 'payment.stripeSessionId': sessionId });
     if (!order) throw new Error('Order not found for this session');
 
     const paid = session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
 
-    if (paid && order.payment.status !== 'paid') {
-      const customerId = idOf(session.customer);
-      let startDate;
-      let endDate;
-      let transactionId;
+    if (paid && claim.canClaimActivation(order.payment.status)) {
+      const result = await this.activateOnce(order, async (o) => {
+        const customerId = idOf(session.customer);
 
-      if (session.mode === 'subscription' && session.subscription) {
-        const sub = typeof session.subscription === 'object' ? session.subscription : await stripe.subscriptions.retrieve(session.subscription);
-        order.payment.stripeSubscriptionId = sub.id;
-        order.payment.stripeCustomerId = customerId || idOf(sub.customer);
-        order.subscription.stripeStatus = sub.status;
-        order.subscription.autoRenew = true;
-        order.subscription.cancelAtPeriodEnd = !!sub.cancel_at_period_end;
-        startDate = new Date(sub.current_period_start * 1000);
-        endDate = new Date(sub.current_period_end * 1000);
-        transactionId = idOf(sub.latest_invoice);
-        if (transactionId) order.payment.stripeInvoiceId = transactionId;
-      } else {
+        if (session.mode === 'subscription' && session.subscription) {
+          const sub = typeof session.subscription === 'object' ? session.subscription : await stripe.subscriptions.retrieve(session.subscription);
+          const period = periodOf(sub);
+          o.payment.stripeSubscriptionId = sub.id;
+          o.payment.stripeCustomerId = customerId || idOf(sub.customer);
+          o.subscription.stripeStatus = sub.status;
+          o.subscription.autoRenew = true;
+          o.subscription.cancelAtPeriodEnd = !!sub.cancel_at_period_end;
+          const transactionId = idOf(sub.latest_invoice);
+          if (transactionId) o.payment.stripeInvoiceId = transactionId;
+          return { transactionId, startDate: period.start || undefined, endDate: period.end || undefined };
+        }
+
         const intentId = idOf(session.payment_intent);
-        order.payment.stripePaymentIntentId = intentId;
-        order.payment.stripeCustomerId = customerId;
-        transactionId = intentId;
-      }
-
-      await membership.markPaidAndActivate(order, { paidAt: new Date(), transactionId, startDate, endDate });
-      notify.membershipConfirmed(order, await memberFor(order)).catch(() => {});
+        o.payment.stripePaymentIntentId = intentId;
+        o.payment.stripeCustomerId = customerId;
+        return { transactionId: intentId };
+      });
+      order = result.order;
     } else if (!paid && session.payment_status === 'unpaid' && session.status === 'expired' && order.payment.status === 'pending') {
       order.payment.status = 'failed';
       order.status = 'cancelled';
@@ -241,10 +312,20 @@ class GymfolioPaymentService {
       }
 
       case 'payment_intent.succeeded': {
-        const order = await PackageOrder.findOne({ 'payment.stripePaymentIntentId': object.id });
-        if (order && order.payment.status !== 'paid') {
-          await membership.markPaidAndActivate(order, { paidAt: new Date(), transactionId: object.id });
-          notify.membershipConfirmed(order, await memberFor(order)).catch(() => {});
+        // Matched by the intent id once verify has stored it, or by the order
+        // number the intent was created with when the webhook gets here first.
+        const orderNumber = orderNumberOf(object);
+        const order = await PackageOrder.findOne(
+          orderNumber
+            ? { $or: [{ 'payment.stripePaymentIntentId': object.id }, { orderNumber, 'payment.method': 'stripe' }] }
+            : { 'payment.stripePaymentIntentId': object.id }
+        );
+        if (order && claim.canClaimActivation(order.payment.status)) {
+          await this.activateOnce(order, async (o) => {
+            o.payment.stripePaymentIntentId = object.id;
+            if (!o.payment.stripeCustomerId && idOf(object.customer)) o.payment.stripeCustomerId = idOf(object.customer);
+            return { transactionId: object.id };
+          });
         }
         break;
       }
@@ -262,22 +343,27 @@ class GymfolioPaymentService {
 
       // A subscription renewed (or its first invoice settled).
       case 'invoice.paid': {
-        const subId = idOf(object.subscription);
+        const subId = subscriptionIdOf(object);
         if (!subId) break;
-        const order = await PackageOrder.findOne({ 'payment.stripeSubscriptionId': subId });
+        const order = await orderForSubscription(subId, object);
         if (!order) break;
 
-        const line = object.lines && object.lines.data && object.lines.data.find((l) => l.period && l.period.end);
-        const periodEnd = line ? new Date(line.period.end * 1000) : null;
-        const periodStart = line ? new Date(line.period.start * 1000) : null;
+        const { start: periodStart, end: periodEnd } = invoicePeriodOf(object);
 
-        if (order.payment.status !== 'paid') {
+        if (claim.canClaimActivation(order.payment.status)) {
           // First payment arriving here before the success page verified it.
-          await membership.markPaidAndActivate(order, { paidAt: new Date(), transactionId: object.id, startDate: periodStart, endDate: periodEnd });
-          order.payment.stripeInvoiceId = object.id;
-          await order.save();
-          notify.membershipConfirmed(order, await memberFor(order)).catch(() => {});
-        } else if (object.billing_reason !== 'subscription_create' && object.id !== order.payment.stripeInvoiceId) {
+          await this.activateOnce(order, async (o) => {
+            o.payment.stripeSubscriptionId = subId;
+            o.payment.stripeInvoiceId = object.id;
+            if (!o.payment.stripeCustomerId && idOf(object.customer)) o.payment.stripeCustomerId = idOf(object.customer);
+            o.subscription.autoRenew = true;
+            return { transactionId: object.id, startDate: periodStart || undefined, endDate: periodEnd || undefined };
+          });
+        } else if (
+          order.payment.status === 'paid' &&
+          object.billing_reason !== 'subscription_create' &&
+          object.id !== order.payment.stripeInvoiceId
+        ) {
           if (periodEnd) {
             order.subscription.endDate = periodEnd;
             order.subscription.renewalDate = periodEnd;
@@ -304,9 +390,9 @@ class GymfolioPaymentService {
       // A renewal could not be collected. Stripe keeps retrying on its own
       // schedule; the member is told and the desk sees "past due".
       case 'invoice.payment_failed': {
-        const subId = idOf(object.subscription);
+        const subId = subscriptionIdOf(object);
         if (!subId) break;
-        const order = await PackageOrder.findOne({ 'payment.stripeSubscriptionId': subId });
+        const order = await orderForSubscription(subId, object);
         if (!order || order.payment.status !== 'paid') break;
         order.status = 'past_due';
         order.payment.lastPaymentError =
@@ -402,3 +488,4 @@ class GymfolioPaymentService {
 }
 
 module.exports = new GymfolioPaymentService();
+module.exports.orderNumberOf = orderNumberOf;

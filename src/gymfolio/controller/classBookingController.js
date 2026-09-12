@@ -36,10 +36,24 @@ function fail(res, code, message, extra = {}) {
  */
 function membershipGate(membership, rules) {
   if (!rules.requireActiveMembership || membership.status === 'active') return null;
-  return membership.status === 'expired'
-    ? 'Your membership has expired — please renew before booking.'
-    : 'An active membership is needed to book classes — please speak to the front desk.';
+  return (
+    MEMBERSHIP_PROBLEMS[membership.status] ||
+    'An active membership is needed to book classes — please speak to the front desk.'
+  );
 }
+
+// What to tell a member whose membership is not simply active, keyed by what
+// peopleDirectory.membershipFor answered. Used both to refuse a booking (when
+// the gym requires an active membership) and to flag one that went ahead.
+const MEMBERSHIP_PROBLEMS = {
+  expired: 'Your membership has expired — please renew before booking.',
+  cancelled: 'Your membership has been cancelled — please renew before booking.',
+  suspended: 'Your membership is suspended — please speak to the front desk.',
+  frozen: 'Your membership is frozen — resume it before booking.',
+  past_due: 'Your last payment failed — please update your card.',
+  pending: 'Your membership is awaiting payment confirmation.',
+  none: 'There is no membership on this account — please speak to the front desk.'
+};
 
 /**
  * Repeat no-shows pause booking for a while, when the gym has asked for
@@ -295,9 +309,7 @@ module.exports = {
         membership_warning:
           membership.status === 'active'
             ? null
-            : membership.status === 'expired'
-            ? 'This membership has expired — please renew at the front desk.'
-            : 'There is no membership on this account — please speak to the front desk.',
+            : MEMBERSHIP_PROBLEMS[membership.status] || MEMBERSHIP_PROBLEMS.none,
         data: bookingView(booking)
       });
     } catch (error) {

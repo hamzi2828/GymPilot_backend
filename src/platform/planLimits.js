@@ -7,27 +7,13 @@
 // what it already has -- deleting a member because a plan changed would be
 // the platform destroying a customer's records.
 
-const PlatformPlan = require('./models/platformPlanModel');
 const { currentTenant } = require('./tenantContext');
+// One plan cache for limits and entitlements alike, so a plan edited in the
+// panel lands everywhere at once.
+const { planFor, invalidatePlanCache } = require('./entitlements');
 
-const PLAN_TTL_MS = 60 * 1000;
-const plans = new Map(); // plan id -> { at, plan }
-
-function invalidatePlanCache() {
-  plans.clear();
-}
-
-async function currentPlan() {
-  const gym = currentTenant();
-  if (!gym || !gym.plan) return null;
-
-  const id = String(gym.plan);
-  const hit = plans.get(id);
-  if (hit && Date.now() - hit.at < PLAN_TTL_MS) return hit.plan;
-
-  const plan = await PlatformPlan.findById(id).lean();
-  plans.set(id, { at: Date.now(), plan });
-  return plan;
+function currentPlan() {
+  return planFor(currentTenant());
 }
 
 // Models are required lazily: this module is used from inside the user

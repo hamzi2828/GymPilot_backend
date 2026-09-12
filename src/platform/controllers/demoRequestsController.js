@@ -13,8 +13,9 @@ const { shell, paragraph, detailTable, escapeHtml } = require('../../templates/g
 
 const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-// A second request from the same address inside this window is the same
-// person pressing the button twice, not a new lead.
+// A second request of the same KIND from the same address inside this window
+// is the same person pressing the button twice, not a new lead. A checkout
+// after a demo request is a different thing and is always kept.
 const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
 const THANKS = 'Thanks — we will be in touch within one working day.';
 
@@ -28,7 +29,8 @@ function text(value, max) {
 
 /**
  * What a checkout chose, priced here rather than trusted from the form.
- * Returns null when no plan was picked (an ordinary demo request).
+ * Returns null when no plan was picked (an ordinary demo request); otherwise
+ * `{ plan, warnings }` -- the warnings say what was left off and why.
  */
 async function priceSelection(data) {
   if (!data.planSlug) return null;
@@ -42,9 +44,20 @@ async function priceSelection(data) {
   const addons = wanted.length
     ? await PlatformAddon.find({ slug: { $in: wanted }, isActive: true }).lean()
     : [];
-  const usable = addons.filter(
+  const sold = addons.filter(
     (addon) => included.includes(addon.slug) || !addon.planSlugs || !addon.planSlugs.length || addon.planSlugs.includes(plan.slug)
   );
+
+  // A paid add-on in another currency than the plan cannot go on the same
+  // bill; it is left off and the panel is told.
+  const planCurrency = String(plan.price.currency || '').toUpperCase();
+  const warnings = [];
+  const usable = sold.filter((addon) => {
+    const currency = String((addon.price && addon.price.currency) || '').toUpperCase();
+    if (included.includes(addon.slug) || !currency || !planCurrency || currency === planCurrency) return true;
+    warnings.push(`Add-on ${addon.name} is priced in ${currency} but the plan is in ${planCurrency}; it was left off`);
+    return false;
+  });
 
   const amount = usable.reduce(
     (total, addon) => total + (included.includes(addon.slug) ? 0 : (yearly ? addon.price.yearly : addon.price.monthly) || 0),
@@ -52,14 +65,17 @@ async function priceSelection(data) {
   );
 
   return {
-    slug: plan.slug,
-    name: plan.name,
-    billingCycle: data.billingCycle,
-    addonSlugs: usable.map((a) => a.slug),
-    addonNames: usable.map((a) => a.name),
-    amount,
-    currency: plan.price.currency,
-    trialDays: plan.trialDays || 0
+    plan: {
+      slug: plan.slug,
+      name: plan.name,
+      billingCycle: data.billingCycle,
+      addonSlugs: usable.map((a) => a.slug),
+      addonNames: usable.map((a) => a.name),
+      amount,
+      currency: plan.price.currency,
+      trialDays: plan.trialDays || 0
+    },
+    warnings
   };
 }
 
@@ -72,6 +88,11 @@ function validateDemoRequest(body) {
   // Bots fill every field they find; people never see this one.
   if (text(b.website, 10)) return { spam: true, errors: [], data: null };
 
+  // Checkout sends the name in two halves (that is how the owner's account
+  // is created); the demo form sends one. Both are kept, and one is derived
+  // from the other when only one arrived.
+  const firstName = text(b.firstName, 60);
+  const lastName = text(b.lastName, 60);
   const data = {
     kind: b.kind === 'trial' ? 'trial' : 'demo',
     // Only ever a suggestion; the slug a gym actually gets is decided when it
@@ -86,7 +107,9 @@ function validateDemoRequest(body) {
       .map((slug) => text(slug, 60).toLowerCase())
       .filter(Boolean)
       .slice(0, 10),
-    name: text(b.name, 120),
+    name: text(b.name, 120) || `${firstName} ${lastName}`.trim().slice(0, 120),
+    firstName,
+    lastName,
     email: text(b.email, 200).toLowerCase(),
     phone: text(b.phone, 40),
     gymName: text(b.gymName, 160),
@@ -135,6 +158,7 @@ async function notifyAdmins(request) {
           ['Web address wanted', request.preferredSlug || '—']
         ])
       : '',
+    (request.warnings || []).length ? paragraph(`Note: ${escapeHtml(request.warnings.join(' '))}`) : '',
     request.message ? paragraph(`“${escapeHtml(request.message)}”`) : '',
     paragraph(`Record where it goes in the panel: <a href="${panelUrl()}">${panelUrl()}</a>`)
   ].join('');
@@ -146,6 +170,8 @@ function publicRow(doc) {
   return {
     id: String(doc._id),
     name: doc.name,
+    firstName: doc.firstName || '',
+    lastName: doc.lastName || '',
     email: doc.email,
     phone: doc.phone || '',
     gymName: doc.gymName || '',
@@ -155,6 +181,7 @@ function publicRow(doc) {
     kind: doc.kind || 'demo',
     preferredSlug: doc.preferredSlug || '',
     plan: doc.plan && doc.plan.slug ? doc.plan : null,
+    warnings: doc.warnings || [],
     source: doc.source || '',
     status: doc.status,
     notes: doc.notes || '',
@@ -174,16 +201,34 @@ module.exports = {
       if (result.spam) return res.status(201).json({ success: true, message: THANKS });
       if (result.errors.length) return res.status(400).json({ success: false, message: result.errors[0], errors: result.errors });
 
-      const recent = await DemoRequest.findOne({ email: result.data.email, createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) } })
-        .select('_id')
-        .lean();
-      if (recent) return res.status(201).json({ success: true, message: THANKS, id: String(recent._id) });
-
       const { planSlug, billingCycle, addonSlugs, ...fields } = result.data;
-      const plan = await priceSelection(result.data);
+      const priced = await priceSelection(result.data);
+
+      const recent = await DemoRequest.findOne({
+        email: result.data.email,
+        kind: result.data.kind,
+        createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
+      });
+      if (recent) {
+        // Somebody going back to checkout to change their mind: the newer
+        // choice replaces the older one on the same record rather than
+        // being dropped on the floor.
+        if (result.data.kind === 'trial') {
+          if (priced) {
+            recent.plan = priced.plan;
+            recent.warnings = priced.warnings;
+          }
+          recent.preferredSlug = result.data.preferredSlug;
+          recent.message = result.data.message;
+          await recent.save();
+        }
+        return res.status(201).json({ success: true, message: THANKS, id: String(recent._id) });
+      }
+
       const doc = await DemoRequest.create({
         ...fields,
-        plan: plan || undefined,
+        plan: priced ? priced.plan : undefined,
+        warnings: priced ? priced.warnings : [],
         ip: clientIp(req),
         userAgent: text(req.headers['user-agent'], 500)
       });

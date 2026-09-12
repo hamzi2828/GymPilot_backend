@@ -17,11 +17,15 @@ const AdminAuditLog = require('../models/adminAuditLogModel');
 const twoFactor = require('../services/twoFactorService');
 const { currentTenantId } = require('../platform/tenantContext');
 const { forgetSession } = require('../middleware/auth');
+const { publicUserView } = require('../services/userView');
 
 const BIOMETRIC_CONSENT_VERSION = '2026-09';
 
-/** The same token loginUser issues, so a 2FA sign-in is no different afterwards. */
-function issueToken(user) {
+/**
+ * The same token loginUser issues, so a 2FA sign-in is no different
+ * afterwards -- including the month-long life a "remember me" sign-in gets.
+ */
+function issueToken(user, { remember = false } = {}) {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error('Server misconfiguration: missing JWT secret');
   return jwt.sign(
@@ -35,14 +39,12 @@ function issueToken(user) {
       tv: user.tokenVersion || 0
     },
     secret,
-    { expiresIn: '7d' }
+    { expiresIn: remember ? '30d' : '7d' }
   );
 }
 
-function publicUser(user) {
-  const { password: _pw, passwordResetTokenHash: _h, passwordResetExpiresAt: _e, twoFactor: tf, ...safe } = user.toObject ? user.toObject() : user;
-  return { ...safe, twoFactor: { enabled: !!(tf && tf.enabled) } };
-}
+// One view of an account for every sign-in response (services/userView.js).
+const publicUser = publicUserView;
 
 function consentRecord(given, source, by) {
   return { given: !!given, at: new Date(), source, recordedBy: by || null, version: BIOMETRIC_CONSENT_VERSION };
@@ -56,13 +58,20 @@ module.exports = {
   verifyTwoFactor: async (req, res) => {
     try {
       const { challengeId, code } = req.body || {};
+      // "Remember me" was recorded on the challenge at the password step;
+      // verify() clears the challenge, so it is read first.
+      const pending = challengeId
+        ? await User.findOne({ 'twoFactor.pending.challengeId': String(challengeId) }).select('twoFactor.pending.remember').lean()
+        : null;
+      const remember = !!(pending && pending.twoFactor && pending.twoFactor.pending && pending.twoFactor.pending.remember);
+
       const user = await twoFactor.verify(challengeId, code);
       if (user.isActive === false) return res.status(403).json({ message: 'This account has been deactivated.' });
 
       user.lastLogin = new Date();
       await user.save();
 
-      return res.status(200).json({ message: 'Login successful', token: issueToken(user), data: publicUser(user) });
+      return res.status(200).json({ message: 'Login successful', token: issueToken(user, { remember }), data: publicUser(user) });
     } catch (error) {
       if (error.status) return res.status(error.status).json({ message: error.message });
       console.error('[2fa] verify failed:', error);
@@ -186,7 +195,10 @@ module.exports = {
   // GET /user/export -- everything the gym holds about the signed-in member
   exportMyData: async (req, res) => {
     try {
-      const user = await User.findById(req.user.id);
+      // The member's own health details, documents and (for staff) pay
+      // details are theirs and belong in the copy; they are `select: false`
+      // on the model, so they are asked for by name.
+      const user = await User.findById(req.user.id).select('+medical +documents +employment.payroll');
       if (!user) return res.status(404).json({ message: 'Account not found' });
 
       const [orders, bookings, attendance, fingerprints, contacts] = await Promise.all([
@@ -197,8 +209,19 @@ module.exports = {
         Contact.find({ email: user.email }).lean().catch(() => [])
       ]);
 
+      // Start from the sign-in view, then add back what is the member's own.
+      // The staff-only notes (staffNotes, medical.notes) stay out: they are
+      // about the member, not for them, the same as on the profile screen.
+      const full = user.toObject();
       const account = publicUser(user);
-      delete account.passwordResetTokenHash;
+      if (full.medical) {
+        const { notes: _notes, ...medical } = full.medical;
+        account.medical = medical;
+      }
+      account.documents = full.documents || [];
+      if (full.employment && full.employment.payroll) {
+        account.employment = { ...(account.employment || {}), payroll: full.employment.payroll };
+      }
 
       const payload = {
         exported_at: new Date().toISOString(),

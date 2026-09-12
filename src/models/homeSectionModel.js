@@ -6,6 +6,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { tenantKey } = require('../platform/tenantContext');
 
 // Every section the homepage knows how to render. Adding a new section type
 // means: add its key here + a default below, teach the frontend to render it.
@@ -208,28 +209,61 @@ const homeSectionSchema = new mongoose.Schema(
 
 homeSectionSchema.index({ order: 1 });
 
+// Which gyms this process has already checked. Once every section exists it
+// cannot go missing again short of somebody deleting rows by hand, so the
+// check is made once per gym per process rather than as nine upserts on
+// every homepage read. Keyed by tenant like roleService's cache: one gym's
+// answer must never stand in for another's.
+const ensured = new Map(); // tenantKey -> true | Promise (in flight)
+
 /**
  * Guarantees every known section exists, seeding defaults for any that are
  * missing. Never touches documents that already exist, so admin edits and
  * ordering survive both restarts and new deploys that add section types.
  */
 homeSectionSchema.statics.ensureDefaults = async function () {
-  const ops = DEFAULT_SECTIONS.map((section) => ({
-    updateOne: {
-      filter: { key: section.key },
-      update: {
-        $setOnInsert: {
-          key: section.key,
-          // Sections may ship disabled (e.g. videos, until clips are added).
-          enabled: section.enabled !== false,
-          order: section.order,
-          content: section.content,
+  const key = tenantKey();
+  const state = ensured.get(key);
+  if (state === true) return;
+  // A second reader arriving mid-check waits for the first rather than
+  // starting its own.
+  if (state) return state;
+
+  const run = (async () => {
+    const present = new Set(await this.distinct('key', { key: { $in: SECTION_KEYS } }));
+    const missing = DEFAULT_SECTIONS.filter((section) => !present.has(section.key));
+    if (!missing.length) return;
+    const ops = missing.map((section) => ({
+      updateOne: {
+        filter: { key: section.key },
+        update: {
+          $setOnInsert: {
+            key: section.key,
+            // Sections may ship disabled (e.g. videos, until clips are added).
+            enabled: section.enabled !== false,
+            order: section.order,
+            content: section.content,
+          },
         },
+        upsert: true,
       },
-      upsert: true,
-    },
-  }));
-  await this.bulkWrite(ops, { ordered: false });
+    }));
+    await this.bulkWrite(ops, { ordered: false });
+  })();
+
+  ensured.set(key, run);
+  try {
+    await run;
+    ensured.set(key, true);
+  } catch (error) {
+    ensured.delete(key);
+    throw error;
+  }
+};
+
+/** Forgets the current gym's check, so the next read seeds again. */
+homeSectionSchema.statics.resetDefaultsCache = function () {
+  ensured.delete(tenantKey());
 };
 
 homeSectionSchema.statics.SECTION_KEYS = SECTION_KEYS;

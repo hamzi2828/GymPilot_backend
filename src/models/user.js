@@ -114,12 +114,31 @@ const employmentSchema = new mongoose.Schema({
     },
     joinedAt: { type: Date, default: null },
     endedAt: { type: Date, default: null },
-    payroll: { type: payrollSchema, default: () => ({}) },
+    // Pay and bank details ride along only when asked for (`+employment.payroll`,
+    // or an inclusive select of `employment`): the users list, the pickers and
+    // the member's own profile never need them. See the note on `medical`.
+    payroll: { type: payrollSchema, default: () => ({}), select: false },
     schedule: { type: [shiftSchema], default: [] },
     emergencyContact: {
         name: { type: String, default: '', trim: true },
         phone: { type: String, default: '', trim: true },
         relationship: { type: String, default: '', trim: true }
+    }
+}, { _id: false });
+
+// Health details. A sub-schema rather than a plain nested object because a
+// plain object cannot be marked `select: false` as a whole (see the note in
+// the user schema); `_id: false` keeps the stored shape exactly what it was.
+const medicalSchema = new mongoose.Schema({
+    conditions: { type: String, default: '', trim: true },
+    medications: { type: String, default: '', trim: true },
+    injuries: { type: String, default: '', trim: true },
+    notes: { type: String, default: '', trim: true },
+    // The readiness questionnaire. `flagged` is any "yes".
+    parq: {
+        completedAt: { type: Date, default: null },
+        answers: { type: [{ question: String, answer: Boolean }], default: [] },
+        flagged: { type: Boolean, default: false }
     }
 }, { _id: false });
 
@@ -162,7 +181,10 @@ const userSchema = new mongoose.Schema({
         challengeId: { type: String, default: null, index: true },
         codeHash: { type: String, default: null, select: false },
         expiresAt: { type: Date, default: null },
-        attempts: { type: Number, default: 0 }
+        attempts: { type: Number, default: 0 },
+        // "Remember me" ticked at the password step, carried through to the
+        // code step so the token issued there gets the same longer life.
+        remember: { type: Boolean, default: false }
       }
     },
 
@@ -205,24 +227,23 @@ const userSchema = new mongoose.Schema({
     //
     // Filled in by the member from the portal or by staff from Users →
     // Profile. `staffNotes` and `medical.notes` are staff-only and never
-    // returned to the member (see userController.getUserDetailForProfile).
+    // returned to the member (see services/userView.js).
+    //
+    // The sensitive blocks -- health, the staff notes, uploaded documents,
+    // pay details and the IP an agreement was signed from -- are `select:
+    // false`: they leave the database only for a query that names them
+    // (`.select('+medical +documents')`), so the users list, the pickers and
+    // a sign-in response cannot carry them by accident. A document loaded
+    // without them and saved again leaves them untouched (mongoose writes
+    // only the paths that changed), but a handler that EDITS one of them must
+    // load it first, or `user.medical = user.medical || {}` starts from
+    // empty and wipes the rest. See memberProfileController.
     emergencyContact: {
       name: { type: String, default: '', trim: true },
       phone: { type: String, default: '', trim: true },
       relationship: { type: String, default: '', trim: true }
     },
-    medical: {
-      conditions: { type: String, default: '', trim: true },
-      medications: { type: String, default: '', trim: true },
-      injuries: { type: String, default: '', trim: true },
-      notes: { type: String, default: '', trim: true },
-      // The readiness questionnaire. `flagged` is any "yes".
-      parq: {
-        completedAt: { type: Date, default: null },
-        answers: { type: [{ question: String, answer: Boolean }], default: [] },
-        flagged: { type: Boolean, default: false }
-      }
-    },
+    medical: { type: medicalSchema, default: () => ({}), select: false },
     // The membership agreement (Settings → membership rules), signed by
     // typing a name online or recorded by staff from a paper copy.
     waiver: {
@@ -230,7 +251,7 @@ const userSchema = new mongoose.Schema({
       version: { type: String, default: '' },
       signature: { type: String, default: '' },
       source: { type: String, default: '' },      // portal | desk
-      ip: { type: String, default: '' },
+      ip: { type: String, default: '', select: false },
       recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
     },
     documents: {
@@ -247,9 +268,10 @@ const userSchema = new mongoose.Schema({
           { _id: true }
         )
       ],
-      default: []
+      default: [],
+      select: false
     },
-    staffNotes: { type: String, default: '' },
+    staffNotes: { type: String, default: '', select: false },
     goals: { type: String, default: '', trim: true },
     // The member's personal trainer, when they have one.
     assignedTrainerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Trainer', default: null },

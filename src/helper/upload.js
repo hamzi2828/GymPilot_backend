@@ -10,21 +10,28 @@ const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
 // Check if Vercel Blob is configured (skip local dir creation if using blob storage)
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 
-function ensureUploadsDir() {
-  // Skip directory creation on serverless/Lambda environments or when using blob storage
-  if (USE_BLOB_STORAGE || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL) {
-    return;
-  }
-  try {
-    if (!fs.existsSync(UPLOADS_DIR)) {
-      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-    }
-  } catch (e) {
-    console.error('Failed to create uploads directory:', e);
-  }
-}
+const NOT_WRITABLE_MESSAGE = 'File storage is not writable; set BLOB_READ_WRITE_TOKEN';
 
-ensureUploadsDir();
+// Creates the uploads directory -- and a gym's folder inside it -- when a
+// file is actually being written, never at require time. On a read-only
+// filesystem (a serverless function, a container with a read-only root) the
+// old startup mkdir only logged an error, and every later upload then died
+// inside multer with an ENOENT that said nothing about the cause. Failing
+// inside the request lets the error say what to do about it.
+function ensureUploadsDir(folder = '') {
+  if (USE_BLOB_STORAGE) return UPLOADS_DIR;
+  const target = folder ? path.join(UPLOADS_DIR, folder) : UPLOADS_DIR;
+  try {
+    fs.mkdirSync(target, { recursive: true });
+  } catch (cause) {
+    const error = new Error(NOT_WRITABLE_MESSAGE);
+    error.status = 500;
+    error.code = 'UPLOADS_NOT_WRITABLE';
+    error.cause = cause;
+    throw error;
+  }
+  return target;
+}
 
 // Allowed image mime types
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
@@ -68,13 +75,13 @@ const storage = USE_BLOB_STORAGE
   ? multer.memoryStorage()
   : multer.diskStorage({
       destination: (req, file, cb) => {
-        const folder = tenantUploadFolder(req);
-        if (folder) {
-          try {
-            fs.mkdirSync(path.join(UPLOADS_DIR, folder), { recursive: true });
-          } catch (e) {
-            return cb(e);
-          }
+        // Lazily, per request: see ensureUploadsDir. A failure here surfaces
+        // through the global error handler as a 500 with a message that
+        // names the fix.
+        try {
+          ensureUploadsDir(tenantUploadFolder(req));
+        } catch (e) {
+          return cb(e);
         }
         cb(null, UPLOADS_DIR);
       },
@@ -183,6 +190,10 @@ module.exports = {
   localUploadPath,
   tenantUploadFolder,
   UPLOADS_DIR,
+  NOT_WRITABLE_MESSAGE,
+  MAX_FILE_BYTES,
+  MAX_HERO_FILE_BYTES,
+  MAX_VIDEO_FILE_BYTES,
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_VIDEO_MIME_TYPES,
 };

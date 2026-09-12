@@ -11,8 +11,9 @@ const Package = require('../models/packageModel');
 const Coupon = require('../models/couponModel');
 const User = require('../../models/user');
 const Settings = require('../../models/settings');
-const { parseAmount, resolveCurrency } = require('../../helper/money');
+const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
 const { getStripe } = require('../../services/stripeClient');
+const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
 
 const DAY_MS = 86400000;
 const MEMBERSHIP_KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt_pack'];
@@ -139,9 +140,55 @@ async function applyCoupon(code, pkg, amount) {
   return { coupon, discount, total: round2(Math.max(0, amount - discount)) };
 }
 
+/**
+ * Counts one use of a coupon, but never past its limit: the increment is
+ * conditional on the count still being below maxRedemptions, so two orders
+ * activating together cannot take the counter over the top.
+ * @returns {Promise<boolean>} whether a redemption was recorded
+ */
 async function redeemCoupon(coupon) {
-  if (!coupon) return;
-  await Coupon.updateOne({ _id: coupon._id }, { $inc: { redemptions: 1 } });
+  if (!coupon) return false;
+  const filter = { _id: coupon._id };
+  if (Number(coupon.maxRedemptions) > 0) {
+    // Older rows may have no counter yet; a missing one is zero.
+    filter.$or = [{ redemptions: { $lt: Number(coupon.maxRedemptions) } }, { redemptions: { $exists: false } }];
+  }
+  const result = await Coupon.updateOne(filter, { $inc: { redemptions: 1 } });
+  return (result.modifiedCount || 0) > 0;
+}
+
+/**
+ * Refuses a second subscription for somebody who already has one running.
+ * Only recurring memberships are checked: a session pack, day pass or trial
+ * sits alongside whatever else the member has.
+ *
+ * "Recurring" on an existing order means a Stripe subscription behind it, or
+ * autoRenew set -- a recurring package paid once by bank transfer is a term,
+ * not a subscription, and does not block anything.
+ */
+async function assertNoActiveSubscription({ userId, email, snapshot } = {}) {
+  const billing = (snapshot && snapshot.billing) || {};
+  if (billing.mode !== 'recurring') return null;
+  if (((snapshot && snapshot.kind) || 'membership') !== 'membership') return null;
+
+  const owner = [];
+  if (userId) owner.push({ userId });
+  if (email) owner.push({ 'customerInfo.email': String(email).toLowerCase().trim() });
+  if (!owner.length) return null;
+
+  const existing = await PackageOrder.findOne({
+    $or: owner,
+    'payment.status': 'paid',
+    status: { $in: ['active', 'frozen', 'past_due'] },
+    $and: [{ $or: [{ 'payment.stripeSubscriptionId': { $nin: [null, ''] } }, { 'subscription.autoRenew': true }] }]
+  })
+    .select('orderNumber')
+    .lean();
+
+  if (existing) {
+    throw new MembershipError('You already have an active subscription. Manage it from your account page.', 409, 'SUBSCRIPTION_EXISTS');
+  }
+  return null;
 }
 
 /* ----------------------------- activation ------------------------------ */
@@ -176,7 +223,11 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
 
   if (order.payment.couponCode && !order.payment.couponRedeemed) {
     const coupon = await Coupon.findOne({ code: order.payment.couponCode });
-    await redeemCoupon(coupon);
+    const counted = await redeemCoupon(coupon);
+    if (coupon && !counted) {
+      // The money is taken either way; the counter simply stops at the cap.
+      console.warn(`[membership] coupon ${coupon.code} reached its redemption limit before ${order.orderNumber} activated`);
+    }
     order.payment.couponRedeemed = true;
   }
 
@@ -309,6 +360,9 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
 
   const { coupon, discount } = await applyCoupon(couponCode, pkg, listPrice);
   const amount = round2(Math.max(0, listPrice + (snapshot.joiningFee || 0) - discount));
+
+  // The same rule as card checkout: one running subscription per member.
+  await assertNoActiveSubscription({ userId: user._id, email: user.email, snapshot });
 
   const order = await PackageOrder.create({
     orderNumber: await PackageOrder.generateOrderNumber(),
@@ -590,7 +644,8 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     order.packageId = pkg._id;
     order.packageDetails = snapshot;
     order.payment.amount = parseAmount(pkg.price);
-    order.subscription.endDate = new Date(updated.current_period_end * 1000);
+    // periodOf reads the period from wherever the API version put it.
+    order.subscription.endDate = periodOf(updated).end || order.subscription.endDate;
     order.subscription.renewalDate = order.subscription.endDate;
     order.notes = `${order.notes || ''}\nSwitched package on ${now.toISOString().slice(0, 10)} by ${by || 'staff'}`.trim();
     await order.save();
@@ -621,21 +676,60 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
 
 /* ------------------------------- sessions ------------------------------ */
 
-/** Uses one session of a pack. Returns the updated order, or null when the order is not a pack. */
+/**
+ * Uses one session of a pack. Returns the updated order, or null when the
+ * order is not a pack.
+ *
+ * The credit is taken with one conditional update -- "increment used, but
+ * only while used is still below total" -- rather than read, add one, save.
+ * Two bookings for the last session arriving together used to both succeed
+ * on a pack that had one left; now the second one finds nothing to take.
+ */
 async function consumeSession(order, { by = null, note = '' } = {}) {
   if (!order.sessions || !order.sessions.total) return null;
   assertActive(order);
-  if (order.sessions.used >= order.sessions.total) throw new MembershipError('No sessions left on this pack', 400);
-  order.sessions.used += 1;
-  order.sessions.log = order.sessions.log || [];
-  order.sessions.log.push({ at: new Date(), by, note });
-  if (order.sessions.used >= order.sessions.total) {
-    order.sessions.exhaustedAt = new Date();
-    order.status = 'expired';
-    order.subscription.isActive = false;
+  const total = Number(order.sessions.total) || 0;
+  if ((order.sessions.used || 0) >= total) throw new MembershipError('No sessions left on this pack', 400);
+
+  const now = new Date();
+  const updated = await PackageOrder.findOneAndUpdate(
+    {
+      _id: order._id,
+      'payment.status': 'paid',
+      status: { $in: ['active', 'frozen', 'past_due'] },
+      'sessions.total': total,
+      'sessions.used': { $lt: total }
+    },
+    { $inc: { 'sessions.used': 1 }, $push: { 'sessions.log': { at: now, by, note } } },
+    { new: true }
+  );
+
+  if (!updated) {
+    // Somebody got there first: re-read to say exactly why.
+    const fresh = await PackageOrder.findById(order._id);
+    if (!fresh || !fresh.sessions || !fresh.sessions.total) return null;
+    assertActive(fresh);
+    throw new MembershipError('No sessions left on this pack', 400);
   }
-  await order.save();
-  return order;
+
+  if ((updated.sessions.used || 0) >= (updated.sessions.total || 0)) {
+    // The last one: the pack is spent. Conditional again, so only the taker
+    // of the final session closes it.
+    await PackageOrder.updateOne(
+      { _id: order._id, 'sessions.exhaustedAt': null, 'sessions.used': { $gte: updated.sessions.total } },
+      { $set: { 'sessions.exhaustedAt': now, status: 'expired', 'subscription.isActive': false } }
+    );
+    updated.sessions.exhaustedAt = now;
+    updated.status = 'expired';
+    updated.subscription.isActive = false;
+  }
+
+  // Keep the caller's document in step with what was written, since most
+  // callers go on reading the one they passed in.
+  order.sessions = updated.sessions;
+  order.status = updated.status;
+  order.subscription.isActive = updated.subscription.isActive;
+  return updated;
 }
 
 /** Gives a session back -- a booking cancelled in time, a class the gym called off. */
@@ -653,6 +747,125 @@ async function refundSession(order) {
       order.subscription.isActive = true;
     }
   }
+  await order.save();
+  return order;
+}
+
+/* -------------------------------- refunds ------------------------------ */
+
+function fromMinorUnits(amount, currency) {
+  // toMinorUnits(1) is 100 for a two-decimal currency and 1 for a
+  // zero-decimal one, which is exactly the scale to divide by.
+  const scale = toMinorUnits(1, currency) || 100;
+  return round2((Number(amount) || 0) / scale);
+}
+
+// The PaymentIntent that took the money for this order, found wherever the
+// order's Stripe trail leads: the intent itself for a one-off sale; the
+// invoice, the Checkout session or the subscription for a recurring one.
+async function refundablePaymentIntent(stripe, order) {
+  const p = order.payment || {};
+  if (p.stripePaymentIntentId) return p.stripePaymentIntentId;
+
+  if (p.stripeInvoiceId) {
+    const invoice = await stripe.invoices.retrieve(p.stripeInvoiceId).catch(() => null);
+    const intent = paymentIntentOf(invoice);
+    if (intent) return intent;
+  }
+
+  if (p.stripeSessionId) {
+    const session = await stripe.checkout.sessions
+      .retrieve(p.stripeSessionId, { expand: ['subscription.latest_invoice'] })
+      .catch(() => null);
+    if (session) {
+      const direct = idOf(session.payment_intent);
+      if (direct) return direct;
+      const sub = session.subscription && typeof session.subscription === 'object' ? session.subscription : null;
+      const invoice = sub && sub.latest_invoice && typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null;
+      const intent = paymentIntentOf(invoice);
+      if (intent) return intent;
+    }
+  }
+
+  if (p.stripeSubscriptionId) {
+    const sub = await stripe.subscriptions.retrieve(p.stripeSubscriptionId, { expand: ['latest_invoice'] }).catch(() => null);
+    const invoice = sub && sub.latest_invoice && typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null;
+    const intent = paymentIntentOf(invoice);
+    if (intent) return intent;
+  }
+
+  return null;
+}
+
+/**
+ * Refunds a paid order and ends the membership it bought.
+ *
+ * Card payments are refunded at Stripe (the whole charge unless `amount`
+ * says otherwise); cash, bank and terminal payments are simply recorded as
+ * refunded -- the money moves by hand. Either way the order's subscription,
+ * if it has one at Stripe, is cancelled, and the refund is kept on the order.
+ */
+async function refund(order, { amount, reason = '', by = null } = {}) {
+  if (order.payment.status === 'refunded') throw new MembershipError('This order has already been refunded', 400);
+  if (order.payment.status !== 'paid') throw new MembershipError('Only a paid order can be refunded', 400);
+
+  const paidAmount = round2(order.payment.amount);
+  let wanted = null;
+  if (amount !== undefined && amount !== null && amount !== '') {
+    wanted = parseAmount(amount);
+    if (wanted === null || wanted <= 0) throw new MembershipError('The refund amount must be a positive number', 400);
+    if (wanted > paidAmount) throw new MembershipError(`The refund cannot exceed the ${paidAmount} that was paid`, 400);
+  }
+
+  const currency = String(order.payment.currency || '').toLowerCase();
+  const now = new Date();
+  const record = {
+    amount: wanted === null ? paidAmount : round2(wanted),
+    reason: String(reason || '').trim(),
+    at: now,
+    byUserId: by || null,
+    stripeRefundId: null
+  };
+
+  const viaStripe =
+    order.payment.method === 'stripe' || !!order.payment.stripePaymentIntentId || !!order.payment.stripeSessionId;
+
+  if (viaStripe) {
+    const stripe = await getStripe();
+    const intentId = await refundablePaymentIntent(stripe, order);
+    if (!intentId) {
+      throw new MembershipError('Could not find the Stripe payment behind this order. Refund it from the Stripe dashboard.', 409);
+    }
+    const params = { payment_intent: intentId };
+    // A full refund is left to Stripe to size: the charge may have been
+    // smaller than payment.amount if a Stripe promotion code was used.
+    if (wanted !== null) params.amount = toMinorUnits(wanted, currency);
+    const stripeRefund = await stripe.refunds.create(params);
+    record.stripeRefundId = stripeRefund.id;
+    if (stripeRefund.amount !== undefined && stripeRefund.amount !== null) {
+      record.amount = fromMinorUnits(stripeRefund.amount, stripeRefund.currency || currency);
+    }
+  }
+
+  // A refunded term is not one the member keeps: end it now, and stop the
+  // subscription behind it renewing.
+  if (order.status !== 'cancelled') {
+    await cancel(order, { reason: record.reason || 'Refunded', by, source: 'staff', immediate: true });
+  } else if (order.payment.stripeSubscriptionId) {
+    // Cancelled at period end earlier, so the subscription at Stripe is
+    // still running until then.
+    const stripe = await getStripe();
+    await stripe.subscriptions.cancel(order.payment.stripeSubscriptionId).catch((error) => {
+      if (!/No such subscription|already been canceled/i.test(error.message)) throw error;
+    });
+    order.subscription.autoRenew = false;
+    order.subscription.cancelAtPeriodEnd = false;
+  }
+
+  order.payment.status = 'refunded';
+  order.status = 'cancelled';
+  order.subscription.isActive = false;
+  order.refund = record;
   await order.save();
   return order;
 }
@@ -677,6 +890,7 @@ module.exports = {
   startDateFor,
   applyCoupon,
   redeemCoupon,
+  assertNoActiveSubscription,
   markPaidAndActivate,
   createManualOrder,
   createBankTransferOrder,
@@ -692,6 +906,7 @@ module.exports = {
   changePackage,
   consumeSession,
   refundSession,
+  refund,
   billingPortalUrl,
   membershipSettings
 };

@@ -9,6 +9,58 @@ const { sendEmail } = require('../services/emailService');
 const { frontendOrigin: tenantOrigin, currentTenantId, currentTenantSlug } = require('../platform/tenantContext');
 const { checkLimit } = require('../platform/planLimits');
 const { forgetSession } = require('../middleware/auth');
+const { publicUserView } = require('../services/userView');
+const guards = require('../services/roleGuards');
+const { gymSiteName } = require('../services/gymName');
+
+// A signed-in session lasts a week; "remember me" on the sign-in form makes
+// it a month, the same life the phone app's sessions get.
+const SESSION_TTL = '7d';
+const REMEMBERED_SESSION_TTL = '30d';
+
+function wantsRemember(body) {
+  const value = body && body.remember;
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+// The role an admin action is judged by: the live one requirePermission just
+// read (req.roleSlug), never the claim in a token that may predate a demotion.
+function actorRole(req, fallback) {
+    return req.roleSlug || (req.user && req.user.role) || (fallback && fallback.role) || '';
+}
+
+async function activeAdminCount() {
+    return User.countDocuments({ role: guards.ADMIN_SLUG, isActive: true });
+}
+
+// What has to happen when an account is deleted, beyond the document going:
+// its username is released in the platform directory (or the phone app keeps
+// resolving it to a gym), its front-desk tokens stop working, and any
+// fingerprint templates -- biometric data that must not outlive the person --
+// are removed. None of these may block the deletion itself; a failure is
+// logged and the account is still gone.
+async function releaseAccount(user) {
+    const id = user._id || user.id;
+    try {
+        const MemberDirectory = require('../platform/models/memberDirectoryModel');
+        await MemberDirectory.withdraw(user);
+    } catch (error) {
+        console.error('[users] could not release the username of', String(id), '-', error.message);
+    }
+    try {
+        const DesktopToken = require('../attendance/models/desktopTokenModel');
+        await DesktopToken.revokeAllForUser(id);
+    } catch (error) {
+        console.error('[users] could not revoke desktop tokens of', String(id), '-', error.message);
+    }
+    try {
+        const Fingerprint = require('../attendance/models/fingerprintModel');
+        await Fingerprint.deleteMany({ personId: id });
+    } catch (error) {
+        console.error('[users] could not delete fingerprints of', String(id), '-', error.message);
+    }
+    forgetSession(id);
+}
 
 /** Generates a readable but strong temporary password. */
 function generatePassword(length = 14) {
@@ -123,6 +175,11 @@ const userController = {
             });
             const assignedRole = requestedRole ? requestedRole.slug : 'user';
 
+            // A manager with `users: manage` must not be able to mint an
+            // administrator.
+            const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: assignedRole });
+            if (refusal) return res.status(403).json({ message: refusal });
+
             // The gym's platform plan may cap how many accounts it can hold.
             const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
             if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
@@ -151,7 +208,7 @@ const userController = {
             let emailed = false;
             let emailError = null;
             try {
-                const siteName = process.env.SITE_NAME || 'GymPilot';
+                const siteName = await gymSiteName();
                 const loginUrl = `${tenantOrigin()}/authentication`;
                 const result = await sendEmail(
                     normalisedEmail,
@@ -164,14 +221,13 @@ const userController = {
                 emailError = err.message;
             }
 
-            const { password: _pw, ...safe } = user.toObject();
             return res.status(201).json({
                 message: emailed
                     ? 'User created and credentials emailed'
                     : 'User created, but the credentials email could not be sent',
                 emailed,
                 emailError,
-                data: safe,
+                data: publicUserView(user),
             });
         } catch (error) {
             if (error && error.code === 11000) {
@@ -203,7 +259,6 @@ const userController = {
     createUser: async (req, res) => {
         try {
             const { firstName, lastName, email, password, confirmPassword } = req.body;
-            console.log("userData", req.body);
 
             // Basic validation
             if (!firstName || !lastName || !email || !password) {
@@ -238,8 +293,7 @@ const userController = {
             });
 
             // Sanitize output
-            const { password: _pw, ...safe } = user.toObject();
-            return res.status(201).json({ message: 'User created successfully', data: safe });
+            return res.status(201).json({ message: 'User created successfully', data: publicUserView(user) });
         } catch (error) {
             // Handle duplicate key error from unique index
             if (error && error.code === 11000) {
@@ -336,6 +390,12 @@ const userController = {
             // Upsert user by email
             let user = await User.findOne({ email: normalizedEmail });
             if (!user) {
+                // A first Google sign-in creates a member, and the gym's plan
+                // may cap how many members it can hold -- the same check the
+                // sign-up form and the admin form make.
+                const limit = await checkLimit('members');
+                if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+
                 user = await User.create({
                     firstName: givenName || 'Google',
                     lastName: familyName || 'User',
@@ -368,13 +428,22 @@ const userController = {
                 role: user.role,
                 tid: currentTenantId(),
                 tv: user.tokenVersion || 0,
-            }, secret, { expiresIn: '7d' });
+            }, secret, { expiresIn: SESSION_TTL });
 
             user.lastLogin = new Date();
             await user.save();
 
-            const redirectTo = `${frontendOrigin}${returnUrl.startsWith('/') ? returnUrl : '/'}?token=${encodeURIComponent(token)}`;
-            return res.redirect(redirectTo);
+            // The token lands on the sign-in page, which stores it and then
+            // sends the person on to `redirect` -- the same param the
+            // password form honours -- rather than being sprayed onto
+            // whichever page they started from. Only a same-site path is
+            // carried; anything else falls back to the homepage.
+            const params = new URLSearchParams({ googleToken: token });
+            const safeReturn = typeof returnUrl === 'string' && returnUrl.startsWith('/') && !returnUrl.startsWith('//') && returnUrl !== '/'
+                ? returnUrl
+                : '';
+            if (safeReturn) params.set('redirect', safeReturn);
+            return res.redirect(`${frontendOrigin}/authentication?${params.toString()}`);
         } catch (error) {
             console.error('googleOAuthCallback error:', error);
             return res.status(400).send('Failed to complete Google OAuth');
@@ -385,6 +454,7 @@ const userController = {
     loginUser: async (req, res) => {
         try {
             const { email, password } = req.body;
+            const remember = wantsRemember(req.body);
             if (!email || !password) {
                 return res.status(400).json({ message: 'Email and password are required' });
             }
@@ -426,6 +496,13 @@ const userController = {
                         error: challenge.error
                     });
                 }
+                // Carried on the challenge so the token issued at the code
+                // step (securityController.verifyTwoFactor) gets the same
+                // life the person asked for here.
+                if (remember && user.twoFactor && user.twoFactor.pending) {
+                    user.twoFactor.pending.remember = true;
+                    await user.save();
+                }
                 return res.status(200).json({
                     requires2fa: true,
                     challengeId: challenge.challengeId,
@@ -450,14 +527,13 @@ const userController = {
                 return res.status(500).json({ message: 'Server misconfiguration: missing JWT secret' });
             }
 
-            const token = jwt.sign(payload, secret, { expiresIn: '7d' });
+            const token = jwt.sign(payload, secret, { expiresIn: remember ? REMEMBERED_SESSION_TTL : SESSION_TTL });
 
             // Update lastLogin timestamp
             user.lastLogin = new Date();
             await user.save();
 
-            const { password: _pw, ...safe } = user.toObject();
-            return res.status(200).json({ message: 'Login successful', token, data: safe });
+            return res.status(200).json({ message: 'Login successful', token, data: publicUserView(user) });
         } catch (error) {
             res.status(500).json({ message: 'Error during login', error: error.message });
         }
@@ -496,7 +572,7 @@ const userController = {
             user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
             await user.save();
 
-            const siteName = process.env.SITE_NAME || 'GymPilot';
+            const siteName = await gymSiteName();
             const frontend = tenantOrigin();
             const resetUrl =
                 `${frontend}/authentication?mode=reset&token=${encodeURIComponent(token)}` +
@@ -676,6 +752,11 @@ const userController = {
             // Upsert user by email
             let user = await User.findOne({ email: normalizedEmail });
             if (!user) {
+                // A first Google sign-in creates a member; the gym's plan may
+                // cap how many it can hold.
+                const limit = await checkLimit('members');
+                if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+
                 user = await User.create({
                     firstName: givenName || 'Google',
                     lastName: familyName || 'User',
@@ -711,13 +792,12 @@ const userController = {
             if (!secret) {
                 return res.status(500).json({ message: 'Server misconfiguration: missing JWT secret' });
             }
-            const token = jwt.sign(payloadJwt, secret, { expiresIn: '7d' });
+            const token = jwt.sign(payloadJwt, secret, { expiresIn: SESSION_TTL });
 
             user.lastLogin = new Date();
             await user.save();
 
-            const { password: _pw, ...safe } = user.toObject();
-            return res.status(200).json({ message: 'Login successful', token, data: safe });
+            return res.status(200).json({ message: 'Login successful', token, data: publicUserView(user) });
         } catch (error) {
             console.error('Google login error:', error);
             return res.status(400).json({ message: 'Error during Google login', error: error.message });
@@ -758,13 +838,11 @@ const userController = {
             if (!updatedUser) {
                 return res.status(404).json({ message: 'User not found' });
             }
-            
+
             // Remove sensitive data from response
-            const { password: _, ...userWithoutPassword } = updatedUser.toObject();
-            
-            res.status(200).json({ 
-                message: 'User updated successfully', 
-                data: userWithoutPassword 
+            res.status(200).json({
+                message: 'User updated successfully',
+                data: publicUserView(updatedUser)
             });
         } catch (error) {
             console.error('Update user error:', error);
@@ -775,17 +853,31 @@ const userController = {
         }
     },
 
-    // DELETE /user - Delete a user
+    // DELETE /user - Delete one's own account
     deleteUser: async (req, res) => {
         try {
             const token = req.headers.authorization;
             const currentUser = getUserFromToken(token);
-            
+
             if (!currentUser) {
                 return res.status(401).json({ message: 'Invalid or expired token' });
             }
-            
+
+            const user = await User.findById(currentUser.id).select('role isActive').lean();
+            if (!user) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+
+            // The last administrator cannot remove themselves: nobody would be
+            // left who could hand the role out again.
+            if (user.role === guards.ADMIN_SLUG && user.isActive !== false && (await activeAdminCount()) <= 1) {
+                return res.status(403).json({
+                    message: 'You are the last active administrator. Promote someone else before deleting this account.'
+                });
+            }
+
             await User.findByIdAndDelete(currentUser.id);
+            await releaseAccount(user);
             res.status(200).json({ message: 'User deleted successfully', id: currentUser.id });
         } catch (error) {
             res.status(400).json({ message: 'Error deleting user', error: error.message });
@@ -804,15 +896,13 @@ const userController = {
             if (!user) {
                 return res.status(404).json({ message: 'User not found' });
             }
-            
-            // Remove sensitive data from response
-            // The staff-only notes are about the member, not for them.
-            const { password: _, staffNotes: _notes, automation: _auto, ...userWithoutPassword } = user.toObject();
-            if (userWithoutPassword.medical) delete userWithoutPassword.medical.notes;
-            
-            res.status(200).json({ 
-                message: 'User details retrieved successfully', 
-                data: userWithoutPassword 
+
+            // The same view every sign-in returns: no credentials, and none
+            // of the staff-only notes, which are about the member, not for
+            // them (services/userView.js).
+            res.status(200).json({
+                message: 'User details retrieved successfully',
+                data: publicUserView(user)
             });
         } catch (error) {
             console.error('Get user details error:', error);
@@ -926,6 +1016,22 @@ const userController = {
                 return res.status(400).json({ message: 'isActive must be a boolean' });
             }
 
+            const target = await User.findById(id).select('role isActive').lean();
+            if (!target) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+
+            // Nobody switches themselves off, only an admin switches an admin
+            // off, and the last active admin stays on (services/roleGuards.js).
+            const refusal = guards.statusChangeProblem({
+                actorId: currentUser.id,
+                actorRole: actorRole(req, currentUser),
+                target,
+                isActive,
+                activeAdmins: target.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
+            });
+            if (refusal) return res.status(403).json({ message: refusal });
+
             const updated = await User.findByIdAndUpdate(
                 id,
                 { $set: { isActive } },
@@ -935,6 +1041,10 @@ const userController = {
             if (!updated) {
                 return res.status(404).json({ message: 'User not found' });
             }
+
+            // A deactivated account should be out within the request, not
+            // when the session cache next expires.
+            if (!isActive) forgetSession(updated._id);
 
             const { password: _pw, ...safe } = updated.toObject();
             return res.status(200).json({ message: 'Status updated successfully', data: safe });
@@ -972,19 +1082,22 @@ const userController = {
                 });
             }
 
-            // Losing the last administrator would leave nobody able to hand the
-            // role back out.
-            if (target.slug !== 'admin') {
-                const current = await User.findById(id).select('role').lean();
-                if (current && current.role === 'admin') {
-                    const admins = await User.countDocuments({ role: 'admin', isActive: true });
-                    if (admins <= 1) {
-                        return res.status(400).json({
-                            message: 'This is the last administrator. Promote someone else first.'
-                        });
-                    }
-                }
+            // Nobody changes their own role; only an administrator grants or
+            // revokes the administrator role; and losing the last active
+            // administrator would leave nobody able to hand the role back out
+            // (services/roleGuards.js).
+            const current = await User.findById(id).select('role isActive').lean();
+            if (!current) {
+                return res.status(404).json({ message: 'User not found' });
             }
+            const refusal = guards.roleChangeProblem({
+                actorId: currentUser.id,
+                actorRole: actorRole(req, currentUser),
+                target: current,
+                nextRole: target.slug,
+                activeAdmins: current.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
+            });
+            if (refusal) return res.status(403).json({ message: refusal });
 
             // A staff role brings employment with it; a member role ends it.
             // Without this the roster and the sidebar would disagree about who
@@ -1022,10 +1135,26 @@ const userController = {
             }
 
             const { id } = req.params;
+            const target = await User.findById(id).select('role isActive').lean();
+            if (!target) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+
+            // Nobody deletes themselves from here, only an admin deletes an
+            // admin, and the last active admin stays (services/roleGuards.js).
+            const refusal = guards.deleteProblem({
+                actorId: currentUser.id,
+                actorRole: actorRole(req, currentUser),
+                target,
+                activeAdmins: target.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
+            });
+            if (refusal) return res.status(403).json({ message: refusal });
+
             const deleted = await User.findByIdAndDelete(id);
             if (!deleted) {
                 return res.status(404).json({ message: 'User not found' });
             }
+            await releaseAccount(deleted);
 
             return res.status(200).json({ message: 'User deleted successfully', id });
         } catch (error) {

@@ -5,6 +5,19 @@ const Coupon = require('../models/couponModel');
 const Package = require('../models/packageModel');
 const { parseAmount } = require('../../helper/money');
 const { applyCoupon, MembershipError } = require('../services/membershipService');
+const T = require('../../attendance/services/timeUtils');
+
+// A bare 'YYYY-MM-DD' from a date input names a whole day at the gym: "valid
+// until 30 Sep" must still work at 23:59 on the 30th there, not stop at
+// midnight UTC the night before -- and "valid from 1 Oct" must start at the
+// gym's midnight, not five hours later. A full timestamp is taken as is.
+function readBoundary(value, edge) {
+  if (T.isDateOnly(value)) {
+    const key = String(value).trim();
+    return edge === 'end' ? T.lastMomentOfLocalDay(key) : T.startOfLocalDay(key);
+  }
+  return new Date(value);
+}
 
 function fail(res, error) {
   if (error instanceof MembershipError) return res.status(error.status).json({ success: false, message: error.message, code: error.code || undefined });
@@ -23,8 +36,8 @@ function applyBody(coupon, body) {
   if (body.packageIds !== undefined) {
     coupon.packageIds = (Array.isArray(body.packageIds) ? body.packageIds : []).filter((id) => mongoose.Types.ObjectId.isValid(id));
   }
-  if (body.validFrom !== undefined) coupon.validFrom = body.validFrom ? new Date(body.validFrom) : null;
-  if (body.validUntil !== undefined) coupon.validUntil = body.validUntil ? new Date(body.validUntil) : null;
+  if (body.validFrom !== undefined) coupon.validFrom = body.validFrom ? readBoundary(body.validFrom, 'start') : null;
+  if (body.validUntil !== undefined) coupon.validUntil = body.validUntil ? readBoundary(body.validUntil, 'end') : null;
   if (body.maxRedemptions !== undefined) coupon.maxRedemptions = Math.max(0, Math.floor(Number(body.maxRedemptions) || 0));
   if (body.appliesToRenewals !== undefined) coupon.appliesToRenewals = !!body.appliesToRenewals;
   if (body.isActive !== undefined) coupon.isActive = !!body.isActive;

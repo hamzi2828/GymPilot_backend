@@ -2,6 +2,38 @@ const GymClass = require('../models/gymClassModel');
 const { currencyOr } = require('../../services/currency');
 const { checkLimit } = require('../../platform/planLimits');
 
+// A list field as it arrives from either kind of client: a real array from a
+// JSON body, a JSON string ('["a","b"]') from a multipart form, or a plain
+// comma-separated string from an older form. An array is used as it is --
+// never joined into "a,b" -- and an absent field yields `fallback`.
+function parseList(value, fallback = []) {
+  if (value === undefined || value === null) return fallback;
+  if (Array.isArray(value)) {
+    return value.filter((item) => item !== undefined && item !== null && String(item).trim() !== '').map((item) => (typeof item === 'string' ? item.trim() : item));
+  }
+  if (typeof value !== 'string') return fallback;
+  const text = value.trim();
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parseList(parsed, fallback);
+    } catch (e) {
+      // Not JSON after all: fall through to the comma form.
+    }
+  }
+  return text.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+// The multipart form sends 'true'/'false'; JSON sends booleans. Anything
+// else is "not provided".
+function readBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 let blobUpload;
@@ -208,9 +240,10 @@ const createClass = async (req, res) => {
       currency
     } = req.body;
 
-    // Handle file uploads
+    // Handle file uploads. Gallery URLs the form already holds arrive as a
+    // list (array or JSON string); freshly uploaded files are added to it.
     let thumbnailUrl = req.body.thumbnail;
-    let galleryUrls = req.body.gallery || [];
+    let galleryUrls = parseList(req.body.gallery, []);
 
     if (req.files) {
       if (USE_BLOB_STORAGE && blobUpload) {
@@ -221,14 +254,14 @@ const createClass = async (req, res) => {
           );
         }
         if (req.files.gallery) {
-          galleryUrls = await blobUpload.uploadMultipleToBlob(req.files.gallery, 'gym-classes/gallery');
+          galleryUrls = galleryUrls.concat(await blobUpload.uploadMultipleToBlob(req.files.gallery, 'gym-classes/gallery'));
         }
       } else {
         if (req.files.thumbnail && req.files.thumbnail[0]) {
           thumbnailUrl = `/uploads/${req.files.thumbnail[0].filename}`;
         }
         if (req.files.gallery) {
-          galleryUrls = req.files.gallery.map(file => `/uploads/${file.filename}`);
+          galleryUrls = galleryUrls.concat(req.files.gallery.map(file => `/uploads/${file.filename}`));
         }
       }
     }
@@ -243,32 +276,9 @@ const createClass = async (req, res) => {
       }
     }
 
-    let parsedFeatures = features;
-    if (typeof features === 'string') {
-      try {
-        parsedFeatures = JSON.parse(features);
-      } catch (e) {
-        parsedFeatures = features.split(',').map(f => f.trim());
-      }
-    }
-
-    let parsedRequirements = requirements;
-    if (typeof requirements === 'string') {
-      try {
-        parsedRequirements = JSON.parse(requirements);
-      } catch (e) {
-        parsedRequirements = requirements.split(',').map(r => r.trim());
-      }
-    }
-
-    let parsedTags = tags;
-    if (typeof tags === 'string') {
-      try {
-        parsedTags = JSON.parse(tags);
-      } catch (e) {
-        parsedTags = tags.split(',').map(t => t.trim());
-      }
-    }
+    const parsedFeatures = parseList(features, []);
+    const parsedRequirements = parseList(requirements, []);
+    const parsedTags = parseList(tags, []);
 
     const classData = {
       name,
@@ -278,15 +288,15 @@ const createClass = async (req, res) => {
       videoUrl: videoUrl || undefined,
       videoPoster: videoPoster || undefined,
       gallery: galleryUrls,
-      schedule: parsedSchedule || [],
+      schedule: Array.isArray(parsedSchedule) ? parsedSchedule : [],
       duration: duration ? parseInt(duration) : undefined,
       difficulty: difficulty || 'All Levels',
       capacity: capacity ? parseInt(capacity) : 20,
       room: req.body.room !== undefined ? String(req.body.room).trim() : '',
-      features: parsedFeatures || [],
-      requirements: parsedRequirements || [],
+      features: parsedFeatures,
+      requirements: parsedRequirements,
       category: category || 'Other',
-      tags: parsedTags || [],
+      tags: parsedTags,
       isActive: isActive !== undefined ? isActive === 'true' || isActive === true : true,
       isFeatured: isFeatured !== undefined ? isFeatured === 'true' || isFeatured === true : false,
       order: order ? parseInt(order) : undefined,
@@ -369,9 +379,11 @@ const updateClass = async (req, res) => {
       currency
     } = req.body;
 
-    // Handle file uploads
+    // Handle file uploads. A gallery list in the body (array or JSON string)
+    // replaces the stored one; none keeps it. Newly uploaded files are added
+    // to whichever applies, so uploading more photos never drops the rest.
     let thumbnailUrl = req.body.thumbnail || gymClass.thumbnail;
-    let galleryUrls = req.body.gallery || gymClass.gallery;
+    let galleryUrls = parseList(req.body.gallery, gymClass.gallery || []);
 
     if (req.files) {
       if (USE_BLOB_STORAGE && blobUpload) {
@@ -382,14 +394,14 @@ const updateClass = async (req, res) => {
           );
         }
         if (req.files.gallery) {
-          galleryUrls = await blobUpload.uploadMultipleToBlob(req.files.gallery, 'gym-classes/gallery');
+          galleryUrls = galleryUrls.concat(await blobUpload.uploadMultipleToBlob(req.files.gallery, 'gym-classes/gallery'));
         }
       } else {
         if (req.files.thumbnail && req.files.thumbnail[0]) {
           thumbnailUrl = `/uploads/${req.files.thumbnail[0].filename}`;
         }
         if (req.files.gallery) {
-          galleryUrls = req.files.gallery.map(file => `/uploads/${file.filename}`);
+          galleryUrls = galleryUrls.concat(req.files.gallery.map(file => `/uploads/${file.filename}`));
         }
       }
     }
@@ -404,32 +416,9 @@ const updateClass = async (req, res) => {
       }
     }
 
-    let parsedFeatures = features || gymClass.features;
-    if (features && typeof features === 'string') {
-      try {
-        parsedFeatures = JSON.parse(features);
-      } catch (e) {
-        parsedFeatures = features.split(',').map(f => f.trim());
-      }
-    }
-
-    let parsedRequirements = requirements || gymClass.requirements;
-    if (requirements && typeof requirements === 'string') {
-      try {
-        parsedRequirements = JSON.parse(requirements);
-      } catch (e) {
-        parsedRequirements = requirements.split(',').map(r => r.trim());
-      }
-    }
-
-    let parsedTags = tags || gymClass.tags;
-    if (tags && typeof tags === 'string') {
-      try {
-        parsedTags = JSON.parse(tags);
-      } catch (e) {
-        parsedTags = tags.split(',').map(t => t.trim());
-      }
-    }
+    const parsedFeatures = parseList(features, gymClass.features);
+    const parsedRequirements = parseList(requirements, gymClass.requirements);
+    const parsedTags = parseList(tags, gymClass.tags);
 
     const updateData = {
       name: name || gymClass.name,
@@ -484,31 +473,29 @@ const updateClass = async (req, res) => {
   }
 };
 
-// Toggle class active status
+// Toggle class active status.
+//
+// An explicit boolean in the body is honoured; a body with none (what the
+// admin page's toggle button sends) flips the current value.
 const toggleClassStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { isActive } = req.body;
+    const wanted = readBoolean((req.body || {}).isActive);
 
-    if (typeof isActive !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isActive must be a boolean value'
-      });
-    }
-
-    const gymClass = await GymClass.findByIdAndUpdate(
-      id,
-      { isActive },
-      { new: true, runValidators: true }
-    ).populate('schedule.instructor', 'name role image');
-
-    if (!gymClass) {
+    const current = await GymClass.findById(id).select('isActive');
+    if (!current) {
       return res.status(404).json({
         success: false,
         message: 'Class not found'
       });
     }
+
+    const isActive = wanted === null ? !current.isActive : wanted;
+    const gymClass = await GymClass.findByIdAndUpdate(
+      id,
+      { isActive },
+      { new: true, runValidators: true }
+    ).populate('schedule.instructor', 'name role image');
 
     res.status(200).json({
       success: true,
@@ -525,31 +512,26 @@ const toggleClassStatus = async (req, res) => {
   }
 };
 
-// Toggle class featured status
+// Toggle class featured status (same rule as toggleClassStatus).
 const toggleClassFeatured = async (req, res) => {
   try {
     const { id } = req.params;
-    const { isFeatured } = req.body;
+    const wanted = readBoolean((req.body || {}).isFeatured);
 
-    if (typeof isFeatured !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isFeatured must be a boolean value'
-      });
-    }
-
-    const gymClass = await GymClass.findByIdAndUpdate(
-      id,
-      { isFeatured },
-      { new: true, runValidators: true }
-    ).populate('schedule.instructor', 'name role image');
-
-    if (!gymClass) {
+    const current = await GymClass.findById(id).select('isFeatured');
+    if (!current) {
       return res.status(404).json({
         success: false,
         message: 'Class not found'
       });
     }
+
+    const isFeatured = wanted === null ? !current.isFeatured : wanted;
+    const gymClass = await GymClass.findByIdAndUpdate(
+      id,
+      { isFeatured },
+      { new: true, runValidators: true }
+    ).populate('schedule.instructor', 'name role image');
 
     res.status(200).json({
       success: true,
@@ -596,6 +578,7 @@ const deleteClass = async (req, res) => {
 };
 
 module.exports = {
+  parseList,
   getActiveClasses,
   getFeaturedClasses,
   getClassesByCategory,

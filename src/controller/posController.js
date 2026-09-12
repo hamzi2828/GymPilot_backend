@@ -97,11 +97,35 @@ function lockerView(l) {
   };
 }
 
+// Not enough on the shelf for what was asked. Carries a 409 so the handlers
+// can answer with it instead of a generic failure.
+function shortStock(product, available) {
+  const error = new Error(`Only ${available || 0} × ${product.name} in stock`);
+  error.status = 409;
+  return error;
+}
+
+// Takes stock with ONE conditional decrement: it only goes through while at
+// least `quantity` is on the shelf, so two tills selling the last unit at the
+// same moment cannot both take it. Returns the product as written, or throws
+// shortStock. Restocks (positive delta) never fail.
+async function changeStock(product, delta) {
+  const filter = { _id: product._id };
+  if (delta < 0) filter.stock = { $gte: -delta };
+  const updated = await Product.findOneAndUpdate(filter, { $inc: { stock: delta } }, { new: true });
+  if (!updated) {
+    const fresh = await Product.findById(product._id).select('stock').lean();
+    throw shortStock(product, fresh ? fresh.stock : 0);
+  }
+  product.stock = updated.stock;
+  return updated;
+}
+
 async function moveStock(product, delta, reason, { saleId = null, note = '', by = null, byName = '' } = {}) {
-  if (product.trackStock === false) return;
-  product.stock = (product.stock || 0) + delta;
-  await product.save();
-  await StockMovement.create({ productId: product._id, productName: product.name, delta, stockAfter: product.stock, reason, saleId, note, by, byName });
+  if (product.trackStock === false) return product;
+  const updated = await changeStock(product, delta);
+  await StockMovement.create({ productId: product._id, productName: product.name, delta, stockAfter: updated.stock, reason, saleId, note, by, byName });
+  return updated;
 }
 
 module.exports = {
@@ -185,15 +209,36 @@ module.exports = {
       if (!product) return fail(res, 404, 'Product not found');
       const b = req.body || {};
       const reason = ['restock', 'count', 'waste', 'adjust'].includes(b.reason) ? b.reason : 'adjust';
-      let delta;
-      if (b.set !== undefined && b.set !== null && b.set !== '') delta = Math.max(0, parseInt(b.set, 10) || 0) - (product.stock || 0);
-      else delta = parseInt(b.delta, 10) || 0;
+      const movement = { note: String(b.note || '').trim(), by: actorId(req), byName: await actorName(req) };
+      const before = product.stock || 0;
+
+      if (b.set !== undefined && b.set !== null && b.set !== '') {
+        // A count: written only if the level is still what the operator was
+        // looking at, so a sale rung up meanwhile is not silently undone.
+        const target = Math.max(0, parseInt(b.set, 10) || 0);
+        const delta = target - before;
+        if (!delta) return fail(res, 400, 'Nothing to change');
+        const updated = await Product.findOneAndUpdate(
+          { _id: product._id, stock: before ? before : { $in: [0, null] } },
+          { $set: { stock: target, trackStock: true } },
+          { new: true }
+        );
+        if (!updated) return fail(res, 409, 'The stock level changed while you were editing it. Reload and try again.');
+        product.stock = target;
+        product.trackStock = true;
+        await StockMovement.create({ productId: product._id, productName: product.name, delta, stockAfter: target, reason, saleId: null, ...movement });
+        return res.json({ success: true, message: `Stock is now ${product.stock}.`, data: productView(product) });
+      }
+
+      const delta = parseInt(b.delta, 10) || 0;
       if (!delta) return fail(res, 400, 'Nothing to change');
-      if ((product.stock || 0) + delta < 0) return fail(res, 400, 'Stock cannot go below zero');
+      if (before + delta < 0) return fail(res, 400, 'Stock cannot go below zero');
+      await Product.updateOne({ _id: product._id }, { $set: { trackStock: true } });
       product.trackStock = true;
-      await moveStock(product, delta, reason, { note: String(b.note || '').trim(), by: actorId(req), byName: await actorName(req) });
+      await moveStock(product, delta, reason, movement);
       return res.json({ success: true, message: `Stock is now ${product.stock}.`, data: productView(product) });
     } catch (error) {
+      if (error && error.status === 409) return fail(res, 409, error.message);
       console.error('[pos] stock failed:', error);
       return fail(res, 500, 'Could not adjust stock');
     }
@@ -265,29 +310,51 @@ module.exports = {
         member = await User.findById(b.memberId).select('firstName lastName email').lean();
       }
 
-      const year = new Date().getFullYear();
-      const seq = await Counter.next(`receipt-${year}`);
-      const sale = await Sale.create({
-        receiptNumber: `RCP-${year}-${String(seq).padStart(5, '0')}`,
-        items: items.map(({ taxable, ...i }) => i),
-        subtotal,
-        discount,
-        taxRate,
-        taxAmount,
-        total,
-        currency,
-        paymentMethod: b.paymentMethod,
-        memberId: member ? member._id : null,
-        memberName: member ? [member.firstName, member.lastName].filter(Boolean).join(' ') || member.email : '',
-        soldBy: actorId(req),
-        soldByName: await actorName(req),
-        notes: String(b.notes || '').trim().slice(0, 300)
-      });
+      // Stock is taken BEFORE the receipt is written, one conditional
+      // decrement per line, so the last unit cannot be sold twice by two
+      // tills at once. Anything taken goes back if a later line is short or
+      // the receipt itself cannot be saved.
+      const taken = [];
+      let sale;
+      try {
+        for (const item of items) {
+          const p = byId.get(String(item.productId));
+          if (p.trackStock === false) continue;
+          await changeStock(p, -item.quantity);
+          taken.push({ product: p, quantity: item.quantity });
+        }
 
+        const year = new Date().getFullYear();
+        const seq = await Counter.next(`receipt-${year}`);
+        sale = await Sale.create({
+          receiptNumber: `RCP-${year}-${String(seq).padStart(5, '0')}`,
+          items: items.map(({ taxable, ...i }) => i),
+          subtotal,
+          discount,
+          taxRate,
+          taxAmount,
+          total,
+          currency,
+          paymentMethod: b.paymentMethod,
+          memberId: member ? member._id : null,
+          memberName: member ? [member.firstName, member.lastName].filter(Boolean).join(' ') || member.email : '',
+          soldBy: actorId(req),
+          soldByName: await actorName(req),
+          notes: String(b.notes || '').trim().slice(0, 300)
+        });
+      } catch (error) {
+        for (const t of taken) {
+          await Product.updateOne({ _id: t.product._id }, { $inc: { stock: t.quantity } }).catch(() => {});
+        }
+        if (error && error.status === 409) return fail(res, 409, error.message);
+        throw error;
+      }
+
+      // The movements are written once the receipt exists so each carries
+      // its number.
       const byName = sale.soldByName;
-      for (const item of items) {
-        const p = byId.get(String(item.productId));
-        await moveStock(p, -item.quantity, 'sale', { saleId: sale._id, by: actorId(req), byName });
+      for (const t of taken) {
+        await StockMovement.create({ productId: t.product._id, productName: t.product.name, delta: -t.quantity, stockAfter: t.product.stock, reason: 'sale', saleId: sale._id, note: '', by: actorId(req), byName });
       }
 
       return res.status(201).json({ success: true, message: `Receipt ${sale.receiptNumber} · ${currency} ${total.toFixed(2)}`, data: saleView(sale) });

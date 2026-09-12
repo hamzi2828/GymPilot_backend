@@ -83,6 +83,22 @@ async function resolveAddons(slugs, plan) {
     error.status = 400;
     throw error;
   }
+
+  // A paid add-on has to be priced in the plan's currency, or the total is a
+  // number in no currency at all. What the plan includes costs nothing, so
+  // its list price is irrelevant.
+  const planCurrency = String((plan && plan.price && plan.price.currency) || '').toUpperCase();
+  if (planCurrency) {
+    const foreign = usable.find((addon) => {
+      const currency = String((addon.price && addon.price.currency) || '').toUpperCase();
+      return !included.includes(addon.slug) && currency && currency !== planCurrency;
+    });
+    if (foreign) {
+      const error = new Error(`Add-on ${foreign.name} is priced in ${foreign.price.currency} but the plan is in ${planCurrency}`);
+      error.status = 400;
+      throw error;
+    }
+  }
   return usable;
 }
 

@@ -54,6 +54,16 @@ function tenantMismatch(decoded, req) {
   return String(decoded.tid) !== String(req.tenant._id);
 }
 
+// Every refusal carries a machine-readable `code` beside the message. The
+// phone app signs the member out on these four and on nothing else -- a 401
+// from a wrong current password, or from a wrong 2FA code, must not end the
+// session. The website and the desktop app read only `message`, as before.
+//
+//   TOKEN_MISSING     no bearer token on the request
+//   TOKEN_INVALID     unreadable, expired, or not a gym account's token
+//   TOKEN_WRONG_GYM   issued by a different gym than the one asked for
+//   SESSION_ENDED     the account was deactivated, deleted, or signed out
+//                     everywhere (tokenVersion bumped)
 module.exports = async function auth(req, res, next) {
   try {
     const authHeader = req.headers['authorization'] || '';
@@ -62,7 +72,7 @@ module.exports = async function auth(req, res, next) {
       : null;
 
     if (!token) {
-      return res.status(401).json({ message: 'Authorization token required' });
+      return res.status(401).json({ message: 'Authorization token required', code: 'TOKEN_MISSING' });
     }
 
     const secret = process.env.JWT_SECRET;
@@ -75,19 +85,19 @@ module.exports = async function auth(req, res, next) {
     // A platform (super admin) session is a different kind of thing and
     // must never pass as a gym account.
     if (decoded.scope === 'platform') {
-      return res.status(401).json({ message: 'Invalid or expired token' });
+      return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
     }
     if (tenantMismatch(decoded, req)) {
-      return res.status(401).json({ message: 'This session belongs to a different gym. Please sign in again.' });
+      return res.status(401).json({ message: 'This session belongs to a different gym. Please sign in again.', code: 'TOKEN_WRONG_GYM' });
     }
 
     const problem = await sessionProblem(decoded);
-    if (problem) return res.status(401).json({ message: problem });
+    if (problem) return res.status(401).json({ message: problem, code: 'SESSION_ENDED' });
 
     req.user = decoded;
     return next();
   } catch (err) {
-    return res.status(401).json({ message: 'Invalid or expired token' });
+    return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
   }
 };
 

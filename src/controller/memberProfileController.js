@@ -144,7 +144,9 @@ module.exports = {
   // PUT /user/health   { emergencyContact, medical: {conditions, medications, injuries}, parq: { answers } }
   setMyHealth: async (req, res) => {
     try {
-      const user = await User.findById(actorId(req));
+      // `medical` is `select: false`: it has to be loaded to be edited in
+      // place, or the merge below would start from empty and drop the rest.
+      const user = await User.findById(actorId(req)).select('+medical');
       if (!user) return fail(res, 404, 'Account not found');
       const body = req.body || {};
       applyEmergencyContact(user, body.emergencyContact);
@@ -222,7 +224,9 @@ module.exports = {
   profile: async (req, res) => {
     try {
       if (!isId(req.params.id)) return fail(res, 404, 'Member not found');
-      const user = await User.findById(req.params.id).select('-password').lean();
+      // This is the staff view of the whole record, so the `select: false`
+      // blocks are asked for by name.
+      const user = await User.findById(req.params.id).select('-password +medical +staffNotes +documents').lean();
       if (!user) return fail(res, 404, 'Member not found');
       const [membership, lastVisit, config] = await Promise.all([
         membershipFor(user).catch(() => null),
@@ -270,7 +274,8 @@ module.exports = {
   updateProfile: async (req, res) => {
     try {
       if (!isId(req.params.id)) return fail(res, 404, 'Member not found');
-      const user = await User.findById(req.params.id);
+      // Health details are merged field by field, so they must be loaded.
+      const user = await User.findById(req.params.id).select('+medical +staffNotes');
       if (!user) return fail(res, 404, 'Member not found');
       const body = req.body || {};
 
@@ -323,7 +328,8 @@ module.exports = {
     try {
       if (!isId(req.params.id)) return fail(res, 404, 'Member not found');
       if (!req.file) return fail(res, 400, 'Choose a file');
-      const user = await User.findById(req.params.id);
+      // The list is appended to, so it has to be loaded (`select: false`).
+      const user = await User.findById(req.params.id).select('+documents');
       if (!user) return fail(res, 404, 'Member not found');
       if ((user.documents || []).length >= 50) return fail(res, 409, 'This member already has 50 documents');
       const url = await storeUpload(req.file, 'member-documents');
@@ -349,7 +355,7 @@ module.exports = {
   removeDocument: async (req, res) => {
     try {
       if (!isId(req.params.id) || !isId(req.params.docId)) return fail(res, 404, 'Document not found');
-      const user = await User.findById(req.params.id);
+      const user = await User.findById(req.params.id).select('+documents');
       if (!user) return fail(res, 404, 'Member not found');
       const doc = (user.documents || []).find((d) => String(d._id) === String(req.params.docId));
       if (!doc) return fail(res, 404, 'Document not found');

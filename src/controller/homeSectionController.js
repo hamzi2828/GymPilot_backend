@@ -216,7 +216,8 @@ const homeSectionController = {
           req.file.buffer,
           req.file.originalname,
           req.file.mimetype,
-          'home-sections'
+          'home-sections',
+          { kind: 'image' }
         );
       } else {
         url = `/uploads/${req.file.filename}`;
@@ -247,7 +248,9 @@ const homeSectionController = {
           req.file.buffer,
           req.file.originalname,
           req.file.mimetype,
-          'home-videos'
+          'home-videos',
+          // A video, with the video ceiling -- not the 5 MB image one.
+          { kind: 'video' }
         );
       } else {
         url = `/uploads/${req.file.filename}`;

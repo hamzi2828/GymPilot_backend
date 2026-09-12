@@ -2,6 +2,24 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { secretString } = require('../services/secretBox');
+
+// The paths below that are sealed at rest (services/secretBox.js). Each is
+// declared with secretString(), which installs the setter that seals on the
+// way in and the getter that opens on the way out; getSettings() and the
+// schema's toObject/toJSON apply the getters, so every reader sees the
+// plaintext it always did.
+const SECRET_PATHS = [
+  'stripe.secretKey',
+  'stripe.webhookSecret',
+  'smtp.pass',
+  'messaging.sms.authToken',
+  'messaging.sms.webhookToken',
+  'messaging.whatsapp.authToken',
+  'messaging.whatsapp.accessToken',
+  'messaging.whatsapp.webhookToken',
+  'messaging.push.vapidPrivateKey'
+];
 
 const settingsSchema = new mongoose.Schema(
   {
@@ -177,11 +195,11 @@ const settingsSchema = new mongoose.Schema(
     // Additional metadata
     // Payment gateway credentials. The secret and webhook values are never
     // returned by the public settings endpoint and are masked in the admin
-    // response — see settingsController.maskSecret.
+    // response — see settingsController.maskSecret. Sealed at rest.
     stripe: {
       publishableKey: { type: String, default: '', trim: true },
-      secretKey: { type: String, default: '', trim: true },
-      webhookSecret: { type: String, default: '', trim: true },
+      secretKey: secretString(),
+      webhookSecret: secretString(),
       enabled: { type: Boolean, default: false }
     },
 
@@ -191,7 +209,7 @@ const settingsSchema = new mongoose.Schema(
       port: { type: Number, default: 587 },
       secure: { type: Boolean, default: false },
       user: { type: String, default: '', trim: true },
-      pass: { type: String, default: '', trim: true },
+      pass: secretString(),
       fromName: { type: String, default: '', trim: true },
       fromEmail: { type: String, default: '', trim: true }
     },
@@ -233,25 +251,25 @@ const settingsSchema = new mongoose.Schema(
       sms: {
         provider: { type: String, enum: ['none', 'twilio', 'http'], default: 'none' },
         accountSid: { type: String, default: '', trim: true },
-        authToken: { type: String, default: '', trim: true },
+        authToken: secretString(),
         from: { type: String, default: '', trim: true },
         webhookUrl: { type: String, default: '', trim: true },
-        webhookToken: { type: String, default: '', trim: true }
+        webhookToken: secretString()
       },
       whatsapp: {
         provider: { type: String, enum: ['none', 'twilio', 'meta', 'http'], default: 'none' },
         accountSid: { type: String, default: '', trim: true },
-        authToken: { type: String, default: '', trim: true },
+        authToken: secretString(),
         from: { type: String, default: '', trim: true },
         phoneNumberId: { type: String, default: '', trim: true },
-        accessToken: { type: String, default: '', trim: true },
+        accessToken: secretString(),
         webhookUrl: { type: String, default: '', trim: true },
-        webhookToken: { type: String, default: '', trim: true }
+        webhookToken: secretString()
       },
       push: {
         enabled: { type: Boolean, default: false },
         vapidPublicKey: { type: String, default: '' },
-        vapidPrivateKey: { type: String, default: '' },
+        vapidPrivateKey: secretString({ trim: false }),
         subject: { type: String, default: '', trim: true }
       },
       // Which channels carry the transactional notices, beyond email.
@@ -351,18 +369,36 @@ const settingsSchema = new mongoose.Schema(
       default: '1.0.0' 
     }
   },
-  { 
+  {
     timestamps: true,
-    collection: 'settings' 
+    collection: 'settings',
+    // Getters on, so a document turned into a plain object (sanitizeSettings,
+    // res.json) carries the opened secrets exactly as it did before they were
+    // sealed. Virtuals off, so the shape stays what .lean() used to return.
+    toObject: { getters: true, virtuals: false },
+    toJSON: { getters: true, virtuals: false }
   }
 );
 
 // Index for faster queries
 settingsSchema.index({ isActive: 1 });
 
+settingsSchema.statics.SECRET_PATHS = SECRET_PATHS;
+
+// A plain object with every getter applied -- the shape .lean() gave, plus
+// the sealed secrets opened. minimize is off so an empty nested block is not
+// dropped from the result the way toObject() would by default.
+function plainSettings(doc) {
+  return doc && doc.toObject ? doc.toObject({ getters: true, virtuals: false, minimize: false }) : doc;
+}
+
 // Static method to get or create settings
+//
+// Returns a plain object, not a document. It used to be a .lean() read, but
+// lean skips getters, which would have handed every caller (Stripe, SMTP,
+// messaging) the sealed ciphertext instead of the key.
 settingsSchema.statics.getSettings = async function() {
-  let settings = await this.findOne({ isActive: true }).lean();
+  let settings = await this.findOne({ isActive: true });
 
   if (!settings) {
     // Create default settings if none exist
@@ -390,7 +426,7 @@ settingsSchema.statics.getSettings = async function() {
     });
   }
 
-  return settings;
+  return plainSettings(settings);
 };
 
 // Static method to update settings

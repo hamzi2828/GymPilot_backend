@@ -1,5 +1,23 @@
 // src/controller/newsletterController.js
 const Newsletter = require('../models/newsletterModel');
+const Settings = require('../models/settings');
+
+// Pages are capped so a single request cannot pull the whole list out.
+const MAX_PAGE_SIZE = 200;
+const SORT_FIELDS = ['subscribedAt', 'email', 'status', 'source', 'createdAt'];
+
+// The confirmation names the gym, read from its settings; if there is no
+// name to use it stays neutral rather than naming a brand this gym is not.
+async function welcomeLine() {
+  try {
+    const settings = await Settings.getSettings();
+    const name = settings && String(settings.siteName || '').trim();
+    if (name) return `Welcome to the ${name} newsletter.`;
+  } catch {
+    // No settings row yet: fall through to the neutral wording.
+  }
+  return 'Welcome to the newsletter.';
+}
 
 // Subscribe to newsletter
 exports.subscribe = async (req, res) => {
@@ -46,7 +64,7 @@ exports.subscribe = async (req, res) => {
     const newSubscription = new Newsletter({
       email: email.toLowerCase(),
       source,
-      ipAddress: req.ip || req.connection.remoteAddress,
+      ipAddress: req.ip || null,
       userAgent: req.get('User-Agent')
     });
 
@@ -54,7 +72,7 @@ exports.subscribe = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Successfully subscribed to newsletter! Welcome to the Jymor family.',
+      message: `Successfully subscribed! ${await welcomeLine()}`,
       data: {
         email: newSubscription.email,
         subscribedAt: newSubscription.subscribedAt
@@ -126,7 +144,7 @@ exports.unsubscribe = async (req, res) => {
   }
 };
 
-// Get newsletter statistics (admin only)
+// Get newsletter statistics (messaging tab)
 exports.getStats = async (req, res) => {
   try {
     const activeCount = await Newsletter.getActiveSubscribersCount();
@@ -176,20 +194,17 @@ exports.getStats = async (req, res) => {
   }
 };
 
-// Get all subscribers (admin only)
+// Get all subscribers (messaging tab)
 exports.getAllSubscribers = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 20,
-      status = 'active',
-      sortBy = 'subscribedAt',
-      sortOrder = 'desc'
-    } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const status = req.query.status || 'active';
+    const sortBy = SORT_FIELDS.includes(req.query.sortBy) ? req.query.sortBy : 'subscribedAt';
+    const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     const skip = (page - 1) * limit;
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
+    const sortOptions = { [sortBy]: sortOrder };
 
     const query = status === 'all' ? {} : { status };
 
@@ -197,7 +212,7 @@ exports.getAllSubscribers = async (req, res) => {
       Newsletter.find(query)
         .sort(sortOptions)
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limit)
         .select('-userAgent -ipAddress'),
       Newsletter.countDocuments(query)
     ]);
@@ -208,9 +223,9 @@ exports.getAllSubscribers = async (req, res) => {
       data: subscribers,
       pagination: {
         total,
-        page: parseInt(page),
+        page,
         pages: Math.ceil(total / limit),
-        limit: parseInt(limit),
+        limit,
         hasNextPage: page * limit < total,
         hasPreviousPage: page > 1
       }

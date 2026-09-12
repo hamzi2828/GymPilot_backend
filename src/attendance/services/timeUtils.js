@@ -70,6 +70,42 @@ function dateKey(date = new Date()) {
   return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+// True for a bare 'YYYY-MM-DD' -- what a date input sends. A value like that
+// names a whole local day, not an instant, so a caller storing it as a
+// boundary has to decide which end of the day it means.
+function isDateOnly(value) {
+  return typeof value === 'string' && DATE_ONLY.test(value.trim());
+}
+
+// The UTC instant at which a given wall-clock time falls in the gym's zone.
+// Reads the local time as if it were UTC, then corrects by however far the
+// gym clock actually reads from that -- the zone's offset, DST and all,
+// without hardcoding one.
+function localInstant(key, hour = 0, minute = 0, second = 0, ms = 0) {
+  const [y, m, d] = String(key).trim().split('-').map(Number);
+  const guess = new Date(Date.UTC(y, m - 1, d, hour, minute, second, ms));
+
+  const p = localParts(guess);
+  let drift = p.hour * 60 + p.minute - (hour * 60 + minute);
+  if (drift > 720) drift -= 1440;
+  if (drift < -720) drift += 1440;
+
+  return new Date(guess.getTime() - drift * 60000);
+}
+
+// The first and the last millisecond of a local day. `lastMomentOfLocalDay`
+// is what "valid until 30 Sep" means: the code still works at 23:59 on the
+// 30th at the gym, whichever zone the server runs in.
+function startOfLocalDay(key) {
+  return localInstant(key, 0, 0, 0, 0);
+}
+
+function lastMomentOfLocalDay(key) {
+  return localInstant(key, 23, 59, 59, 999);
+}
+
 // Shifts a local date key by whole days without going near a Date's timezone.
 function shiftDateKey(key, days) {
   const [y, m, d] = key.split('-').map(Number);
@@ -155,6 +191,10 @@ module.exports = {
   WEEKDAYS,
   localParts,
   dateKey,
+  isDateOnly,
+  localInstant,
+  startOfLocalDay,
+  lastMomentOfLocalDay,
   shiftDateKey,
   weekdayName,
   weekdayNameForKey,

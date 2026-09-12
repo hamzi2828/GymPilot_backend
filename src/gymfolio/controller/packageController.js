@@ -251,31 +251,30 @@ const updatePackage = async (req, res) => {
   }
 };
 
-// Toggle package active status
+// Toggle package active status.
+//
+// An explicit boolean in the body is honoured; a body with none (what the
+// admin page's toggle button sends) flips the current value.
 const togglePackageStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { isActive } = req.body;
+    const raw = (req.body || {}).isActive;
+    const wanted = typeof raw === 'boolean' ? raw : raw === 'true' ? true : raw === 'false' ? false : null;
 
-    if (typeof isActive !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isActive must be a boolean value'
-      });
-    }
-
-    const package = await Package.findByIdAndUpdate(
-      id,
-      { isActive },
-      { new: true, runValidators: true }
-    );
-
-    if (!package) {
+    const current = await Package.findById(id).select('isActive');
+    if (!current) {
       return res.status(404).json({
         success: false,
         message: 'Package not found'
       });
     }
+
+    const isActive = wanted === null ? !current.isActive : wanted;
+    const package = await Package.findByIdAndUpdate(
+      id,
+      { isActive },
+      { new: true, runValidators: true }
+    );
 
     res.status(200).json({
       success: true,

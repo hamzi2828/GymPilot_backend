@@ -20,26 +20,29 @@ const blogHeroSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // The buttons are optional: a hero can be a headline over a photo. An
+    // empty text hides that button on the site; the defaults give a new hero
+    // one sensible call to action.
     primaryButtonText: {
       type: String,
-      required: true,
+      default: 'Read the blog',
       trim: true,
       maxlength: 50,
     },
     primaryButtonLink: {
       type: String,
-      required: true,
+      default: '/blogs',
       trim: true,
     },
     secondaryButtonText: {
       type: String,
-      required: true,
+      default: '',
       trim: true,
       maxlength: 50,
     },
     secondaryButtonLink: {
       type: String,
-      required: true,
+      default: '',
       trim: true,
     },
     isActive: {

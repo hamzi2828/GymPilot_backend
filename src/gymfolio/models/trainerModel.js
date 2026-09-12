@@ -133,9 +133,9 @@ const trainerSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes
+// Indexes. `slug` already has a unique index from its field definition
+// above; declaring it again here made Mongoose warn about a duplicate.
 trainerSchema.index({ isActive: 1, order: 1 });
-trainerSchema.index({ slug: 1 });
 trainerSchema.index({ isFeatured: 1 });
 // Partial: staffCode is null until the attendance app first needs one, and a
 // plain unique index would reject every trainer after the first.

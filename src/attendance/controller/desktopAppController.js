@@ -505,23 +505,66 @@ module.exports = {
     }
   },
 
-  // POST /api/desktop/recent
+  // POST /api/desktop/recent   { limit }
   //
   // Today's punches, newest first -- so the desk can answer "is she already
-  // in?" without opening the website.
+  // in?" without opening the website. `counts` is the day's tally over ALL of
+  // today's rows, not just the page returned, so the board's numbers do not
+  // change with the page size:
+  //
+  //   total     visits today (rows)
+  //   in_now    visits still open
+  //   lapsed    member visits on an expired, missing or suspended membership
+  //   expiring  member visits whose membership ends within the warning window
   recent: async (req, res) => {
     try {
-      const limit = Math.min(parseInt((req.body && req.body.limit) || 12, 10) || 12, 50);
+      const wanted = parseInt((req.body && req.body.limit) || 12, 10);
+      const limit = Math.min(Math.max(1, Number.isFinite(wanted) ? wanted : 12), 200);
       const today = T.dateKey();
 
-      const rows = await Attendance.find({ shiftDate: today })
-        .sort({ updatedAt: -1 })
-        .limit(limit)
-        .lean();
+      const [rows, tally] = await Promise.all([
+        Attendance.find({ shiftDate: today })
+          .sort({ updatedAt: -1 })
+          .limit(limit)
+          .lean(),
+        Attendance.aggregate([
+          { $match: { shiftDate: today } },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              in_now: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } },
+              lapsed: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ['$personType', 'member'] },
+                        { $in: [{ $ifNull: ['$membership.status', 'none'] }, ['expired', 'none', 'suspended']] }
+                      ]
+                    },
+                    1,
+                    0
+                  ]
+                }
+              },
+              expiring: { $sum: { $cond: [{ $eq: ['$status', 'membership_expiring'] }, 1, 0] } }
+            }
+          }
+        ])
+      ]);
+
+      const counts = tally[0] || {};
 
       return res.json({
         success: true,
         date_label: T.dateLabelForKey(today),
+        counts: {
+          total: counts.total || 0,
+          in_now: counts.in_now || 0,
+          lapsed: counts.lapsed || 0,
+          expiring: counts.expiring || 0
+        },
         entries: rows.map((row) => ({
           person_type: row.personType,
           name: row.personName,

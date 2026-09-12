@@ -49,6 +49,47 @@ function primaryHost(gym) {
   return primary ? primary.host : null;
 }
 
+/**
+ * The host a gym gets under the platform's own domain: `<slug>.<root>`, or
+ * null when PLATFORM_ROOT_DOMAIN is not set (local development, a
+ * single-gym server).
+ */
+function subdomainHostFor(slug, root = process.env.PLATFORM_ROOT_DOMAIN) {
+  const clean = String(slug || '').toLowerCase().trim();
+  const domain = String(root || '')
+    .toLowerCase()
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .replace(/^\.+|[./]+$/g, '');
+  if (!clean || !domain) return null;
+  return `${clean}.${domain}`;
+}
+
+/**
+ * The website address a gym is reached at, whether or not a request is in
+ * flight: its primary registered domain; failing that, its platform
+ * subdomain; failing that, the env fallback the single-gym deployment used.
+ *
+ * The gym a bare deployment defaults to keeps answering with the env value
+ * it always used, so a single-gym install behaves exactly as before the
+ * platform existed -- in development (localhost) as much as in production.
+ */
+function siteUrlFor(gym) {
+  const envOrigin = (process.env.FRONTEND_ORIGIN || '').replace(/\/+$/, '');
+
+  if (gym && envOrigin && process.env.DEFAULT_TENANT_SLUG && gym.slug === process.env.DEFAULT_TENANT_SLUG) {
+    return envOrigin;
+  }
+
+  const primary = primaryHost(gym);
+  if (primary) return originForHost(primary);
+
+  const subdomain = subdomainHostFor(gym && gym.slug);
+  if (subdomain) return originForHost(subdomain);
+
+  return envOrigin || 'http://localhost:3000';
+}
+
 async function toContext(store) {
   if (store && store.connection && store.gym) return store;
   // Lazy require: connections.js requires modelRegistry.js which requires
@@ -147,20 +188,7 @@ function currentTenantSlug() {
 function frontendOrigin() {
   const store = currentStore();
   if (store && store.origin) return store.origin;
-
-  const gym = store && store.gym;
-  const envOrigin = (process.env.FRONTEND_ORIGIN || '').replace(/\/+$/, '');
-
-  // The gym a bare deployment defaults to keeps answering with the env value
-  // it always used, so a single-gym install behaves exactly as before the
-  // platform existed -- in development (localhost) as much as in production.
-  if (gym && envOrigin && process.env.DEFAULT_TENANT_SLUG && gym.slug === process.env.DEFAULT_TENANT_SLUG) {
-    return envOrigin;
-  }
-
-  const primary = primaryHost(gym);
-  if (primary) return originForHost(primary);
-  return envOrigin || 'http://localhost:3000';
+  return siteUrlFor(store && store.gym);
 }
 
 /**
@@ -186,6 +214,8 @@ module.exports = {
   currentTenantId,
   currentTenantSlug,
   frontendOrigin,
+  siteUrlFor,
+  subdomainHostFor,
   tenantTimezone,
   originForHost,
   primaryHost,

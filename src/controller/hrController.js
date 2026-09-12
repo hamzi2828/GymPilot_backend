@@ -109,7 +109,9 @@ module.exports = {
   // GET /staff/me/work  -> my shifts, leave, payslips, PT summary
   myWork: async (req, res) => {
     try {
-      const me = await User.findById(actorId(req)).select('firstName lastName employment').lean();
+      // Only the roster is needed here; naming the sub-paths keeps the pay
+      // details (`select: false`) out of the read.
+      const me = await User.findById(actorId(req)).select('firstName lastName employment.isStaff employment.jobTitle employment.schedule').lean();
       if (!me || !me.employment || !me.employment.isStaff) return res.json({ success: true, data: null });
       const [leave, payslips, trainer] = await Promise.all([
         LeaveRequest.find({ staffId: me._id }).sort({ from: -1 }).limit(50).lean(),
@@ -148,7 +150,7 @@ module.exports = {
   // POST /staff/me/leave   { type, from, to, reason }
   requestLeave: async (req, res) => {
     try {
-      const me = await User.findById(actorId(req)).select('firstName lastName email employment').lean();
+      const me = await User.findById(actorId(req)).select('firstName lastName email employment.isStaff').lean();
       if (!me || !me.employment || !me.employment.isStaff) return fail(res, 403, 'Only staff accounts can request leave');
       const { type, from, to, reason } = req.body || {};
       if (!DATE_KEY.test(String(from || '')) || !DATE_KEY.test(String(to || ''))) return fail(res, 400, 'from and to must be YYYY-MM-DD');
@@ -228,7 +230,7 @@ module.exports = {
     try {
       const { staffId, type, from, to, reason, approve } = req.body || {};
       if (!isId(staffId)) return fail(res, 400, 'A valid staffId is required');
-      const person = await User.findById(staffId).select('firstName lastName email employment').lean();
+      const person = await User.findById(staffId).select('firstName lastName email employment.isStaff').lean();
       if (!person || !person.employment || !person.employment.isStaff) return fail(res, 404, 'Staff member not found');
       if (!DATE_KEY.test(String(from || '')) || !DATE_KEY.test(String(to || ''))) return fail(res, 400, 'from and to must be YYYY-MM-DD');
       if (to < from) return fail(res, 400, 'The end date is before the start date');

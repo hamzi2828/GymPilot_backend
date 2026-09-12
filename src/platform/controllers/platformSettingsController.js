@@ -6,12 +6,14 @@
 
 const PlatformSettings = require('../models/platformSettingsModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
+const PlatformStripeEvent = require('../models/platformStripeEventModel');
 const {
   getPlatformStripe,
   platformStripeConfig,
   forgetPlatformStripe,
   PlatformStripeNotConfiguredError
 } = require('../services/platformStripe');
+const { handlePlatformStripeEvent } = require('../services/platformWebhook');
 
 const MASK_CHAR = '•';
 
@@ -158,9 +160,15 @@ module.exports = {
 
   // POST /api/platform/stripe/webhook  (public, raw body)
   //
-  // Verified with the stored signing secret and written to the audit log, so
-  // "did the webhook arrive?" is answered in the panel rather than in Stripe's
-  // dashboard. Nothing acts on the events yet.
+  // Verified with the stored signing secret, applied to the gym it concerns
+  // (services/platformWebhook.js), and written to the audit log, so "did
+  // the webhook arrive, and what did it do?" is answered in the panel rather
+  // than in Stripe's dashboard.
+  //
+  // Idempotent: the event id is claimed in platform_stripe_events before
+  // anything is changed, so Stripe delivering the same event twice changes
+  // a gym once. A handler that throws releases the claim and answers 500,
+  // which is what makes Stripe try again later.
   webhook: async (req, res) => {
     try {
       const cfg = await platformStripeConfig();
@@ -170,24 +178,46 @@ module.exports = {
 
       const signature = req.headers['stripe-signature'];
       let event;
+      let stripe;
       try {
-        const stripe = await getPlatformStripe();
+        stripe = await getPlatformStripe();
         event = stripe.webhooks.constructEvent(req.body, signature, cfg.webhookSecret);
       } catch (error) {
         console.error('[platform] webhook signature:', error.message);
         return res.status(400).json({ success: false, message: `Webhook signature failed: ${error.message}` });
       }
 
+      const first = await PlatformStripeEvent.claim(event);
+      if (!first) return res.json({ received: true, duplicate: true });
+
+      let outcome;
+      try {
+        outcome = await handlePlatformStripeEvent(event, stripe);
+      } catch (error) {
+        await PlatformStripeEvent.release(event);
+        console.error(`[platform] webhook ${event.type} (${event.id}) failed:`, error);
+        PlatformAuditLog.record({
+          actorId: null,
+          actorEmail: 'stripe',
+          action: 'platform_stripe_event',
+          meta: { type: event.type, id: event.id, livemode: !!event.livemode, result: `failed: ${error.message}` }
+        });
+        return res.status(500).json({ success: false, message: 'Webhook handler failed' });
+      }
+
+      await PlatformStripeEvent.markHandled(event, { gym: outcome.gym, result: outcome.result });
       PlatformAuditLog.record({
         actorId: null,
         actorEmail: 'stripe',
         action: 'platform_stripe_event',
-        meta: { type: event.type, id: event.id, livemode: !!event.livemode }
+        gymId: outcome.gym ? outcome.gym._id : null,
+        gymSlug: outcome.gym ? outcome.gym.slug : '',
+        meta: { type: event.type, id: event.id, livemode: !!event.livemode, result: outcome.result }
       });
 
       // Acknowledged whatever it was: an unhandled event is not an error, and
       // a non-200 makes Stripe retry it for days.
-      return res.json({ received: true });
+      return res.json({ received: true, result: outcome.result });
     } catch (error) {
       console.error('[platform] webhook:', error);
       return res.status(500).json({ success: false, message: 'Webhook failed' });

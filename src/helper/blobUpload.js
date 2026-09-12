@@ -9,7 +9,14 @@ function tenantFolder(folder) {
   return gym && gym.slug ? `${gym.slug}/${folder}` : folder;
 }
 
-// Allowed image mime types
+// What may be stored, by kind. Images are what every caller originally sent
+// and remain the default; member documents (signed forms, ID scans, medical
+// letters) and homepage videos each have their own set and ceiling. The
+// multer filters in helper/upload.js gate the same kinds on the way in; this
+// is the check on the way out to the store, which is the one that actually
+// costs money to get wrong.
+const MB = 1024 * 1024;
+
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -17,9 +24,29 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/gif',
   'image/svg+xml',
 ]);
+const ALLOWED_DOCUMENT_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png']);
+const ALLOWED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
 
-// File size limit (5MB)
-const MAX_FILE_SIZE = 5 * 1024 * 1024;
+// Image ceiling honours the same setting the multer limit does.
+const MAX_FILE_SIZE = Math.max(1, Number(process.env.UPLOAD_MAX_FILE_SIZE_MB || 5)) * MB;
+const MAX_DOCUMENT_SIZE = 10 * MB;
+const MAX_VIDEO_SIZE = Math.max(1, Number(process.env.UPLOAD_MAX_VIDEO_SIZE_MB || 100)) * MB;
+
+const KINDS = {
+  image: { mimes: ALLOWED_IMAGE_MIME_TYPES, maxBytes: MAX_FILE_SIZE, refusal: 'Only image files are allowed' },
+  document: { mimes: ALLOWED_DOCUMENT_MIME_TYPES, maxBytes: MAX_DOCUMENT_SIZE, refusal: 'Only PDF, JPEG or PNG files are allowed' },
+  video: { mimes: ALLOWED_VIDEO_MIME_TYPES, maxBytes: MAX_VIDEO_SIZE, refusal: 'Only video files are allowed (mp4, webm, mov)' },
+};
+
+// When a caller says nothing about the kind, the mimetype decides: a PDF is
+// a document and an mp4 is a video whoever sent it, so the callers written
+// before kinds existed keep working without being touched.
+function inferKind(mimetype) {
+  const type = String(mimetype || '').toLowerCase();
+  if (type.startsWith('video/')) return 'video';
+  if (type === 'application/pdf') return 'document';
+  return 'image';
+}
 
 /**
  * Upload a file buffer to Vercel Blob
@@ -27,17 +54,27 @@ const MAX_FILE_SIZE = 5 * 1024 * 1024;
  * @param {string} filename - Original filename
  * @param {string} mimetype - File mimetype
  * @param {string} folder - Folder path (e.g., 'products', 'categories')
+ * @param {object} [options]
+ * @param {'image'|'document'|'video'} [options.kind]  what is being stored; inferred from the mimetype when absent
+ * @param {number} [options.maxBytes]  a caller's own ceiling (hero images may be larger than the default)
  * @returns {Promise<string>} - Public URL of uploaded file
  */
-async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads') {
+async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads', options = {}) {
+  const kind = options && KINDS[options.kind] ? options.kind : inferKind(mimetype);
+  const rule = KINDS[kind];
+
   // Validate file type
-  if (!ALLOWED_IMAGE_MIME_TYPES.has(mimetype)) {
-    throw new Error('Only image files are allowed');
+  if (!rule.mimes.has(mimetype)) {
+    throw new Error(rule.refusal);
   }
 
   // Validate file size
-  if (buffer.length > MAX_FILE_SIZE) {
-    throw new Error(`File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`);
+  if (!buffer || !buffer.length) {
+    throw new Error('The uploaded file is empty');
+  }
+  const maxBytes = options && Number(options.maxBytes) > 0 ? Number(options.maxBytes) : rule.maxBytes;
+  if (buffer.length > maxBytes) {
+    throw new Error(`File size exceeds ${Math.round(maxBytes / MB)}MB limit`);
   }
 
   // Generate unique filename
@@ -60,13 +97,14 @@ async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads') {
  * Upload multiple files to Vercel Blob
  * @param {Array} files - Array of file objects from multer
  * @param {string} folder - Folder path
+ * @param {object} [options] - passed through to uploadToBlob (kind, maxBytes)
  * @returns {Promise<string[]>} - Array of public URLs
  */
-async function uploadMultipleToBlob(files, folder = 'uploads') {
+async function uploadMultipleToBlob(files, folder = 'uploads', options = {}) {
   if (!files || !files.length) return [];
 
   const uploadPromises = files.map(file =>
-    uploadToBlob(file.buffer, file.originalname, file.mimetype, folder)
+    uploadToBlob(file.buffer, file.originalname, file.mimetype, folder, options)
   );
 
   return Promise.all(uploadPromises);
@@ -270,6 +308,11 @@ module.exports = {
   processProductFiles,
   processUploadedFiles,
   uploadScreenshot,
+  inferKind,
   ALLOWED_IMAGE_MIME_TYPES,
+  ALLOWED_DOCUMENT_MIME_TYPES,
+  ALLOWED_VIDEO_MIME_TYPES,
   MAX_FILE_SIZE,
+  MAX_DOCUMENT_SIZE,
+  MAX_VIDEO_SIZE,
 };

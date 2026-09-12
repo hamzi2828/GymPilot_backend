@@ -1,9 +1,23 @@
-// createAdmin.js - Create admin user
+// createAdmin.js - Create (or promote) an administrator account for one gym
+//
+//   node Seeder/createAdmin.js --gym <slug> --email owner@yourgym.com --password '<strong password>'
+//       [--first-name Ada] [--last-name Lovelace]
+//
+// or with the credentials in the environment:
+//
+//   ADMIN_EMAIL=owner@yourgym.com ADMIN_PASSWORD='<strong password>' node Seeder/createAdmin.js --gym <slug>
+//
+// There is no built-in account and no default password: the script refuses
+// to run without an email and a password of its own, and never prints the
+// password back. An account that already exists is promoted to admin rather
+// than recreated, and its password is left alone.
 
 const mongoose = require('mongoose');
-const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const bcrypt = require('bcryptjs');
+const { argValue, enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const User = require('../src/models/user');
+
+const MIN_PASSWORD_LENGTH = 8;
 
 // Database connection
 async function connectDB() {
@@ -19,18 +33,30 @@ async function connectDB() {
   }
 }
 
-// Admin credentials
-const adminData = {
-  firstName: 'Admin',
-  lastName: 'User',
-  email: 'admin@gymwear.com',
-  password: 'admin123',
-  provider: 'local',
-  role: 'admin',
-  isActive: true,
-};
+// The credentials come from the command line or the environment, never from
+// this file.
+function readCredentials() {
+  require('dotenv').config();
+  const email = String(argValue('--email') || process.env.ADMIN_EMAIL || '').toLowerCase().trim();
+  const password = String(argValue('--password') || process.env.ADMIN_PASSWORD || '');
+  const firstName = String(argValue('--first-name') || 'Admin').trim();
+  const lastName = String(argValue('--last-name') || 'User').trim();
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    console.error('An email address is required: pass --email <address> or set ADMIN_EMAIL.');
+    process.exit(1);
+  }
+  if (!password || password.length < MIN_PASSWORD_LENGTH) {
+    console.error(`A password of at least ${MIN_PASSWORD_LENGTH} characters is required: pass --password <value> or set ADMIN_PASSWORD.`);
+    process.exit(1);
+  }
+
+  return { email, password, firstName, lastName };
+}
 
 async function createAdmin() {
+  const { email, password, firstName, lastName } = readCredentials();
+
   try {
     await connectDB();
     // Every gym has its own database: --gym <slug> picks which one.
@@ -38,12 +64,15 @@ async function createAdmin() {
     console.log('Creating admin user...\n');
 
     // Check if admin already exists
-    const existingAdmin = await User.findOne({ email: adminData.email });
+    const existingAdmin = await User.findOne({ email });
     if (existingAdmin) {
-      console.log(`Admin already exists: ${existingAdmin.email} (role: ${existingAdmin.role})`);
+      console.log(`Account already exists: ${existingAdmin.email} (role: ${existingAdmin.role})`);
       // Update role to admin if not already
       if (existingAdmin.role !== 'admin') {
         existingAdmin.role = 'admin';
+        // Path-level, not a whole-object replace: the pay details are not
+        // loaded by default and must not be blanked by this promotion.
+        existingAdmin.set('employment.isStaff', true);
         await existingAdmin.save();
         console.log('Updated existing user role to admin.');
       }
@@ -52,18 +81,24 @@ async function createAdmin() {
 
     // Hash password
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(adminData.password, salt);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
     const admin = new User({
-      ...adminData,
+      firstName,
+      lastName,
+      email,
       password: hashedPassword,
+      provider: 'local',
+      role: 'admin',
+      isActive: true,
+      employment: { isStaff: true }
     });
 
     await admin.save();
     console.log('Admin user created successfully!');
-    console.log(`  Email: ${adminData.email}`);
-    console.log(`  Password: ${adminData.password}`);
-    console.log(`  Role: ${adminData.role}`);
+    console.log(`  Email: ${email}`);
+    console.log('  Role: admin');
+    console.log('  Password: (the one you supplied; it is not shown here)');
   } catch (error) {
     console.error('Error creating admin:', error.message);
   } finally {

@@ -82,3 +82,29 @@ module.exports = function requirePermission(tab, level) {
     }
   };
 };
+
+// "Any staff account" rather than "a tab at a level": for reads every
+// employee needs regardless of which tabs they hold, such as the list of role
+// names behind a picker. Same live-account lookup as the gate above; staff is
+// anything that is not a plain member, exactly as twoFactorService reads it.
+module.exports.requireStaff = async function requireStaff(req, res, next) {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ message: 'Authorization required' });
+    }
+
+    const account = await User.findById(req.user.id).select('role isActive employment.isStaff').lean();
+    if (!account) return res.status(401).json({ message: 'Account no longer exists' });
+    if (account.isActive === false) return res.status(403).json({ message: 'Account is disabled' });
+
+    const isStaff = account.role === ADMIN_SLUG || account.role !== 'user' || !!(account.employment && account.employment.isStaff);
+    if (!isStaff) {
+      return res.status(403).json({ message: 'This is for staff accounts.' });
+    }
+
+    req.roleSlug = account.role;
+    return next();
+  } catch (error) {
+    return res.status(500).json({ message: 'Permission check failed', error: error.message });
+  }
+};

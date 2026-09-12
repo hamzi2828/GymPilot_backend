@@ -1,6 +1,28 @@
 const BlogHero = require('../models/blogHero');
-const fs = require('fs').promises;
-const path = require('path');
+
+// Uploads go to Vercel Blob when it is configured (multer then keeps the file
+// in memory and `.filename` is never set), to the local uploads folder
+// otherwise -- the same branch settingsController and homeSectionController
+// take.
+const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
+let blobUpload;
+if (USE_BLOB_STORAGE) {
+  blobUpload = require('../helper/blobUpload');
+}
+
+async function storedImageUrl(file, folder = 'blog-hero') {
+  if (USE_BLOB_STORAGE && blobUpload) {
+    return blobUpload.uploadToBlob(file.buffer, file.originalname, file.mimetype, folder);
+  }
+  return `/uploads/${file.filename}`;
+}
+
+// The buttons are optional (the model supplies defaults); only what the form
+// actually sent is written, so an omitted field keeps its default or its
+// current value rather than being blanked.
+const BUTTON_FIELDS = ['primaryButtonText', 'primaryButtonLink', 'secondaryButtonText', 'secondaryButtonLink'];
+
+const readBoolean = (value) => value === true || value === 'true' || value === 1 || value === '1';
 
 const blogHeroController = {
   // GET /blog-hero/active - Get active hero section (public)
@@ -81,48 +103,37 @@ const blogHeroController = {
   // POST /blog-hero - Create new hero (admin)
   createHero: async (req, res) => {
     try {
-      const {
-        title,
-        subtitle,
-        backgroundImage,
-        primaryButtonText,
-        primaryButtonLink,
-        secondaryButtonText,
-        secondaryButtonLink,
-        isActive,
-        sortOrder
-      } = req.body;
+      const { title, subtitle, backgroundImage, isActive, sortOrder } = req.body;
 
       // Handle uploaded file
       let finalBackgroundImage = backgroundImage;
       const uploadedFile = req.files?.backgroundImage?.[0];
 
       if (uploadedFile) {
-        // Generate image URL for uploaded file
-        finalBackgroundImage = `/uploads/${uploadedFile.filename}`;
+        finalBackgroundImage = await storedImageUrl(uploadedFile);
       }
 
-      // Validate required fields
-      if (!title || !subtitle || !finalBackgroundImage || !primaryButtonText ||
-          !primaryButtonLink || !secondaryButtonText || !secondaryButtonLink) {
+      // Validate required fields: the headline, the line under it and the
+      // photo. The buttons are optional.
+      if (!title || !subtitle || !finalBackgroundImage) {
         return res.status(400).json({
           success: false,
-          message: 'All fields are required including background image'
+          message: 'A title, a subtitle and a background image are required'
         });
       }
 
       // Create new hero
       const heroData = {
-        title: title.trim(),
-        subtitle: subtitle.trim(),
-        backgroundImage: finalBackgroundImage.trim(),
-        primaryButtonText: primaryButtonText.trim(),
-        primaryButtonLink: primaryButtonLink.trim(),
-        secondaryButtonText: secondaryButtonText.trim(),
-        secondaryButtonLink: secondaryButtonLink.trim(),
-        isActive: Boolean(isActive),
-        sortOrder: sortOrder || 0
+        title: String(title).trim(),
+        subtitle: String(subtitle).trim(),
+        backgroundImage: String(finalBackgroundImage).trim(),
+        // Forms send 'false' as a string, which Boolean() would read as true.
+        isActive: readBoolean(isActive),
+        sortOrder: Number(sortOrder) || 0
       };
+      for (const field of BUTTON_FIELDS) {
+        if (req.body[field] !== undefined) heroData[field] = String(req.body[field]).trim();
+      }
 
       const hero = new BlogHero(heroData);
       await hero.save();
@@ -168,8 +179,7 @@ const blogHeroController = {
       // Handle uploaded file
       const uploadedFile = req.files?.backgroundImage?.[0];
       if (uploadedFile) {
-        // Generate image URL for uploaded file
-        updateData.backgroundImage = `/uploads/${uploadedFile.filename}`;
+        updateData.backgroundImage = await storedImageUrl(uploadedFile);
       }
 
       // Update fields if provided
@@ -298,7 +308,7 @@ const blogHeroController = {
       }
 
       // Generate image URL
-      const imageUrl = `/uploads/${imageFile.filename}`;
+      const imageUrl = await storedImageUrl(imageFile);
 
       return res.status(200).json({
         success: true,

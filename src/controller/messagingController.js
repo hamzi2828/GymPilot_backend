@@ -20,6 +20,7 @@ const notify = require('../services/gymNotifications');
 const { sendEmail } = require('../services/emailService');
 const { shell } = require('../templates/gymEmails');
 const { automationSettings, runAutomations } = require('../services/automations');
+const T = require('../attendance/services/timeUtils');
 
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
@@ -71,8 +72,16 @@ function readAudience(input = {}) {
   };
 }
 
-function readDate(value) {
+// `edge` says which end of the day a bare 'YYYY-MM-DD' means: an announcement
+// that "ends 30 Sep" must still be up at 23:59 on the 30th at the gym, and
+// one that "starts 1 Oct" goes up at the gym's midnight, whatever zone the
+// server runs in. A full timestamp is taken as it is.
+function readDate(value, edge = 'start') {
   if (value === undefined || value === null || value === '') return null;
+  if (T.isDateOnly(value)) {
+    const key = String(value).trim();
+    return edge === 'end' ? T.lastMomentOfLocalDay(key) : T.startOfLocalDay(key);
+  }
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
 }
@@ -345,7 +354,15 @@ module.exports = {
       if (!isId(req.params.id)) return fail(res, 400, 'Invalid campaign id');
       const doc = await Campaign.findById(req.params.id);
       if (!doc) return fail(res, 404, 'Campaign not found');
-      if (doc.status === 'sent') return fail(res, 409, 'This campaign has already been sent');
+      const body = req.body || {};
+
+      // Retry: a campaign that ended 'failed', or one that was 'sent' with
+      // failures when the panel asks for { retry: true }. Either way it is a
+      // fresh pass over the people the last pass could not reach -- and only
+      // them; everyone already reached is left alone.
+      const wantsRetry = body.retry === true || body.retry === 'true';
+      const retrying = doc.status === 'failed' || (doc.status === 'sent' && wantsRetry && (doc.stats && doc.stats.failed) > 0);
+      if (doc.status === 'sent' && !retrying) return fail(res, 409, 'This campaign has already been sent');
       if (doc.channel === 'email' && !String(doc.subject || '').trim()) return fail(res, 400, 'An email campaign needs a subject');
       if (!String(doc.body || '').trim()) return fail(res, 400, 'The message is empty');
 
@@ -356,9 +373,16 @@ module.exports = {
         doc.status = 'sending';
         doc.startedAt = new Date();
         doc.stats = { targeted: 0, sent: 0, failed: 0, skipped: 0 };
+      } else if (retrying) {
+        // startedAt marks the start of THIS pass: sendBatch treats failures
+        // older than it as retryable and failures newer than it as done, so
+        // an address that fails again is not hammered until the pass ends.
+        doc.status = 'sending';
+        doc.startedAt = new Date();
+        doc.stats.failed = 0;
       }
-      const limit = Math.min(200, Math.max(1, parseInt((req.body || {}).limit, 10) || 50));
-      const result = await campaigns.sendBatch(doc, { limit, actorId: actorId(req) });
+      const limit = Math.min(200, Math.max(1, parseInt(body.limit, 10) || 50));
+      const result = await campaigns.sendBatch(doc, { limit, actorId: actorId(req), since: doc.startedAt });
 
       doc.stats.targeted = result.targeted;
       doc.stats.sent += result.sent;
@@ -412,8 +436,8 @@ module.exports = {
         tone: ['info', 'success', 'warning'].includes(body.tone) ? body.tone : 'info',
         url: String(body.url || '').trim(),
         urlLabel: String(body.urlLabel || body.url_label || '').trim(),
-        startsAt: readDate(body.startsAt || body.starts_at),
-        endsAt: readDate(body.endsAt || body.ends_at),
+        startsAt: readDate(body.startsAt || body.starts_at, 'start'),
+        endsAt: readDate(body.endsAt || body.ends_at, 'end'),
         isActive: body.isActive === undefined && body.is_active === undefined ? true : !!(body.isActive ?? body.is_active),
         createdBy: actorId(req)
       });
@@ -437,8 +461,8 @@ module.exports = {
       if (body.tone !== undefined && ['info', 'success', 'warning'].includes(body.tone)) doc.tone = body.tone;
       if (body.url !== undefined) doc.url = String(body.url).trim();
       if (body.urlLabel !== undefined || body.url_label !== undefined) doc.urlLabel = String(body.urlLabel ?? body.url_label ?? '').trim();
-      if (body.startsAt !== undefined || body.starts_at !== undefined) doc.startsAt = readDate(body.startsAt ?? body.starts_at);
-      if (body.endsAt !== undefined || body.ends_at !== undefined) doc.endsAt = readDate(body.endsAt ?? body.ends_at);
+      if (body.startsAt !== undefined || body.starts_at !== undefined) doc.startsAt = readDate(body.startsAt ?? body.starts_at, 'start');
+      if (body.endsAt !== undefined || body.ends_at !== undefined) doc.endsAt = readDate(body.endsAt ?? body.ends_at, 'end');
       if (body.isActive !== undefined || body.is_active !== undefined) doc.isActive = !!(body.isActive ?? body.is_active);
       await doc.save();
       return res.json({ success: true, data: announcementView(doc) });

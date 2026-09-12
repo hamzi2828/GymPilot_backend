@@ -1,8 +1,9 @@
 // src/middleware/rateLimit.js
 //
-// Request ceilings for the endpoints where guessing is the attack: sign-in,
-// and the password-reset flow that can be used both to guess and to spam
-// somebody's inbox.
+// Request ceilings for the endpoints where guessing or flooding is the
+// attack: sign-in, the password-reset flow that can be used both to guess and
+// to spam somebody's inbox, and the public forms (contact, newsletter, blog
+// views) that a script would otherwise fill with junk.
 //
 // Two things to know about this in production.
 //
@@ -19,25 +20,20 @@
 
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
-// Behind Vercel's proxy the socket address is the proxy, so the client is read
-// from the forwarded header. express-rate-limit refuses to guess about this,
-// hence the explicit resolver rather than trusting `req.ip`.
+// Every limiter is keyed on `req.ip`. index.js sets `trust proxy` to 1, so
+// behind Vercel's proxy express has already taken the client address from the
+// LAST hop of X-Forwarded-For -- the one the proxy wrote -- and a caller
+// cannot pick their own bucket by sending the header themselves. Reading the
+// raw header here would hand that choice straight back to them.
 //
 // The address is then passed through ipKeyGenerator, which is what makes the
 // limit hold for IPv6. A single IPv6 customer is routinely handed a whole /64
 // -- eighteen quintillion addresses -- so keying on the exact address would
 // let one attacker take a fresh identity per request and never hit the limit.
-// The helper collapses the address to its /64 prefix, which is the unit that
-// actually corresponds to one subscriber.
+// The helper collapses the address to the prefix that corresponds to one
+// subscriber.
 function clientKey(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  const raw =
-    typeof forwarded === 'string' && forwarded.length
-      // First entry is the original client; the rest are proxies it passed
-      // through.
-      ? forwarded.split(',')[0].trim()
-      : req.ip || req.socket?.remoteAddress || '';
-
+  const raw = (req && (req.ip || (req.socket && req.socket.remoteAddress))) || '';
   return raw ? ipKeyGenerator(raw) : 'unknown';
 }
 
@@ -55,13 +51,16 @@ const SHARED = {
   }
 };
 
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+
 /**
  * Sign-in. Counts only failures, so somebody legitimately signing in and out
  * all day at the front desk is never locked out by their own success.
  */
 const loginLimiter = rateLimit({
   ...SHARED,
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * MINUTE,
   max: 20,
   skipSuccessfulRequests: true,
   message: 'Too many sign-in attempts. Please wait a few minutes and try again.'
@@ -74,7 +73,7 @@ const loginLimiter = rateLimit({
  */
 const passwordResetLimiter = rateLimit({
   ...SHARED,
-  windowMs: 60 * 60 * 1000,
+  windowMs: HOUR,
   max: 5,
   message: 'Too many password reset requests. Please wait an hour and try again.'
 });
@@ -87,7 +86,7 @@ const passwordResetLimiter = rateLimit({
  */
 const passwordResetConfirmLimiter = rateLimit({
   ...SHARED,
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * MINUTE,
   max: 10,
   message: 'Too many attempts. Please request a fresh reset link.'
 });
@@ -97,9 +96,20 @@ const passwordResetConfirmLimiter = rateLimit({
  */
 const signupLimiter = rateLimit({
   ...SHARED,
-  windowMs: 60 * 60 * 1000,
+  windowMs: HOUR,
   max: 10,
   message: 'Too many accounts created from this address. Please try again later.'
+});
+
+/**
+ * Google sign-in with an ID token. A token is verified with Google on every
+ * call, so this is both a guessing surface and a way to burn quota.
+ */
+const googleLoginLimiter = rateLimit({
+  ...SHARED,
+  windowMs: 15 * MINUTE,
+  max: 20,
+  message: 'Too many sign-in attempts. Please wait a few minutes and try again.'
 });
 
 /**
@@ -109,7 +119,7 @@ const signupLimiter = rateLimit({
  */
 const desktopLoginLimiter = rateLimit({
   ...SHARED,
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * MINUTE,
   max: 40,
   skipSuccessfulRequests: true,
   message: 'Too many sign-in attempts from this location. Please wait a few minutes.'
@@ -121,16 +131,78 @@ const desktopLoginLimiter = rateLimit({
  */
 const demoRequestLimiter = rateLimit({
   ...SHARED,
-  windowMs: 60 * 60 * 1000,
+  windowMs: HOUR,
   max: 5,
   message: 'Too many requests from this address. Please try again later or email us directly.'
 });
 
+/**
+ * The contact form. Every submission lands in the gym's enquiries and may be
+ * emailed on; ten an hour is a busy visitor, not a script.
+ */
+const contactLimiter = rateLimit({
+  ...SHARED,
+  windowMs: HOUR,
+  max: 10,
+  message: 'Too many messages from this address. Please try again later.'
+});
+
+/**
+ * Newsletter subscribe and unsubscribe. Shared between the two so a script
+ * cannot flip one address on and off all day.
+ */
+const newsletterLimiter = rateLimit({
+  ...SHARED,
+  windowMs: HOUR,
+  max: 10,
+  message: 'Too many newsletter requests from this address. Please try again later.'
+});
+
+/**
+ * Blog view counts. Unauthenticated and writes to the database, so it is the
+ * cheapest way to inflate a number or to keep a serverless instance busy.
+ */
+const blogViewLimiter = rateLimit({
+  ...SHARED,
+  windowMs: HOUR,
+  max: 60,
+  message: 'Too many requests. Please try again later.'
+});
+
+/**
+ * Generic ceiling for unauthenticated writes elsewhere (bank-transfer proof,
+ * public registrations and the like). Exported for the gymfolio router.
+ */
+const publicWriteLimiter = rateLimit({
+  ...SHARED,
+  windowMs: 15 * MINUTE,
+  max: 20,
+  message: 'Too many requests from this address. Please wait a few minutes and try again.'
+});
+
+/**
+ * Payment starts and confirmations. Each one talks to Stripe; a loop here
+ * costs the gym money and Stripe patience. Exported for the gymfolio router.
+ */
+const paymentLimiter = rateLimit({
+  ...SHARED,
+  windowMs: 15 * MINUTE,
+  max: 30,
+  message: 'Too many payment attempts. Please wait a few minutes and try again.'
+});
+
 module.exports = {
+  clientKey,
   loginLimiter,
   passwordResetLimiter,
   passwordResetConfirmLimiter,
   signupLimiter,
+  googleLoginLimiter,
   desktopLoginLimiter,
-  demoRequestLimiter
+  demoRequestLimiter,
+  contactLimiter,
+  newsletterLimiter,
+  blogViewLimiter,
+  publicWriteLimiter,
+  paymentLimiter
 };

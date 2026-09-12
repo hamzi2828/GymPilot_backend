@@ -20,6 +20,20 @@ function isMasked(value) {
   return typeof value === 'string' && value.includes(MASK_CHAR);
 }
 
+// What to store for a secret field on save. An absent field or the untouched
+// masked preview keeps the stored value. A value that still contains mask
+// characters but is not the preview -- a paste that landed after the dots --
+// cannot be what the admin meant, so the stored value is kept and a warning
+// says so, rather than silently saving dots as a password.
+function resolveSecret(label, incoming, existing, warnings, { trim = true } = {}) {
+  if (incoming === undefined) return existing || '';
+  if (!isMasked(incoming)) return trim ? String(incoming).trim() : String(incoming);
+  if (incoming !== maskSecret(existing)) {
+    warnings.push(`${label} was not changed because the masked value was edited. Clear the field and paste the whole value to replace it.`);
+  }
+  return existing || '';
+}
+
 // Every response that returns the settings document must go through this.
 // Logo upload/remove and reset all echo the document back, and without this
 // they leaked the SMTP password and Stripe secrets in cleartext.
@@ -56,11 +70,11 @@ function sanitizeSettings(doc) {
 }
 
 // Nested messaging settings: every field optional, secrets kept when the
-// admin sends back the masked value.
-function mergeMessaging(existing = {}, incoming = {}) {
+// admin sends back the masked value (see resolveSecret).
+function mergeMessaging(existing = {}, incoming = {}, warnings = []) {
   const ex = existing || {};
   const text = (obj, key, fallback = '') => (obj && obj[key] !== undefined ? String(obj[key]).trim() : fallback);
-  const secret = (obj, key, fallback = '') => (obj && obj[key] !== undefined && !isMasked(obj[key]) ? String(obj[key]).trim() : fallback);
+  const secret = (obj, key, fallback = '', label = key) => resolveSecret(label, obj && obj[key], fallback, warnings);
   const bool = (obj, key, fallback) => (obj && obj[key] !== undefined ? Boolean(obj[key]) : fallback);
   const sms = ex.sms || {};
   const wa = ex.whatsapp || {};
@@ -80,20 +94,20 @@ function mergeMessaging(existing = {}, incoming = {}) {
     sms: {
       provider: inSms.provider !== undefined ? provider(inSms.provider, ['none', 'twilio', 'http']) : sms.provider || 'none',
       accountSid: text(inSms, 'accountSid', sms.accountSid || ''),
-      authToken: secret(inSms, 'authToken', sms.authToken || ''),
+      authToken: secret(inSms, 'authToken', sms.authToken || '', 'The SMS auth token'),
       from: text(inSms, 'from', sms.from || ''),
       webhookUrl: text(inSms, 'webhookUrl', sms.webhookUrl || ''),
-      webhookToken: secret(inSms, 'webhookToken', sms.webhookToken || '')
+      webhookToken: secret(inSms, 'webhookToken', sms.webhookToken || '', 'The SMS webhook token')
     },
     whatsapp: {
       provider: inWa.provider !== undefined ? provider(inWa.provider, ['none', 'twilio', 'meta', 'http']) : wa.provider || 'none',
       accountSid: text(inWa, 'accountSid', wa.accountSid || ''),
-      authToken: secret(inWa, 'authToken', wa.authToken || ''),
+      authToken: secret(inWa, 'authToken', wa.authToken || '', 'The WhatsApp auth token'),
       from: text(inWa, 'from', wa.from || ''),
       phoneNumberId: text(inWa, 'phoneNumberId', wa.phoneNumberId || ''),
-      accessToken: secret(inWa, 'accessToken', wa.accessToken || ''),
+      accessToken: secret(inWa, 'accessToken', wa.accessToken || '', 'The WhatsApp access token'),
       webhookUrl: text(inWa, 'webhookUrl', wa.webhookUrl || ''),
-      webhookToken: secret(inWa, 'webhookToken', wa.webhookToken || '')
+      webhookToken: secret(inWa, 'webhookToken', wa.webhookToken || '', 'The WhatsApp webhook token')
     },
     push: {
       // Keys are only ever made by POST /settings/push/keys; the switch and
@@ -176,7 +190,13 @@ const settingsController = {
         seo: settings.seo || {},
         maps: settings.maps || {},
         openingHours: settings.openingHours || [],
-        locale: settings.locale || { language: 'en', direction: 'ltr' }
+        locale: settings.locale || { language: 'en', direction: 'ltr' },
+        // What the sign-in page may offer. Google needs all three values for
+        // the redirect flow to complete, so a half-configured deployment
+        // shows no button rather than a button that ends in an error page.
+        features: {
+          googleSignIn: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REDIRECT_URI)
+        }
       };
 
       return res.status(200).json({
@@ -242,10 +262,66 @@ const settingsController = {
     }
   },
 
+  // POST /settings/stripe/test { secretKey? } - prove a key reaches a Stripe account
+  //
+  // Tests the key the admin has just typed, or -- when the field holds the
+  // masked preview -- the stored one, so "Test connection" answers for what
+  // will actually be saved. Stripe's own wording on failure ("Invalid API
+  // Key provided: sk_test_***") is the useful part; nothing about our server
+  // is, so it is passed through as the message.
+  testStripe: async (req, res) => {
+    try {
+      const Stripe = require('stripe');
+      const { stripeConfig, API_VERSION } = require('../services/stripeClient');
+
+      const typed = req.body && req.body.secretKey !== undefined && !isMasked(req.body.secretKey)
+        ? String(req.body.secretKey).trim()
+        : '';
+      let secretKey = typed;
+      if (!secretKey) {
+        const settings = await Settings.getSettings();
+        secretKey = (settings.stripe && settings.stripe.secretKey) || '';
+      }
+      if (!secretKey) {
+        // The gym a single-gym deployment defaults to may run on the
+        // environment's keys (services/stripeClient.js).
+        secretKey = (await stripeConfig()).secretKey || '';
+      }
+      if (!secretKey) {
+        return res.status(400).json({ success: false, message: 'Enter a Stripe secret key, or save one first.' });
+      }
+
+      const stripe = new Stripe(secretKey, { apiVersion: API_VERSION });
+      const account = await stripe.accounts.retrieve();
+      const accountName =
+        (account.settings && account.settings.dashboard && account.settings.dashboard.display_name) ||
+        (account.business_profile && account.business_profile.name) ||
+        account.email ||
+        account.id;
+
+      return res.status(200).json({
+        success: true,
+        message: `Connected to ${accountName}`,
+        data: { accountId: account.id, accountName, chargesEnabled: !!account.charges_enabled }
+      });
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: (error && error.message) || 'Stripe rejected the key'
+      });
+    }
+  },
+
   // PUT /settings - Update settings
   updateSettings: async (req, res) => {
     try {
-      console.log('Request body:', req.body);
+      // Things the admin should know about a save that otherwise succeeded:
+      // a secret that was kept because its masked preview came back edited.
+      const warnings = [];
+
+      // The stored document, read once and only when a branch needs it.
+      let currentDoc = null;
+      const currentSettings = async () => currentDoc || (currentDoc = await Settings.getSettings());
 
       const {
         siteName,
@@ -342,8 +418,11 @@ const settingsController = {
         };
       }
       if (messaging && typeof messaging === 'object') {
-        const currentDoc = await Settings.findOne({ isActive: true }).select('messaging').lean();
-        updateData.messaging = mergeMessaging((currentDoc && currentDoc.messaging) || {}, messaging);
+        // Read through getSettings() (not .lean()) so the stored tokens come
+        // back opened: the masked-preview comparison in resolveSecret has to
+        // see the same plaintext the admin's screen was masked from.
+        const current = await currentSettings();
+        updateData.messaging = mergeMessaging((current && current.messaging) || {}, messaging, warnings);
       }
       if (seo && typeof seo === 'object') {
         updateData.seo = {
@@ -394,64 +473,60 @@ const settingsController = {
       // Nested credential groups are merged field by field so that a masked
       // value (one the admin never retyped) leaves the stored secret intact.
       if (stripe && typeof stripe === 'object') {
-        const current = await Settings.getSettings();
+        const current = await currentSettings();
         const existing = current.stripe || {};
         updateData.stripe = {
           publishableKey:
             stripe.publishableKey !== undefined
               ? String(stripe.publishableKey).trim()
               : existing.publishableKey || '',
-          secretKey:
-            stripe.secretKey !== undefined && !isMasked(stripe.secretKey)
-              ? String(stripe.secretKey).trim()
-              : existing.secretKey || '',
-          webhookSecret:
-            stripe.webhookSecret !== undefined && !isMasked(stripe.webhookSecret)
-              ? String(stripe.webhookSecret).trim()
-              : existing.webhookSecret || '',
+          secretKey: resolveSecret('The Stripe secret key', stripe.secretKey, existing.secretKey, warnings),
+          webhookSecret: resolveSecret('The Stripe webhook secret', stripe.webhookSecret, existing.webhookSecret, warnings),
           enabled: stripe.enabled !== undefined ? Boolean(stripe.enabled) : !!existing.enabled,
         };
       }
 
       if (smtp && typeof smtp === 'object') {
-        const current = await Settings.getSettings();
+        const current = await currentSettings();
         const existing = current.smtp || {};
         updateData.smtp = {
           host: smtp.host !== undefined ? String(smtp.host).trim() : existing.host || '',
           port: smtp.port !== undefined ? Number(smtp.port) || 587 : existing.port || 587,
           secure: smtp.secure !== undefined ? Boolean(smtp.secure) : !!existing.secure,
           user: smtp.user !== undefined ? String(smtp.user).trim() : existing.user || '',
-          pass:
-            smtp.pass !== undefined && !isMasked(smtp.pass)
-              ? String(smtp.pass)
-              : existing.pass || '',
+          pass: resolveSecret('The SMTP password', smtp.pass, existing.pass, warnings, { trim: false }),
           fromName: smtp.fromName !== undefined ? String(smtp.fromName).trim() : existing.fromName || '',
           fromEmail: smtp.fromEmail !== undefined ? String(smtp.fromEmail).trim() : existing.fromEmail || '',
         };
       }
-      if (siteName !== undefined) updateData.siteName = siteName.trim();
-      if (siteUrl !== undefined) updateData.siteUrl = siteUrl.trim();
-      if (mobileNumber !== undefined) updateData.mobileNumber = mobileNumber.trim();
-      if (address !== undefined) updateData.address = address.trim();
+      if (siteName !== undefined) updateData.siteName = String(siteName ?? '').trim();
+      if (siteUrl !== undefined) updateData.siteUrl = String(siteUrl ?? '').trim();
+      if (mobileNumber !== undefined) updateData.mobileNumber = String(mobileNumber ?? '').trim();
+      if (address !== undefined) updateData.address = String(address ?? '').trim();
       if (timezone !== undefined) updateData.timezone = timezone;
       if (dateFormat !== undefined) updateData.dateFormat = dateFormat;
       if (emailNotifications !== undefined) updateData.emailNotifications = Boolean(emailNotifications);
       if (marketingEmails !== undefined) updateData.marketingEmails = Boolean(marketingEmails);
       if (securityAlerts !== undefined) updateData.securityAlerts = Boolean(securityAlerts);
       if (twoFactorAuth !== undefined) {
+        const enabling = twoFactorAuth === true || twoFactorAuth === 'true';
+        const current = await currentSettings();
         // Requiring an emailed code for every staff sign-in is only safe once
-        // email provably works; otherwise the whole staff is locked out.
-        if (Boolean(twoFactorAuth)) {
+        // email provably works; otherwise the whole staff is locked out. The
+        // check runs when the switch is being turned ON -- not on every save
+        // of a page that happens to carry the setting, which used to make an
+        // SMTP hiccup block unrelated edits.
+        if (enabling && !current.twoFactorAuth) {
           const { verifyConnection } = require('../services/emailService');
-          const smtp = await verifyConnection();
-          if (!smtp.ok) {
+          const smtpCheck = await verifyConnection();
+          if (!smtpCheck.ok) {
             return res.status(409).json({
               success: false,
-              message: `Fix outgoing email before requiring two-factor sign-in (SMTP check failed: ${smtp.error}).`
+              message: `Fix outgoing email before requiring two-factor sign-in (SMTP check failed: ${smtpCheck.error}).`
             });
           }
         }
-        updateData.twoFactorAuth = Boolean(twoFactorAuth);
+        updateData.twoFactorAuth = enabling;
       }
       if (currency !== undefined) {
         const code = String(currency || '').toUpperCase().trim();
@@ -484,7 +559,7 @@ const settingsController = {
         }
       }
       if (taxRate !== undefined) updateData.taxRate = Number(taxRate);
-      if (topSliderText !== undefined) updateData.topSliderText = topSliderText.trim();
+      if (topSliderText !== undefined) updateData.topSliderText = String(topSliderText ?? '').trim();
       if (logoWidth !== undefined) updateData.logoWidth = Number(logoWidth);
       if (logoHeight !== undefined) updateData.logoHeight = Number(logoHeight);
       if (footerLogoWidth !== undefined) updateData.footerLogoWidth = Number(footerLogoWidth);
@@ -508,7 +583,7 @@ const settingsController = {
       if (Object.keys(updateData).length === 0) {
         if (timezoneChanged) {
           const settings = await Settings.getSettings();
-          return res.status(200).json({ success: true, message: 'Settings updated successfully', data: sanitizeSettings(settings) });
+          return res.status(200).json({ success: true, message: 'Settings updated successfully', data: sanitizeSettings(settings), warnings });
         }
         return res.status(400).json({
           success: false,
@@ -521,8 +596,9 @@ const settingsController = {
 
       return res.status(200).json({
         success: true,
-        message: 'Settings updated successfully',
-        data: sanitizeSettings(updatedSettings)
+        message: warnings.length ? 'Settings updated, with warnings' : 'Settings updated successfully',
+        data: sanitizeSettings(updatedSettings),
+        warnings
       });
     } catch (error) {
       console.error('Update settings error:', error);

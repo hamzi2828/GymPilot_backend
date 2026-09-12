@@ -118,60 +118,106 @@ async function ensureUserStaffCode(user) {
 
 // The membership behind a member, as it stands right now.
 //
+// Answers one of: active | frozen | past_due | pending | suspended |
+// cancelled | expired | none. Everything downstream (the punch verdict, the
+// attendance snapshot, class bookings, the member's own account page) reads
+// this shape, so a new answer here must also be storable there -- see the
+// status enums on attendanceModel and classBookingModel.
+//
 // Guest checkouts are matched by email as well as by userId: someone can buy
 // a package before ever creating an account, then sign up with the same
 // address, and the front desk should still see the package they paid for.
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Cancelled and suspended orders are decisions somebody made; neither counts
+// as live however far off its end date is.
+const NOT_LIVE = new Set(['cancelled', 'suspended']);
+
+function isLiveOrder(order, now) {
+  return (
+    !NOT_LIVE.has(order.status) &&
+    order.subscription &&
+    order.subscription.endDate &&
+    new Date(order.subscription.endDate) >= now &&
+    // A pack with nothing left on it is not a live membership.
+    !(order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total)
+  );
+}
+
+function describeOrder(order, status, now) {
+  const endDate = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
+
+  // Whole days, rounded up: with 6 hours left a member should be told "1 day",
+  // not "0".
+  const daysLeft = endDate ? Math.ceil((endDate.getTime() - now.getTime()) / DAY_MS) : null;
+
+  const sessionsLeft =
+    order.sessions && order.sessions.total > 0 ? Math.max(0, order.sessions.total - (order.sessions.used || 0)) : null;
+
+  return {
+    status,
+    orderId: order._id,
+    packageName: (order.packageDetails && order.packageDetails.name) || 'Membership',
+    endDate,
+    daysLeft,
+    sessionsLeft
+  };
+}
+
 async function membershipFor(user) {
   const emailMatch = user.email ? String(user.email).toLowerCase().trim() : null;
   const ownerClauses = [{ userId: user._id }];
   if (emailMatch) ownerClauses.push({ 'customerInfo.email': emailMatch });
 
-  const paidOrders = await PackageOrder.find({
-    $or: ownerClauses,
-    'payment.status': 'paid'
-  })
-    .sort({ 'subscription.endDate': -1, createdAt: -1 })
-    .limit(5)
-    .lean();
-
-  if (!paidOrders.length) {
-    return { status: 'none', orderId: null, packageName: '', endDate: null, daysLeft: null };
-  }
+  const [paidOrders, unpaid] = await Promise.all([
+    PackageOrder.find({ $or: ownerClauses, 'payment.status': 'paid' })
+      .sort({ 'subscription.endDate': -1, createdAt: -1 })
+      .limit(5)
+      .lean(),
+    // The newest order still waiting for its money -- a bank transfer that
+    // has been sent (or promised) but not yet confirmed by staff, or a desk
+    // sale recorded as unpaid. Card checkouts are left out: an abandoned
+    // Stripe session is not a payment anybody is waiting on.
+    PackageOrder.findOne({
+      $or: ownerClauses,
+      'payment.status': { $in: ['pending', 'processing'] },
+      'payment.method': { $ne: 'stripe' },
+      status: 'pending'
+    })
+      .sort({ createdAt: -1 })
+      .lean()
+  ]);
 
   const now = new Date();
-  const live = paidOrders.find(
-    (order) =>
-      order.status !== 'cancelled' &&
-      order.subscription &&
-      order.subscription.endDate &&
-      new Date(order.subscription.endDate) >= now &&
-      // A pack with nothing left on it is not a live membership.
-      !(order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total)
-  );
 
-  const chosen = live || paidOrders[0];
-  const endDate = chosen.subscription && chosen.subscription.endDate
-    ? new Date(chosen.subscription.endDate)
-    : null;
+  // A paid membership that is in date wins over everything else: a renewal
+  // sitting in the bank-transfer queue must not hide the term that is
+  // running right now.
+  const live = paidOrders.find((order) => isLiveOrder(order, now));
+  if (live) {
+    const status = live.status === 'frozen' ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
+    return describeOrder(live, status, now);
+  }
 
-  // Whole days, rounded up: with 6 hours left a member should be told "1 day",
-  // not "0".
-  const daysLeft = endDate
-    ? Math.ceil((endDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
-    : null;
+  // Nothing live. If the most recent thing that happened is an order awaiting
+  // payment confirmation, that is what the desk needs to hear.
+  const latestPaid = paidOrders[0] || null;
+  if (unpaid && (!latestPaid || new Date(unpaid.createdAt) >= new Date(latestPaid.createdAt))) {
+    return describeOrder(unpaid, 'pending', now);
+  }
 
-  const sessionsLeft =
-    chosen.sessions && chosen.sessions.total > 0 ? Math.max(0, chosen.sessions.total - (chosen.sessions.used || 0)) : null;
+  if (!latestPaid) {
+    return { status: 'none', orderId: null, packageName: '', endDate: null, daysLeft: null, sessionsLeft: null };
+  }
 
-  return {
-    // frozen and past_due are reported as such so the desk can say so.
-    status: live ? (chosen.status === 'frozen' ? 'frozen' : chosen.status === 'past_due' ? 'past_due' : 'active') : 'expired',
-    orderId: chosen._id,
-    packageName: (chosen.packageDetails && chosen.packageDetails.name) || 'Membership',
-    endDate,
-    daysLeft,
-    sessionsLeft
-  };
+  // Suspended is reported as such whatever the dates say: it is a decision,
+  // not a lapse. A cancelled order that still has days on it is "cancelled,
+  // N days left", never "expired N days ago".
+  if (latestPaid.status === 'suspended') return describeOrder(latestPaid, 'suspended', now);
+  const ended = !latestPaid.subscription || !latestPaid.subscription.endDate || new Date(latestPaid.subscription.endDate) < now;
+  if (latestPaid.status === 'cancelled' && !ended) return describeOrder(latestPaid, 'cancelled', now);
+
+  return describeOrder(latestPaid, 'expired', now);
 }
 
 // Everyone who could put a finger on the reader, for the enrolment picker and

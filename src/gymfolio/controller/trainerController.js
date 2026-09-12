@@ -9,6 +9,30 @@ if (USE_BLOB_STORAGE) {
   blobUpload = require('../../helper/blobUpload');
 }
 
+// The route takes the photo through uploadFields([{ name: 'image' }, ...]),
+// which fills req.files.image, not req.file. req.file is still honoured for
+// any caller mounted with a single-file upload.
+function uploadedPhoto(req) {
+  if (req.files && Array.isArray(req.files.image) && req.files.image[0]) return req.files.image[0];
+  return req.file || null;
+}
+
+async function storePhoto(file) {
+  if (USE_BLOB_STORAGE && blobUpload) {
+    return blobUpload.uploadToBlob(file.buffer, file.originalname, file.mimetype, 'trainers');
+  }
+  return `/uploads/${file.filename}`;
+}
+
+// The multipart form sends 'true'/'false'; JSON sends booleans. Anything
+// else is "not provided".
+function readBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
 // Get all active trainers (public endpoint)
 const getActiveTrainers = async (req, res) => {
   try {
@@ -194,15 +218,8 @@ const createTrainer = async (req, res) => {
 
     // Handle image upload
     let imageUrl = req.body.image;
-    if (req.file) {
-      if (USE_BLOB_STORAGE && blobUpload) {
-        imageUrl = await blobUpload.uploadToBlob(
-          req.file.buffer, req.file.originalname, req.file.mimetype, 'trainers'
-        );
-      } else {
-        imageUrl = `/uploads/${req.file.filename}`;
-      }
-    }
+    const photo = uploadedPhoto(req);
+    if (photo) imageUrl = await storePhoto(photo);
 
     // Parse JSON fields if they're strings
     let parsedSpecialties = specialties;
@@ -334,15 +351,8 @@ const updateTrainer = async (req, res) => {
 
     // Handle image upload
     let imageUrl = req.body.image || trainer.image;
-    if (req.file) {
-      if (USE_BLOB_STORAGE && blobUpload) {
-        imageUrl = await blobUpload.uploadToBlob(
-          req.file.buffer, req.file.originalname, req.file.mimetype, 'trainers'
-        );
-      } else {
-        imageUrl = `/uploads/${req.file.filename}`;
-      }
-    }
+    const photo = uploadedPhoto(req);
+    if (photo) imageUrl = await storePhoto(photo);
 
     // Parse JSON fields if they're strings
     let parsedSpecialties = specialties || trainer.specialties;
@@ -433,31 +443,29 @@ const updateTrainer = async (req, res) => {
   }
 };
 
-// Toggle trainer active status
+// Toggle trainer active status.
+//
+// An explicit boolean in the body is honoured; a body with none (what the
+// admin page's toggle button sends) flips the current value.
 const toggleTrainerStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { isActive } = req.body;
+    const wanted = readBoolean((req.body || {}).isActive);
 
-    if (typeof isActive !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isActive must be a boolean value'
-      });
-    }
-
-    const trainer = await Trainer.findByIdAndUpdate(
-      id,
-      { isActive },
-      { new: true, runValidators: true }
-    );
-
-    if (!trainer) {
+    const current = await Trainer.findById(id).select('isActive');
+    if (!current) {
       return res.status(404).json({
         success: false,
         message: 'Trainer not found'
       });
     }
+
+    const isActive = wanted === null ? !current.isActive : wanted;
+    const trainer = await Trainer.findByIdAndUpdate(
+      id,
+      { isActive },
+      { new: true, runValidators: true }
+    );
 
     res.status(200).json({
       success: true,
@@ -474,31 +482,26 @@ const toggleTrainerStatus = async (req, res) => {
   }
 };
 
-// Toggle trainer featured status
+// Toggle trainer featured status (same rule as toggleTrainerStatus).
 const toggleTrainerFeatured = async (req, res) => {
   try {
     const { id } = req.params;
-    const { isFeatured } = req.body;
+    const wanted = readBoolean((req.body || {}).isFeatured);
 
-    if (typeof isFeatured !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isFeatured must be a boolean value'
-      });
-    }
-
-    const trainer = await Trainer.findByIdAndUpdate(
-      id,
-      { isFeatured },
-      { new: true, runValidators: true }
-    );
-
-    if (!trainer) {
+    const current = await Trainer.findById(id).select('isFeatured');
+    if (!current) {
       return res.status(404).json({
         success: false,
         message: 'Trainer not found'
       });
     }
+
+    const isFeatured = wanted === null ? !current.isFeatured : wanted;
+    const trainer = await Trainer.findByIdAndUpdate(
+      id,
+      { isFeatured },
+      { new: true, runValidators: true }
+    );
 
     res.status(200).json({
       success: true,

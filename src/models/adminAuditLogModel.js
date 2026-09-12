@@ -34,13 +34,20 @@ adminAuditLogSchema.index({ createdAt: -1 });
 
 const SECRET_KEY = /pass|secret|token|key|otp|code$|cvv|card/i;
 
-/** A body that is safe to keep: no credentials, nothing huge. */
+// Personal data that has no business in an audit trail: the trail records
+// THAT a member's health details or bank account were edited, never what
+// they were changed to. Matched at every depth of the body.
+const PII_KEY = /medical|health|parq|par_q|condition|allerg|injur|emergency|notes|document|dob|dateOfBirth|address|nationalId|passport|iban|account/i;
+
+/** A body that is safe to keep: no credentials, no personal data, nothing huge. */
 function summariseBody(body) {
   if (!body || typeof body !== 'object') return null;
   const out = {};
   for (const [key, value] of Object.entries(body).slice(0, 40)) {
     if (SECRET_KEY.test(key)) {
       out[key] = '[hidden]';
+    } else if (PII_KEY.test(key)) {
+      out[key] = '[redacted]';
     } else if (value !== null && typeof value === 'object') {
       out[key] = Array.isArray(value) ? `[${value.length} items]` : summariseBody(value);
     } else {

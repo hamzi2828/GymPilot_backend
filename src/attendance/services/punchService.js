@@ -60,44 +60,86 @@ function punchContext(operator, device, method) {
 // Verdicts
 // ---------------------------------------------------------------------------
 
+// Warnings keyed by verdict, shared by the verdict itself and by the
+// check-out receipt, which re-derives its warning from the STORED verdict so
+// both halves of a visit say the same thing.
+const WARNINGS = {
+  membership_frozen: 'MEMBERSHIP FROZEN — resume it at the desk before training',
+  membership_past_due: 'CARD PAYMENT FAILED — ask the member to update their card',
+  membership_pending: 'PAYMENT NOT CONFIRMED — check the transfer before admitting',
+  membership_suspended: 'MEMBERSHIP SUSPENDED — speak to the manager before training',
+  membership_cancelled: 'MEMBERSHIP CANCELLED — renew before next visit',
+  membership_expired: 'MEMBERSHIP EXPIRED — renew before next visit',
+  membership_none: 'NO ACTIVE MEMBERSHIP — sell a package at the desk'
+};
+
+function daysLeftOf(membership) {
+  const days = membership.daysLeft;
+  return days === null || days === undefined || Number.isNaN(Number(days)) ? null : Number(days);
+}
+
 // Three tiers, not two. A membership with four days left is not a problem yet
 // and must not be shown as one -- but it is the last chance to renew it
 // face-to-face, so it gets its own amber state between green and red rather
 // than being lumped in with either.
+//
+// Every status membershipFor can answer has a verdict here, each with its own
+// status key. The desktop app paints keys it does not know in grey, so a new
+// key is always safe to add; a status that fell through to "no package on
+// file" was not.
 function membershipVerdict(membership) {
-  if (membership.status === 'frozen') {
-    return {
-      status: 'membership_frozen',
-      label: 'Frozen',
-      warning: 'MEMBERSHIP FROZEN — resume it at the desk before training'
-    };
+  const m = membership || {};
+  const days = daysLeftOf(m);
+
+  if (m.status === 'frozen') {
+    return { status: 'membership_frozen', label: 'Frozen', warning: WARNINGS.membership_frozen };
   }
 
-  if (membership.status === 'past_due') {
-    return {
-      status: 'membership_past_due',
-      label: 'Payment overdue',
-      warning: 'CARD PAYMENT FAILED — ask the member to update their card'
-    };
+  if (m.status === 'past_due') {
+    return { status: 'membership_past_due', label: 'Payment overdue', warning: WARNINGS.membership_past_due };
   }
 
-  if (membership.status === 'active') {
-    const days = membership.daysLeft;
+  if (m.status === 'pending') {
+    return { status: 'membership_pending', label: 'Awaiting payment confirmation', warning: WARNINGS.membership_pending };
+  }
 
-    if (membership.sessionsLeft !== null && membership.sessionsLeft !== undefined) {
+  if (m.status === 'suspended') {
+    return { status: 'membership_suspended', label: 'Suspended', warning: WARNINGS.membership_suspended };
+  }
+
+  if (m.status === 'cancelled') {
+    // Cancelled but not yet ended: the member keeps what they paid for until
+    // the end date, and the desk should say how long that is.
+    if (days !== null && days > 0) {
       return {
-        status: membership.sessionsLeft <= 2 ? 'membership_expiring' : 'membership_active',
-        label: `${plural(membership.sessionsLeft, 'session')} left`,
-        warning: membership.sessionsLeft <= 2 ? `${plural(membership.sessionsLeft, 'SESSION').toUpperCase()} LEFT — offer a new pack` : null
+        status: 'membership_cancelled',
+        label: `Cancelled · ${plural(days, 'day')} left`,
+        warning: `CANCELLED — ACCESS ENDS IN ${plural(days, 'DAY').toUpperCase()}`
+      };
+    }
+    return { status: 'membership_cancelled', label: 'Cancelled', warning: WARNINGS.membership_cancelled };
+  }
+
+  if (m.status === 'active' || m.status === 'expiring') {
+    if (m.sessionsLeft !== null && m.sessionsLeft !== undefined) {
+      const low = m.sessionsLeft <= 2 || m.status === 'expiring';
+      return {
+        status: low ? 'membership_expiring' : 'membership_active',
+        label: `${plural(m.sessionsLeft, 'session')} left`,
+        warning: low ? `${plural(m.sessionsLeft, 'SESSION').toUpperCase()} LEFT — offer a new pack` : null
       };
     }
 
     if (days !== null && days <= EXPIRY_WARNING_DAYS) {
       return {
         status: 'membership_expiring',
-        label: `${plural(days, 'day')} left`,
-        warning: `EXPIRES IN ${plural(days, 'DAY').toUpperCase()} — offer a renewal`
+        label: `${plural(Math.max(0, days), 'day')} left`,
+        warning: `EXPIRES IN ${plural(Math.max(0, days), 'DAY').toUpperCase()} — offer a renewal`
       };
+    }
+
+    if (m.status === 'expiring') {
+      return { status: 'membership_expiring', label: 'Expiring soon', warning: 'EXPIRES SOON — offer a renewal' };
     }
 
     return {
@@ -107,22 +149,18 @@ function membershipVerdict(membership) {
     };
   }
 
-  if (membership.status === 'expired') {
+  if (m.status === 'expired') {
     // daysLeft is negative once the end date has passed, so its magnitude is
     // how long ago that was.
-    const ago = membership.daysLeft === null ? null : Math.abs(membership.daysLeft);
+    const ago = days === null ? null : Math.abs(days);
     return {
       status: 'membership_expired',
       label: ago === null ? 'Expired' : `Expired ${plural(ago, 'day')} ago`,
-      warning: 'MEMBERSHIP EXPIRED — renew before next visit'
+      warning: WARNINGS.membership_expired
     };
   }
 
-  return {
-    status: 'membership_none',
-    label: 'No package on file',
-    warning: 'NO ACTIVE MEMBERSHIP — sell a package at the desk'
-  };
+  return { status: 'membership_none', label: 'No package on file', warning: WARNINGS.membership_none };
 }
 
 // The trainer's rostered hours for the weekday this shift is filed under.
@@ -251,13 +289,19 @@ async function buildReceipt(record, action, person) {
   rows.push(row('Day', `${T.weekdayNameForKey(record.shiftDate)}, ${T.dateLabelForKey(record.shiftDate)}`));
 
   if (record.personType === 'member') {
-    rows.push(row('Package', record.membership.packageName || 'None'));
-    rows.push(
-      row(
-        record.membership.status === 'expired' ? 'Expired' : 'Valid to',
-        record.membership.endDate ? T.dateLabel(record.membership.endDate) : '—'
-      )
-    );
+    const m = record.membership || {};
+    rows.push(row('Package', m.packageName || 'None'));
+    if (m.status === 'pending') {
+      // No dates to show yet: the term starts when staff confirm the money.
+      rows.push(row('Payment', 'Awaiting payment confirmation'));
+    } else {
+      rows.push(
+        row(
+          m.status === 'expired' ? 'Expired' : m.status === 'cancelled' ? 'Access until' : 'Valid to',
+          m.endDate ? T.dateLabel(m.endDate) : '—'
+        )
+      );
+    }
   } else {
     rows.push(
       row(
@@ -460,18 +504,21 @@ function membershipWarningFor(record) {
   if (!record.membership) return null;
 
   switch (record.status) {
-    case 'membership_expired':
-      return 'MEMBERSHIP EXPIRED — renew before next visit';
-    case 'membership_none':
-      return 'NO ACTIVE MEMBERSHIP — sell a package at the desk';
     case 'membership_expiring': {
       const end = record.membership.endDate;
       if (!end) return 'EXPIRES SOON — offer a renewal';
       const days = Math.max(0, Math.ceil((new Date(end).getTime() - Date.now()) / 864e5));
       return `EXPIRES IN ${plural(days, 'DAY').toUpperCase()} — offer a renewal`;
     }
+    case 'membership_cancelled': {
+      const end = record.membership.endDate;
+      const days = end ? Math.ceil((new Date(end).getTime() - Date.now()) / 864e5) : 0;
+      return days > 0 ? `CANCELLED — ACCESS ENDS IN ${plural(days, 'DAY').toUpperCase()}` : WARNINGS.membership_cancelled;
+    }
     default:
-      return null;
+      // Frozen, past due, pending, suspended, expired, none -- or nothing at
+      // all for a plain active visit.
+      return WARNINGS[record.status] || null;
   }
 }
 

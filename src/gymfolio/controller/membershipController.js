@@ -251,6 +251,31 @@ module.exports = {
     }
   },
 
+  // POST /api/gymfolio/package-orders/:id/refund  (staff)  { amount?, reason }
+  //
+  // Card payments are refunded at Stripe (the whole charge unless an amount
+  // is given); cash, bank and terminal payments are recorded as refunded.
+  // Either way the membership ends now and any subscription behind it stops.
+  refund: async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await PackageOrder.findById(req.params.id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const body = req.body || {};
+      await service.refund(order, { amount: body.amount, reason: body.reason, by: userId(req) });
+      const money = `${String(order.payment.currency || '').toUpperCase()} ${Number(order.refund.amount || 0).toFixed(2)}`;
+      return res.json({
+        success: true,
+        message: order.refund.stripeRefundId
+          ? `${money} refunded to the card; the membership has been cancelled.`
+          : `${money} recorded as refunded; the membership has been cancelled.`,
+        data: order
+      });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
   // POST /api/gymfolio/package-orders/:id/use-session  (staff)  { note }
   useSession: async (req, res) => {
     try {

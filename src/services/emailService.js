@@ -7,14 +7,22 @@ const nodemailer = require('nodemailer');
 const transporters = new Map(); // config fingerprint -> transporter
 const MAX_TRANSPORTERS = 100;
 
+// The name on the sender line when the gym has not set one: the gym's own
+// name from Settings → General. The env value is only the fallback a
+// single-gym deployment used before every gym had its own settings.
+const DEFAULT_SITE_NAME = 'GymPilot';
+
 /**
  * Resolves SMTP config, preferring the admin-managed settings document and
  * falling back to environment variables when it has not been configured.
+ * `siteName` rides along so the sender line names the gym in context.
  */
 async function resolveSmtpConfig() {
+  let siteName = process.env.SITE_NAME || DEFAULT_SITE_NAME;
   try {
     const Settings = require('../models/settings');
     const settings = await Settings.getSettings();
+    if (settings && String(settings.siteName || '').trim()) siteName = String(settings.siteName).trim();
     const s = settings && settings.smtp;
     if (s && s.host && s.user && s.pass) {
       return {
@@ -23,9 +31,10 @@ async function resolveSmtpConfig() {
         secure: s.secure !== undefined ? !!s.secure : Number(s.port) === 465,
         user: s.user,
         pass: s.pass,
+        siteName,
         from:
           s.fromEmail
-            ? `"${s.fromName || process.env.SITE_NAME || 'GymPilot'}" <${s.fromEmail}>`
+            ? `"${s.fromName || siteName}" <${s.fromEmail}>`
             : null,
       };
     }
@@ -38,6 +47,7 @@ async function resolveSmtpConfig() {
     secure: process.env.SMTP_PORT === '465',
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
+    siteName,
     from: process.env.EMAIL_FROM || null,
   };
 }
@@ -81,7 +91,7 @@ async function sendEmail(to, subject, html, options = {}) {
     const { transport, cfg } = await initTransporter();
 
     const mailOptions = {
-      from: cfg.from || `"${process.env.SITE_NAME || 'GymPilot'}" <${cfg.user}>`,
+      from: cfg.from || `"${cfg.siteName || DEFAULT_SITE_NAME}" <${cfg.user}>`,
       to,
       subject,
       html,

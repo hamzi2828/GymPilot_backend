@@ -88,6 +88,17 @@ function shape(asset, now = new Date()) {
   };
 }
 
+// A text field from the body, or what is stored when the body leaves it out.
+function text(value, current) {
+  return value !== undefined ? String(value || '').trim() : current || '';
+}
+
+// A non-negative number from the body, or what is stored when it is absent
+// (an empty string from a cleared input counts as zero, as it always did).
+function amount(value, current) {
+  return value !== undefined ? Math.max(0, Number(value) || 0) : Number(current) || 0;
+}
+
 async function readBody(body, existing = {}) {
   if (!body.name || !String(body.name).trim()) throw new Error('Give the asset a name');
 
@@ -101,25 +112,29 @@ async function readBody(body, existing = {}) {
     unitCost: Math.max(0, Number(body.unitCost) || 0),
     currency: String(body.currency || existing.currency || (await L.baseCurrency())).toUpperCase(),
     purchasedOn,
-    supplier: String(body.supplier || '').trim(),
-    invoiceNo: String(body.invoiceNo || '').trim(),
-    serialNumber: String(body.serialNumber || '').trim(),
-    warrantyUntil: readDate(body.warrantyUntil, null),
-    location: String(body.location || '').trim(),
-    condition: CONDITIONS.includes(body.condition) ? body.condition : 'good',
-    status: STATUSES.includes(body.status) ? body.status : 'active',
+    // Partial-update semantics for the optional details: a body that does
+    // not mention a field keeps what is stored, and '' or null clears it --
+    // so editing the location cannot wipe the warranty date or invoice
+    // number the operator typed in last month.
+    supplier: text(body.supplier, existing.supplier),
+    invoiceNo: text(body.invoiceNo, existing.invoiceNo),
+    serialNumber: text(body.serialNumber, existing.serialNumber),
+    warrantyUntil: body.warrantyUntil !== undefined ? readDate(body.warrantyUntil, null) : existing.warrantyUntil || null,
+    location: text(body.location, existing.location),
+    condition: CONDITIONS.includes(body.condition) ? body.condition : existing.condition || 'good',
+    status: STATUSES.includes(body.status) ? body.status : existing.status || 'active',
     // Defaulted from the category rather than left at zero: an asset with no
     // useful life never depreciates, which quietly overstates what the gym owns.
     usefulLifeYears:
       body.usefulLifeYears !== undefined && body.usefulLifeYears !== ''
         ? Math.max(0, Number(body.usefulLifeYears) || 0)
         : existing.usefulLifeYears || Asset.DEFAULT_LIFE_YEARS[category] || 5,
-    salvageValue: Math.max(0, Number(body.salvageValue) || 0),
-    serviceIntervalDays: Math.max(0, Number(body.serviceIntervalDays) || 0),
+    salvageValue: amount(body.salvageValue, existing.salvageValue),
+    serviceIntervalDays: amount(body.serviceIntervalDays, existing.serviceIntervalDays),
     lastServicedOn: readDate(body.lastServicedOn, existing.lastServicedOn || null),
     disposedOn: readDate(body.disposedOn, existing.disposedOn || null),
-    disposalAmount: Math.max(0, Number(body.disposalAmount) || 0),
-    notes: String(body.notes || '').trim()
+    disposalAmount: amount(body.disposalAmount, existing.disposalAmount),
+    notes: text(body.notes, existing.notes)
   };
 
   // The next service is derived from the last one plus the interval, so an

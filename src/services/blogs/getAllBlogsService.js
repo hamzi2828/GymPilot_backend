@@ -70,9 +70,12 @@ const getAllBlogsService = async (queryParams = {}) => {
       authorName: blog.author 
         ? blog.author.name
         : 'Unknown',
-      excerpt: blog.content 
-        ? blog.content.replace(/<[^>]*>?/gm, '').slice(0, 150) + '...' 
-        : '',
+      // The stored summary when the editor wrote one, else the first lines.
+      excerpt: blog.excerpt
+        ? blog.excerpt
+        : blog.content
+          ? blog.content.replace(/<[^>]*>?/gm, '').slice(0, 150) + '...'
+          : '',
       readingTime: calculateReadingTime(blog.content || '')
     }));
     

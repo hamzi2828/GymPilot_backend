@@ -3,13 +3,9 @@ const path = require('path');
 const Blog = require('../../models/blogModel');
 const BlogCategory = require(path.resolve(__dirname, '../../models/BlogCategory'));
 const mongoose = require('mongoose');
-
-// Check if Vercel Blob is configured
-const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
-let blobUpload;
-if (USE_BLOB_STORAGE) {
-  blobUpload = require('../../helper/blobUpload');
-}
+// The same form helpers the create path uses, so an edit form is read the
+// same way as a create form.
+const { normaliseCategoryId, readBoolean, urlOrNull, storeUpload } = require('./createBlogService');
 
 /**
  * Update an existing blog post
@@ -34,16 +30,20 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
     const {
       title,
       content,
-      categoryId,
       authorId, // Add authorId
       status,
       slug,
       tags,
+      excerpt,
       metaTitle,
       metaDescription,
       metaKeywords,
       metaSchema
     } = updateData;
+    // An edit form hands the category back as the populated object it was
+    // given; only the id is wanted.
+    const categoryId = normaliseCategoryId(updateData.categoryId);
+    const featuredInput = updateData.isFeatured !== undefined ? updateData.isFeatured : updateData.featured;
 
     // Validate category if provided
     if (categoryId) {
@@ -106,32 +106,28 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
     const updateObject = {};
     
     // Core fields
-    if (title !== undefined) updateObject.title = title.trim();
-    if (content !== undefined) updateObject.content = content.trim();
-    if (categoryId !== undefined) updateObject.categoryId = new mongoose.Types.ObjectId(categoryId);
+    if (title !== undefined) updateObject.title = String(title).trim();
+    if (content !== undefined) updateObject.content = String(content).trim();
+    if (categoryId) updateObject.categoryId = new mongoose.Types.ObjectId(categoryId);
     if (authorId !== undefined) updateObject.author = authorId ? new mongoose.Types.ObjectId(authorId) : null;
     if (status !== undefined) updateObject.status = status;
     if (slug !== undefined) updateObject.slug = slug;
     if (parsedTags !== undefined) updateObject.tags = parsedTags;
-    
-    // File uploads
+    if (featuredInput !== undefined) updateObject.featured = readBoolean(featuredInput);
+    if (excerpt !== undefined) updateObject.excerpt = typeof excerpt === 'string' ? excerpt.trim().slice(0, 500) : '';
+
+    // File uploads. Without a file, a URL string (from the generic media
+    // upload, or the existing value echoed back) is accepted for either.
     if (imageFile) {
-      if (USE_BLOB_STORAGE && blobUpload) {
-        updateObject.image = await blobUpload.uploadToBlob(
-          imageFile.buffer, imageFile.originalname, imageFile.mimetype, 'blogs/images'
-        );
-      } else {
-        updateObject.image = `/uploads/${imageFile.filename}`;
-      }
+      updateObject.image = await storeUpload(imageFile, 'blogs/images');
+    } else if (typeof updateData.image === 'string' && updateData.image.trim() && updateData.image.trim() !== existingBlog.image) {
+      updateObject.image = urlOrNull(updateData.image);
     }
     if (thumbnailFile) {
-      if (USE_BLOB_STORAGE && blobUpload) {
-        updateObject.thumbnail = await blobUpload.uploadToBlob(
-          thumbnailFile.buffer, thumbnailFile.originalname, thumbnailFile.mimetype, 'blogs/thumbnails'
-        );
-      } else {
-        updateObject.thumbnail = `/uploads/${thumbnailFile.filename}`;
-      }
+      updateObject.thumbnail = await storeUpload(thumbnailFile, 'blogs/thumbnails');
+    } else if (typeof updateData.thumbnail === 'string' && updateData.thumbnail.trim() !== (existingBlog.thumbnail || '')) {
+      // An empty string clears the thumbnail; a new URL replaces it.
+      updateObject.thumbnail = urlOrNull(updateData.thumbnail);
     }
     
     // SEO fields

@@ -256,6 +256,20 @@ app.get('/api/tenant', (req, res) => {
   });
 });
 
+// The gym's own subscription to GymPilot: what it is on, and the Stripe
+// checkout / billing portal to pay for it. Past the tenant gate on purpose --
+// the gym asking is the one whose site the request came from.
+const billingRoutes = require('./src/platform/routes/billingRoutes');
+app.use('/api/billing', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({ success: false, message: 'Database connection failed. Please try again in a moment.' });
+  }
+}, billingRoutes);
+
 app.use('/api', async (req, res, next) => {
   try {
     await ensureConnection();
@@ -423,17 +437,20 @@ async function runRemindersRoute(req, res) {
   try {
     await ensureConnection();
     const { runDaily } = require('./src/services/reminderJobs');
-    const { forEachActiveGym, rollSubscriptionStatuses } = require('./src/platform/jobs');
+    const { forEachActiveGym, rollSubscriptionStatuses, sendOwnerBillingNotices } = require('./src/platform/jobs');
     // ?dryRun=1 to check what it would do without sending anything.
     const dryRun = req.query.dryRun === '1';
 
     // Platform first: a gym whose subscription lapsed today is skipped by the
     // per-gym loop below rather than emailed one last time.
     const subscriptions = await rollSubscriptionStatuses({ dryRun });
+    // Then the owners: trial ending, payment overdue, access ended -- each
+    // notice once, after the statuses above have settled.
+    const notices = await sendOwnerBillingNotices({ dryRun });
     // Then every gym, each inside its own database.
     const gyms = await forEachActiveGym(() => runDaily({ dryRun }));
 
-    return res.json({ success: true, dryRun, subscriptions, gyms });
+    return res.json({ success: true, dryRun, subscriptions, notices, gyms });
   } catch (error) {
     console.error('[jobs] reminders failed:', error);
     return res.status(500).json({ success: false, message: error.message });

@@ -19,6 +19,11 @@ const DEMO_REQUEST_KINDS = ['demo', 'trial'];
 const demoRequestSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true, maxlength: 120 },
+    // Checkout asks for the two halves separately, because that is how the
+    // owner's account inside the gym is created; `name` is kept for the
+    // demo form, which asks for one. Empty on an ordinary demo request.
+    firstName: { type: String, default: '', trim: true, maxlength: 60 },
+    lastName: { type: String, default: '', trim: true, maxlength: 60 },
     email: { type: String, required: true, trim: true, lowercase: true, maxlength: 200, index: true },
     phone: { type: String, default: '', trim: true, maxlength: 40 },
     gymName: { type: String, default: '', trim: true, maxlength: 160 },
@@ -42,6 +47,10 @@ const demoRequestSchema = new mongoose.Schema(
       currency: { type: String, default: '', uppercase: true, trim: true },
       trialDays: { type: Number, default: 0, min: 0 }
     },
+    // Anything about the selection the panel should know before it turns
+    // this into a gym: an add-on left off because it is priced in another
+    // currency than the plan, for one.
+    warnings: { type: [String], default: [] },
 
     status: { type: String, enum: DEMO_REQUEST_STATUSES, default: 'new', index: true },
     notes: { type: String, default: '', trim: true, maxlength: 4000 },

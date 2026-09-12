@@ -95,26 +95,41 @@ async function readBody(body, existing = {}) {
     // was incurred beats leaving a hole that every later report has to guess at.
     paidOn: status === 'paid' ? readDate(body.paidOn, existing.paidOn || incurredOn) : null,
     paymentMethod: METHODS.includes(body.paymentMethod) ? body.paymentMethod : 'cash',
-    vendor: String(body.vendor || '').trim(),
-    reference_no: String(body.referenceNo || body.reference_no || '').trim(),
-    notes: String(body.notes || '').trim(),
+    // Partial-update semantics for the optional fields: a body that does not
+    // mention one leaves what is stored; sending '' or null clears it. An
+    // older client that never knew about the staff or asset link cannot
+    // silently unlink a wage row from its employee.
+    vendor: body.vendor !== undefined ? String(body.vendor || '').trim() : existing.vendor || '',
+    reference_no:
+      body.referenceNo !== undefined || body.reference_no !== undefined
+        ? String(body.referenceNo ?? body.reference_no ?? '').trim()
+        : existing.reference_no || '',
+    notes: body.notes !== undefined ? String(body.notes || '').trim() : existing.notes || '',
     recurring: {
       isRecurring: !!(body.recurring && body.recurring.isRecurring),
       cycle: ['weekly', 'monthly', 'quarterly', 'yearly'].includes(body.recurring && body.recurring.cycle)
         ? body.recurring.cycle
         : 'monthly'
     },
-    assetId: mongoose.Types.ObjectId.isValid(body.assetId) ? body.assetId : null,
-    staffId: mongoose.Types.ObjectId.isValid(body.staffId) ? body.staffId : null
+    assetId:
+      body.assetId !== undefined
+        ? mongoose.Types.ObjectId.isValid(body.assetId) ? body.assetId : null
+        : existing.assetId || null,
+    staffId:
+      body.staffId !== undefined
+        ? mongoose.Types.ObjectId.isValid(body.staffId) ? body.staffId : null
+        : existing.staffId || null
   };
 
   // Snapshotted so a wage row still reads correctly if the account is later
-  // renamed or removed.
-  if (patch.staffId) {
+  // renamed or removed. Re-read only when the link itself was sent.
+  if (!patch.staffId) {
+    patch.staffName = '';
+  } else if (body.staffId !== undefined || !existing.staffName) {
     const staff = await User.findById(patch.staffId).select('firstName lastName').lean();
     patch.staffName = staff ? [staff.firstName, staff.lastName].filter(Boolean).join(' ').trim() : '';
   } else {
-    patch.staffName = '';
+    patch.staffName = existing.staffName;
   }
 
   return patch;

@@ -4,6 +4,7 @@
 // whether it is being served, and the numbers from inside its database.
 
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Gym = require('../models/gymModel');
 const PlatformPlan = require('../models/platformPlanModel');
@@ -18,15 +19,21 @@ const {
   subscriptionFor
 } = require('../provisioning');
 const { collectGymStats } = require('../tenantStats');
-const { runWithTenant } = require('../tenantContext');
+const { runWithTenant, siteUrlFor } = require('../tenantContext');
 const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { invalidatePlanCache } = require('../planLimits');
+const { sendOwnerInvite } = require('../ownerInvite');
 
 const User = require('../../models/user');
 const { ADMIN_SLUG } = require('../../services/roleService');
 
 const MIN_PASSWORD_LENGTH = 8;
 const PAGE_SIZE = 25;
+const AUDIT_LIMIT = 200;
+
+// What the panel keeps beside a subscription it re-writes: what Stripe
+// knows about the gym, and which lifecycle emails already went.
+const STRIPE_FIELDS = ['stripeCustomerId', 'stripeSubscriptionId', 'stripePriceSummary'];
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
@@ -58,17 +65,25 @@ function fail(res, error) {
   return res.status(500).json({ success: false, message: error.message || 'Request failed' });
 }
 
+// The only shape a gym leaves the API in: the connection string is dropped
+// here whether or not the query selected it.
 function publicGym(doc) {
   const gym = doc && doc.toObject ? doc.toObject() : { ...doc };
   if (gym.database) gym.database = { name: gym.database.name };
   gym.id = String(gym._id);
   gym.access_block = Gym.accessBlock(gym);
+  // Where its website is: primary domain, else platform subdomain, else the
+  // env fallback -- the same answer links in its emails get.
+  gym.siteUrl = siteUrlFor(gym);
   return gym;
 }
 
+// With the connection string, so anything that enters the gym's database
+// (stats, administrators, the owner's password) lands on its own cluster
+// when it has one. Never sent onwards as-is: see publicGym.
 async function loadGym(id) {
   if (!mongoose.Types.ObjectId.isValid(id)) return null;
-  return Gym.findById(id);
+  return Gym.findById(id).select('+database.uri');
 }
 
 module.exports = {
@@ -163,6 +178,7 @@ module.exports = {
       const [total, gyms] = await Promise.all([
         Gym.countDocuments(query),
         Gym.find(query)
+          .select('+database.uri')
           .sort({ createdAt: -1 })
           .skip((page - 1) * PAGE_SIZE)
           .limit(PAGE_SIZE)
@@ -189,15 +205,24 @@ module.exports = {
   },
 
   // POST /api/platform/gyms
+  //
+  // Answers 201 with the gym, `ownerInviteSent` (did the owner get their
+  // set-password email) and `warnings` for anything that did not go to plan
+  // but did not stop the gym being created.
   create: async (req, res) => {
     try {
-      const { gym, seeded } = await provisionGym(req.body || {}, { createdBy: req.superAdmin._id });
-      audit(req, 'gym_created', gym, { slug: gym.slug, domains: gym.domains.map((d) => d.host) });
+      const { gym, seeded, warnings, ownerInvite } = await provisionGym(req.body || {}, {
+        createdBy: req.superAdmin._id,
+        enforceDatabasePolicy: true
+      });
+      audit(req, 'gym_created', gym, { slug: gym.slug, domains: gym.domains.map((d) => d.host), ownerInviteSent: !!ownerInvite.sent });
       return res.status(201).json({
         success: true,
         message: `${gym.name} is ready.`,
         data: publicGym(gym),
-        owner: seeded.owner
+        owner: seeded.owner,
+        ownerInviteSent: !!ownerInvite.sent,
+        warnings
       });
     } catch (error) {
       return fail(res, error);
@@ -382,7 +407,7 @@ module.exports = {
         return res.status(error.status || 400).json({ success: false, message: error.message });
       }
 
-      const current = gym.subscription || {};
+      const current = gym.toObject().subscription || {};
       const next = subscriptionFor(plan, {
         status: body.status || current.status,
         billingCycle: body.billingCycle || current.billingCycle,
@@ -394,11 +419,21 @@ module.exports = {
             : undefined,
         currency: body.currency || current.currency,
         startedAt: body.startedAt || current.startedAt,
-        currentPeriodEnd: body.currentPeriodEnd || current.currentPeriodEnd,
+        // An explicit null clears the date (a plan then gets a fresh period
+        // from today); leaving it out keeps what was there.
+        currentPeriodEnd: body.currentPeriodEnd === null ? null : body.currentPeriodEnd || current.currentPeriodEnd,
         notes: body.notes !== undefined ? body.notes : current.notes
       }, addons);
-      if (next.status === 'cancelled' && !current.cancelledAt) next.cancelledAt = new Date();
-      if (next.status !== 'cancelled') next.cancelledAt = null;
+      next.cancelledAt = next.status === 'cancelled' ? current.cancelledAt || new Date() : null;
+
+      // subscriptionFor builds the subscription from scratch; what Stripe
+      // knows about the gym is not its business and is carried over. The
+      // notices start again when the period end moves, so a renewed gym gets
+      // its next round of reminders.
+      for (const key of STRIPE_FIELDS) next[key] = current[key] || '';
+      const periodBefore = current.currentPeriodEnd ? new Date(current.currentPeriodEnd).getTime() : 0;
+      const periodAfter = next.currentPeriodEnd ? new Date(next.currentPeriodEnd).getTime() : 0;
+      next.notices = periodBefore === periodAfter && current.notices ? { ...current.notices } : {};
 
       gym.subscription = next;
       await gym.save();
@@ -422,8 +457,7 @@ module.exports = {
       const gym = await loadGym(req.params.id);
       if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
 
-      const withUri = await Gym.findById(gym._id).select('+database.uri').lean();
-      const admins = await runWithTenant(withUri, () =>
+      const admins = await runWithTenant(gym.toObject(), () =>
         User.find({ role: ADMIN_SLUG })
           .select('firstName lastName email isActive lastLogin createdAt')
           .sort({ createdAt: 1 })
@@ -446,10 +480,14 @@ module.exports = {
     }
   },
 
-  // POST /api/platform/gyms/:id/reset-owner-password   { email?, password }
+  // POST /api/platform/gyms/:id/reset-owner-password   { email?, password? }
   //
-  // For support: a locked-out owner. Sets the password on an existing
-  // administrator inside the gym, or creates one if the address is new.
+  // For support: a locked-out owner, or one who never got their invite.
+  // With a password, sets it on the administrator inside the gym (creating
+  // the account if the address is new). Without one, nothing about the
+  // password changes: the owner is emailed a set-password link instead --
+  // "resend the invite". Either way the link is sent; the answer says
+  // whether it went, and a delivery problem is a warning, not a failure.
   resetOwnerPassword: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
@@ -457,38 +495,59 @@ module.exports = {
 
       const body = req.body || {};
       const email = String(body.email || gym.owner.email || '').toLowerCase().trim();
-      const password = body.password;
+      const password = body.password === undefined || body.password === null || body.password === '' ? null : body.password;
       if (!email) return res.status(400).json({ success: false, message: 'An email address is required' });
-      if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+      if (password !== null && (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH)) {
         return res.status(400).json({ success: false, message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
       }
 
-      const withUri = await Gym.findById(gym._id).select('+database.uri').lean();
-      const result = await runWithTenant(withUri, async () => {
-        const hashed = await bcrypt.hash(password, await bcrypt.genSalt(10));
+      const target = gym.toObject();
+      const result = await runWithTenant(target, async () => {
         let user = await User.findOne({ email });
+        let created = false;
         if (user) {
-          user.password = hashed;
+          if (password !== null) {
+            user.password = await bcrypt.hash(password, await bcrypt.genSalt(10));
+            user.provider = 'local';
+          }
           user.role = ADMIN_SLUG;
           user.isActive = true;
-          user.provider = 'local';
           await user.save();
-          return { created: false, email: user.email };
+        } else {
+          // A new account with no password given gets one nobody knows; the
+          // set-password link is how the owner gets in.
+          const secret = password !== null ? password : crypto.randomBytes(24).toString('base64url');
+          user = await User.create({
+            firstName: gym.owner.firstName || 'Gym',
+            lastName: gym.owner.lastName || 'Owner',
+            email,
+            password: await bcrypt.hash(secret, await bcrypt.genSalt(10)),
+            role: ADMIN_SLUG,
+            isActive: true,
+            employment: { isStaff: true, jobTitle: 'Owner', joinedAt: new Date() }
+          });
+          created = true;
         }
-        user = await User.create({
-          firstName: gym.owner.firstName || 'Gym',
-          lastName: gym.owner.lastName || 'Owner',
-          email,
-          password: hashed,
-          role: ADMIN_SLUG,
-          isActive: true,
-          employment: { isStaff: true, jobTitle: 'Owner', joinedAt: new Date() }
-        });
-        return { created: true, email: user.email };
+
+        let invite;
+        try {
+          invite = await sendOwnerInvite({ gym: target, email: user.email, siteUrl: siteUrlFor(target), resend: true });
+        } catch (error) {
+          invite = { sent: false, error: error.message };
+        }
+        return { created, email: user.email, passwordSet: password !== null, inviteSent: !!invite.sent, inviteError: invite.error || null };
       });
 
-      audit(req, 'gym_owner_password_reset', gym, { email, created: result.created });
-      return res.json({ success: true, data: result });
+      audit(req, password !== null ? 'gym_owner_password_reset' : 'gym_owner_invite_sent', gym, {
+        email,
+        created: result.created,
+        inviteSent: result.inviteSent
+      });
+      return res.json({
+        success: true,
+        data: { created: result.created, email: result.email, passwordSet: result.passwordSet, inviteSent: result.inviteSent },
+        warnings: result.inviteSent ? [] : ['Owner email could not be sent']
+      });
     } catch (error) {
       return fail(res, error);
     }
@@ -510,10 +569,20 @@ module.exports = {
     }
   },
 
-  // GET /api/platform/audit
+  // GET /api/platform/audit?action=&gymId=&limit=
+  //
+  // Newest first. `action` narrows to one kind of entry (the Stripe page
+  // asks for platform_stripe_event), `gymId` to one gym, `limit` caps the
+  // rows (default and maximum 200).
   auditLog: async (req, res) => {
     try {
-      const rows = await PlatformAuditLog.find({}).sort({ createdAt: -1 }).limit(200).lean();
+      const filter = {};
+      const action = String(req.query.action || '').trim();
+      if (action) filter.action = action;
+      if (req.query.gymId && mongoose.Types.ObjectId.isValid(String(req.query.gymId))) filter.gymId = req.query.gymId;
+      const limit = Math.min(AUDIT_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || AUDIT_LIMIT));
+
+      const rows = await PlatformAuditLog.find(filter).sort({ createdAt: -1 }).limit(limit).lean();
       return res.json({ success: true, data: rows.map((r) => ({ ...r, gymId: r.gymId ? String(r.gymId) : null })) });
     } catch (error) {
       return fail(res, error);

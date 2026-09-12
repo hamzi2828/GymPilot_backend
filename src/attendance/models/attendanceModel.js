@@ -70,10 +70,22 @@ const attendanceSchema = new mongoose.Schema(
       orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageOrder', default: null },
       packageName: { type: String, default: '' },
       endDate: { type: Date, default: null },
-      // active   -- paid and in date
-      // expired  -- had a package, its end date has passed
-      // none     -- never bought one
-      status: { type: String, enum: ['active', 'expired', 'none'], default: 'none' }
+      // active    -- paid and in date
+      // expiring  -- paid, in date, ending within the warning window
+      // expired   -- had a package, its end date has passed
+      // none      -- never bought one
+      // frozen / past_due / suspended / cancelled -- the order's own state,
+      //           reported as such so the desk can say so
+      // pending   -- unpaid order awaiting payment confirmation (bank transfer)
+      //
+      // A superset of everything peopleDirectory.membershipFor can answer:
+      // an enum narrower than the source crashed the punch with a validation
+      // error the moment a frozen member walked in.
+      status: {
+        type: String,
+        enum: ['active', 'expiring', 'expired', 'none', 'frozen', 'past_due', 'pending', 'suspended', 'cancelled'],
+        default: 'none'
+      }
     },
 
     // Staff: the rostered shift this punch was judged against, taken from the

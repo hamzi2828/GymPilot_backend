@@ -24,6 +24,14 @@ const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate } = require('../
 const T = require('../attendance/services/timeUtils');
 const { frontendOrigin: tenantOrigin } = require('../platform/tenantContext');
 const { checkLimit } = require('../platform/planLimits');
+const guards = require('../services/roleGuards');
+const { gymSiteName } = require('../services/gymName');
+const { forgetSession } = require('../middleware/auth');
+
+// The live role requirePermission just read, never the token's claim.
+const actorRole = (req) => req.roleSlug || (req.user && req.user.role) || '';
+const actorId = (req) => req.user && (req.user.id || req.user._id);
+const activeAdminCount = () => User.countDocuments({ role: ADMIN_SLUG, isActive: true });
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'intern', 'casual'];
@@ -258,7 +266,12 @@ module.exports = {
         ];
       }
 
-      const staff = await User.find(filter).select('-password').sort({ firstName: 1, lastName: 1 }).lean();
+      // Pay details are `select: false` on the model; this is the screen
+      // that manages them, so they are asked for by name.
+      const staff = await User.find(filter)
+        .select('-password +employment.payroll')
+        .sort({ firstName: 1, lastName: 1 })
+        .lean();
 
       const roles = await Role.find().select('slug name').lean();
       const roleNames = new Map(roles.map((role) => [role.slug, role.name]));
@@ -351,6 +364,10 @@ module.exports = {
         });
       }
 
+      // A manager with `staff: manage` must not be able to mint an admin.
+      const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: roleDoc.slug });
+      if (refusal) return res.status(403).json({ message: refusal });
+
       const existing = await User.findOne({ email: normalisedEmail });
       if (existing) {
         return res.status(409).json({
@@ -388,7 +405,7 @@ module.exports = {
       let emailed = false;
       let emailError = null;
       try {
-        const siteName = process.env.SITE_NAME || 'GymPilot';
+        const siteName = await gymSiteName();
         const loginUrl = `${tenantOrigin()}/authentication`;
         const result = await sendEmail(
           normalisedEmail,
@@ -436,7 +453,10 @@ module.exports = {
         return res.status(400).json({ message: 'Invalid staff id' });
       }
 
-      const user = await User.findById(id);
+      // The whole employment block is rebuilt below from what is stored plus
+      // what was sent, so the pay details (`select: false`) must be loaded
+      // or a form that did not mention them would zero them.
+      const user = await User.findById(id).select('+employment.payroll');
       if (!user) return res.status(404).json({ message: 'Staff member not found' });
 
       const { firstName, lastName, phone, role } = req.body || {};
@@ -451,13 +471,17 @@ module.exports = {
         const next = await Role.findOne({ slug: String(role).toLowerCase().trim() });
         if (!next) return res.status(400).json({ message: 'Unknown role' });
 
-        // Demoting the last administrator would leave the panel unreachable.
-        if (user.role === ADMIN_SLUG && next.slug !== ADMIN_SLUG) {
-          const admins = await User.countDocuments({ role: ADMIN_SLUG, isActive: true });
-          if (admins <= 1) {
-            return res.status(400).json({ message: 'This is the last administrator. Promote someone else first.' });
-          }
-        }
+        // Nobody changes their own role, only an admin grants or revokes the
+        // admin role, and demoting the last administrator would leave the
+        // panel unreachable (services/roleGuards.js).
+        const refusal = guards.roleChangeProblem({
+          actorId: actorId(req),
+          actorRole: actorRole(req),
+          target: user,
+          nextRole: next.slug,
+          activeAdmins: user.role === ADMIN_SLUG ? await activeAdminCount() : null
+        });
+        if (refusal) return res.status(403).json({ message: refusal });
 
         user.role = next.slug;
         roleDoc = next;
@@ -513,12 +537,16 @@ module.exports = {
       const user = await User.findById(id);
       if (!user) return res.status(404).json({ message: 'Staff member not found' });
 
-      if (!isActive && user.role === ADMIN_SLUG) {
-        const admins = await User.countDocuments({ role: ADMIN_SLUG, isActive: true });
-        if (admins <= 1) {
-          return res.status(400).json({ message: 'This is the last active administrator.' });
-        }
-      }
+      // Nobody deactivates themselves, only an admin deactivates an admin, and
+      // the last active administrator stays on (services/roleGuards.js).
+      const refusal = guards.statusChangeProblem({
+        actorId: actorId(req),
+        actorRole: actorRole(req),
+        target: user,
+        isActive,
+        activeAdmins: user.role === ADMIN_SLUG ? await activeAdminCount() : null
+      });
+      if (refusal) return res.status(403).json({ message: refusal });
 
       user.isActive = isActive;
 
@@ -533,6 +561,8 @@ module.exports = {
       }
 
       await user.save();
+      // Out within the request, not when the session cache next expires.
+      if (!isActive) forgetSession(user._id);
 
       return res.json({
         success: true,
@@ -559,12 +589,16 @@ module.exports = {
       const user = await User.findById(id);
       if (!user) return res.status(404).json({ message: 'Staff member not found' });
 
-      if (user.role === ADMIN_SLUG) {
-        const admins = await User.countDocuments({ role: ADMIN_SLUG, isActive: true });
-        if (admins <= 1) {
-          return res.status(400).json({ message: 'This is the last administrator.' });
-        }
-      }
+      // Dropping someone to a member is a role change: the same rules as the
+      // role picker apply (services/roleGuards.js).
+      const refusal = guards.roleChangeProblem({
+        actorId: actorId(req),
+        actorRole: actorRole(req),
+        target: user,
+        nextRole: MEMBER_SLUG,
+        activeAdmins: user.role === ADMIN_SLUG ? await activeAdminCount() : null
+      });
+      if (refusal) return res.status(403).json({ message: refusal });
 
       user.role = MEMBER_SLUG;
       user.employment.isStaff = false;

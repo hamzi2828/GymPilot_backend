@@ -4,9 +4,15 @@
 //
 // Batches, because the API runs as serverless functions with a time limit:
 // a gym with two thousand members cannot be emailed in one request. The
-// panel calls send() until it answers done; each call skips everyone who
-// already has a log row for this campaign, so a retry after a timeout never
-// writes to the same person twice.
+// panel calls send() until it answers done; each call skips everyone this
+// campaign has already reached, so a resumed send never writes to the same
+// person twice.
+//
+// Failures are the exception, deliberately. Within one pass a failed address
+// is not tried again (a dead mailbox would otherwise be retried until the
+// pass never ends), but a failure from an EARLIER pass is exactly what a
+// retry exists to reach. The pass boundary is `since` -- the campaign's
+// startedAt, reset by the controller when a retry begins.
 
 const User = require('../models/user');
 const PackageOrder = require('../gymfolio/models/packageOrderModel');
@@ -107,11 +113,21 @@ function footerFor(recipient, b) {
 /**
  * Sends the next batch. Returns { done, remaining, sent, failed, skipped }.
  */
-async function sendBatch(campaign, { limit = 50, actorId = null } = {}) {
+async function sendBatch(campaign, { limit = 50, actorId = null, since = null } = {}) {
   const b = await notify.brand();
   const channel = campaign.channel || 'email';
   const recipients = await resolveAudience(campaign.audience);
-  const already = new Set(await MessageLog.distinct('to', { campaignId: campaign._id }));
+
+  // Done: everyone reached, plus everyone this pass already tried and could
+  // not reach. Failures from before the pass started are retried.
+  const passStart = since ? new Date(since) : campaign.startedAt ? new Date(campaign.startedAt) : null;
+  const failedFilter = { campaignId: campaign._id, status: 'failed' };
+  if (passStart && !Number.isNaN(passStart.getTime())) failedFilter.createdAt = { $gte: passStart };
+  const [reached, failedThisPass] = await Promise.all([
+    MessageLog.distinct('to', { campaignId: campaign._id, status: 'sent' }),
+    MessageLog.distinct('to', failedFilter)
+  ]);
+  const already = new Set([...reached, ...failedThisPass]);
   const pending = recipients.filter((r) => {
     const address = addressFor(r, channel);
     return !address || !already.has(address);

@@ -9,6 +9,15 @@ const requirePermission = require('../../middleware/requirePermission');
 const optionalAuth = require('../../middleware/optionalAuth');
 const { tenantFromStripeWebhook, tenantFromSlugParam } = require('../../platform/middleware/tenantFromPayload');
 const { uploadSingle, uploadArray, uploadFields } = require('../../helper/upload');
+const rateLimit = require('../../middleware/rateLimit');
+
+// Request ceilings on the endpoints the public can hit without signing in:
+// opening checkouts and validating coupons are the ones a script would hammer.
+// The limiters live in middleware/rateLimit.js; until that file exports them
+// the routes fall through unlimited rather than failing to load.
+const passThrough = (req, res, next) => next();
+const paymentLimiter = rateLimit.paymentLimiter || passThrough;
+const publicWriteLimiter = rateLimit.publicWriteLimiter || passThrough;
 
 const gymClassController = require('../controller/gymClassController');
 const classBookingController = require('../controller/classBookingController');
@@ -153,7 +162,7 @@ router.patch('/packages/:id/order', auth, requirePermission('packages'), package
 router.delete('/packages/:id', auth, requirePermission('packages'), packageController.deletePackage);
 
 /* ---------------------------- Package Registrations -------------------------- */
-router.post('/package-registrations', optionalAuth, packageRegistrationController.createRegistration);
+router.post('/package-registrations', publicWriteLimiter, optionalAuth, packageRegistrationController.createRegistration);
 router.get('/package-registrations', auth, requirePermission('registrations'), packageRegistrationController.getAllRegistrations);
 router.get('/package-registrations/stats', auth, requirePermission('registrations'), packageRegistrationController.getRegistrationStats);
 router.get('/package-registrations/:id', auth, requirePermission('registrations'), packageRegistrationController.getRegistrationById);
@@ -163,7 +172,7 @@ router.delete('/package-registrations/:id', auth, requirePermission('registratio
 /* --------------------------------- Coupons ---------------------------------- */
 // The public check is what the checkout page calls as the member types a
 // code; it reveals only whether the code works and what it takes off.
-router.post('/coupons/validate', optionalAuth, couponController.validate);
+router.post('/coupons/validate', publicWriteLimiter, optionalAuth, couponController.validate);
 router.get('/coupons', auth, requirePermission('coupons'), couponController.list);
 router.post('/coupons', auth, requirePermission('coupons', 'manage'), couponController.create);
 router.put('/coupons/:id', auth, requirePermission('coupons', 'manage'), couponController.update);
@@ -174,18 +183,18 @@ router.delete('/coupons/:id', auth, requirePermission('coupons', 'manage'), coup
 // bank transfer needs at least one bank account on file).
 router.get('/payment/methods', optionalAuth, gymfolioPaymentController.paymentMethods);
 router.get('/payment/banks', membershipController.banks);
-router.post('/payment/bank-transfer', auth, membershipController.createBankTransfer);
+router.post('/payment/bank-transfer', paymentLimiter, auth, membershipController.createBankTransfer);
 router.get('/membership/rules', membershipController.rules);
 
 router.get('/payments/public-key', gymfolioPaymentController.getPublicKey);
-router.post('/payments/checkout', optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);
+router.post('/payments/checkout', paymentLimiter, optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);
 router.post('/payments/verify', optionalAuth, gymfolioPaymentController.verifyPackagePayment);
 
 // Aliases used by checkoutService on the gymfolio frontend
 router.get('/payment/stripe-public-key', gymfolioPaymentController.getPublicKey);
-router.post('/payment/create-package-checkout-session', optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);
-router.get('/payment/verify/:sessionId', optionalAuth, gymfolioPaymentController.verifyPackagePayment);
-router.post('/payment/verify/:sessionId', optionalAuth, gymfolioPaymentController.verifyPackagePayment);
+router.post('/payment/create-package-checkout-session', paymentLimiter, optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);
+router.get('/payment/verify/:sessionId', paymentLimiter, optionalAuth, gymfolioPaymentController.verifyPackagePayment);
+router.post('/payment/verify/:sessionId', paymentLimiter, optionalAuth, gymfolioPaymentController.verifyPackagePayment);
 // express.raw, because Stripe signs the exact bytes it sent and
 // constructEvent() cannot verify a parsed object. index.js skips its JSON
 // parser for this exact path so the stream is still unread when we get here.
@@ -221,7 +230,7 @@ router.get('/package-orders/:id/subscription-status', auth, gymfolioPaymentContr
 // Member-or-staff routes: the handler checks whether the caller owns the
 // order or holds the package-orders permission, and applies the member-side
 // limits (freeze length, whether cancelling online is allowed) accordingly.
-router.post('/package-orders/:id/proof', auth, uploadSingle('proof'), membershipController.submitProof);
+router.post('/package-orders/:id/proof', publicWriteLimiter, auth, uploadSingle('proof'), membershipController.submitProof);
 router.post('/package-orders/:id/freeze', auth, membershipController.freeze);
 router.post('/package-orders/:id/unfreeze', auth, membershipController.unfreeze);
 router.post('/package-orders/:id/cancel', auth, membershipController.cancel);
@@ -235,5 +244,6 @@ router.post('/package-orders/:id/reject', auth, requirePermission('package-order
 router.post('/package-orders/:id/renew', auth, requirePermission('package-orders', 'manage'), membershipController.renew);
 router.post('/package-orders/:id/change-package', auth, requirePermission('package-orders', 'manage'), membershipController.changePackage);
 router.post('/package-orders/:id/use-session', auth, requirePermission('package-orders', 'manage'), membershipController.useSession);
+router.post('/package-orders/:id/refund', auth, requirePermission('package-orders', 'manage'), membershipController.refund);
 
 module.exports = router;

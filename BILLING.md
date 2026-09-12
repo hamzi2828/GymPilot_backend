@@ -113,3 +113,106 @@ keys and the webhook URL. Under **Settings → Banks** the transfer accounts.
 `src/services/gymNotifications.js`: membership confirmed (+ invoice PDF),
 renewed, payment failed, transfer received, transfer rejected, frozen,
 cancelled, expiring (14/7/1 days), expired.
+
+---
+
+# Platform billing — GymPilot charging gyms
+
+Everything above is a gym charging its members through the gym's own Stripe
+account. This part is the platform charging the gym for its plan, through the
+**platform's** Stripe account (keys under the panel's System → Stripe,
+`platform_settings`; client in `src/platform/services/platformStripe.js`).
+The two are never crossed.
+
+## The subscription record
+
+`gyms.subscription` (`src/platform/models/gymModel.js`): `status`
+(`trialing · active · past_due · expired · cancelled`), `billingCycle`,
+`amount` (the whole bill per cycle) = `planAmount` + `addons[].amount`,
+`currency`, `startedAt`, `currentPeriodEnd`, `cancelledAt`, `notes`, and for
+self-serve card payment `stripeCustomerId`, `stripeSubscriptionId`,
+`stripePriceSummary` ("Growth (GymPilot) + Member app · PKR 10,400 / month"),
+plus `notices` (when each lifecycle email went — see below).
+
+* Provisioning (`subscriptionFor`) starts a gym on a plan as `trialing` with
+  `currentPeriodEnd = now + plan.trialDays`. **A plan with `trialDays: 0`
+  ends its period *now*** — the first payment is due at once — rather than
+  leaving the date empty, so the daily roll-over applies to it. A gym on no
+  plan is not billed and has no period end (nothing to roll), unless its
+  status is set to `trialing` by hand, in which case it is due now too. The
+  roll-over's `$ne: null` guards stay: an empty date still means "never".
+* Add-ons only go on a subscription in the **plan's currency**;
+  `resolveAddons` answers `400 { message: 'Add-on X is priced in PKR but the
+  plan is in USD' }` from `POST /gyms` and `PUT /gyms/:id/subscription`
+  (included add-ons cost 0 and are exempt). The marketing site and the panel
+  only offer add-ons in the plan's currency.
+* `PUT /api/platform/gyms/:id/subscription` treats an explicit
+  `currentPeriodEnd: null` as "clear" (a plan then gets a fresh period from
+  today); leaving the field out keeps the date. Re-writing the subscription
+  from the panel carries the Stripe ids over and resets `notices` when the
+  period end moves.
+* The daily cron: `trialing / active → past_due` when `currentPeriodEnd`
+  passes, `past_due → expired` after `SUBSCRIPTION_GRACE_DAYS`. `expired` and
+  `cancelled` gyms answer `402 SUBSCRIPTION_INACTIVE`; `suspended` gyms `403`.
+
+## Paying by card — `src/platform/services/platformBilling.js`
+
+Tenant-side routes (`src/platform/routes/billingRoutes.js`, mounted at
+`/api/billing` **after** the tenant gate, `auth` + Settings permission):
+
+| Route | Permission | Answer |
+|---|---|---|
+| `GET /api/billing/subscription` | settings · view | `{ success, data: { plan: { name, slug, price: { monthly, yearly, currency }, trialDays } \| null, status, billingCycle, currentPeriodEnd (ISO \| null), daysLeft (number \| null), amount, currency, addons: [{ slug, name, amount }], stripeConfigured, hasStripeSubscription, contactEmail } }` |
+| `POST /api/billing/checkout` `{ billingCycle? }` | settings · manage | `{ success, data: { url } }` — a Stripe Checkout Session in `subscription` mode. `409 { code: 'PLATFORM_STRIPE_NOT_CONFIGURED' }` when the platform has no keys (or charging is switched off); `400 { code: 'NO_PLAN' }` when the gym is on no plan. Returns to `<siteUrl>/admin/settings?billing=success` / `?billing=cancelled`. |
+| `POST /api/billing/portal` | settings · manage | `{ success, data: { url } }` — the Stripe customer portal; `409 { code: 'NO_STRIPE_CUSTOMER' }` before the gym has ever paid. |
+
+`contactEmail` is `PLATFORM_CONTACT_EMAIL`. The checkout builds inline prices
+(`line_items[].price_data`, `recurring.interval` month/year,
+`product_data.name` "<Plan> (GymPilot)", `unit_amount` in minor units via
+`helper/money.toMinorUnits` — zero-decimal currencies handled) from the
+gym's agreed plan price and one line per paid add-on, in the plan's currency.
+`customer` is the existing `stripeCustomerId`, else `customer_email` is the
+owner's; `client_reference_id` is the gym id and `metadata` /
+`subscription_data.metadata` carry `{ gymId, gymSlug, planSlug, billingCycle }`.
+A gym still trialing with at least 48 hours left passes
+`subscription_data.trial_end = currentPeriodEnd`, so the card goes on file now
+and is first charged when the trial ends; a shorter remainder is charged now.
+
+## Platform webhook — `POST /api/platform/stripe/webhook`
+
+Raw body, signature checked against the stored signing secret, applied by
+`src/platform/services/platformWebhook.js`, **idempotent**: every event id is
+claimed in `platform_stripe_events` (unique on `eventId`) before anything
+changes, so a redelivery is acknowledged and skipped. A handler that throws
+releases the claim and answers 500 so Stripe retries. Every event is written
+to the audit log as `platform_stripe_event` with its `result`.
+
+| Event | Effect on the gym |
+|---|---|
+| `checkout.session.completed` (mode subscription) | `stripeCustomerId`, `stripeSubscriptionId`, `status` (`active`, or `trialing` while Stripe trials), `billingCycle` from metadata, `amount` / `currency` from the subscription's items, `currentPeriodEnd` from `current_period_end` **or** `items.data[0].current_period_end` (newer API versions moved it), `startedAt` |
+| `invoice.paid` | gym found by `invoice.subscription` or `invoice.parent.subscription_details.subscription`; `currentPeriodEnd` extended (never shortened) to the invoice's line period end, `status: 'active'` when something was paid (a zero trial invoice leaves the trial standing) |
+| `invoice.payment_failed` | `status: 'past_due'` |
+| `customer.subscription.updated` | status synced (`trialing / active / past_due / unpaid→past_due / canceled→cancelled`), period end, amount, cycle |
+| `customer.subscription.deleted` | `status: 'cancelled'`, `cancelledAt`; the customer id is kept, the subscription id cleared |
+
+Every change calls `invalidateTenantCache()`; a period end moving forward
+clears `notices`. Unhandled event types are acknowledged with 200.
+
+## Owner lifecycle emails — `jobs.sendOwnerBillingNotices({ dryRun })`
+
+Called by the cron after `rollSubscriptionStatuses`. For every active gym
+with an owner email, once each (recorded in `subscription.notices`):
+trial ending in 7, 3 and 1 days (`trial7 / trial3 / trial1`; when the cron
+missed days only the most urgent goes out and the rest are marked), moved to
+`past_due` (`pastDue`), `expired` (`expired`). Each email names the gym and the
+date and links to `<siteUrl>/admin/settings` to subscribe or update the card,
+branded `PLATFORM_NAME` (default GymPilot) and sent with the platform's own
+SMTP (env). The decision is the pure `noticesDue(subscription, now)` in
+`src/platform/billingNotices.js` (unit-tested). With `dryRun` the job returns
+what it would send and marks nothing.
+
+## Entitlements
+
+`src/platform/entitlements.js`: `gymHasAddon(gym, 'member-app')` — true with
+no plan, when the plan includes the add-on, or when the subscription carries
+it. See MULTI_TENANCY.md.

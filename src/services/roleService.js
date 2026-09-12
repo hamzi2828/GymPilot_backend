@@ -76,6 +76,8 @@ const DEFAULT_ROLES = [
       dashboard: 'view',
       reports: 'view',
       classes: 'manage',
+      // Class bookings sit with the classes and PT sessions they belong to.
+      bookings: 'manage',
       pt: 'manage',
       trainers: 'manage',
       packages: 'manage',
@@ -97,6 +99,8 @@ const DEFAULT_ROLES = [
       testimonials: 'manage',
       blogs: 'manage',
       'blog-settings': 'view',
+      // FAQs, privacy policy and terms are editorial content like the blog.
+      pages: 'manage',
       settings: 'view',
       audit: 'view'
     })
@@ -110,6 +114,8 @@ const DEFAULT_ROLES = [
     permissions: fullPermissionMap({
       dashboard: 'view',
       classes: 'view',
+      // The desk books members into classes the same way it books PT.
+      bookings: 'manage',
       pt: 'manage',
       trainers: 'view',
       packages: 'view',
@@ -122,7 +128,9 @@ const DEFAULT_ROLES = [
       users: 'manage',
       'contact-queries': 'manage',
       leads: 'manage',
-      messaging: 'manage'
+      messaging: 'manage',
+      // Read-only: the desk answers "what is the cancellation policy" from it.
+      pages: 'view'
     })
   },
   {

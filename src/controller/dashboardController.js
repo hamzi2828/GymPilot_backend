@@ -23,11 +23,12 @@ const Package = require('../gymfolio/models/packageModel');
 const PackageRegistration = require('../gymfolio/models/packageRegistrationModel');
 const Attendance = require('../attendance/models/attendanceModel');
 const Contact = require('../models/contactModel');
+const Sale = require('../models/saleModel');
 const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 const sessions = require('../gymfolio/services/classSessions');
-const { sweepIfDue } = require('../gymfolio/services/membershipExpiry');
+const { sweepIfDue, liveFilter, countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
 // A membership inside this window is "expiring" -- close enough that somebody
 // should be chasing it, far enough out that chasing is still useful.
@@ -42,25 +43,29 @@ function startOfLocalDay(dateKey) {
   return new Date(guess.getTime() - drift * 60000);
 }
 
-/** Live / expiring / lapsed, counted from the subscription dates themselves. */
+/**
+ * Live / expiring / lapsed, counted from the subscription dates themselves.
+ *
+ * People, not orders, and the same definition of "live" the reports use
+ * (membershipExpiry.liveFilter): frozen and past-due members are still
+ * members, and one person holding two live orders is one member.
+ */
 async function membershipCounts(now) {
   const soon = new Date(now.getTime() + EXPIRING_WINDOW_DAYS * 86400000);
 
   const [active, expiring, lapsed, neverBought] = await Promise.all([
-    PackageOrder.countDocuments({
-      'payment.status': 'paid',
-      status: 'active',
-      'subscription.endDate': { $gte: now }
-    }),
-    PackageOrder.countDocuments({
-      'payment.status': 'paid',
-      status: 'active',
-      'subscription.endDate': { $gte: now, $lt: soon }
-    }),
-    PackageOrder.countDocuments({
-      'payment.status': 'paid',
-      status: 'expired'
-    }),
+    countLiveMembers(now),
+    countLiveMembers(now, { 'subscription.endDate': { $gte: now, $lt: soon } }),
+    // Lapsed: people whose membership ran out (or was cancelled) and who
+    // have nothing live now -- a member who renewed is not lapsed.
+    (async () => {
+      const [liveIds, everLapsed] = await Promise.all([
+        PackageOrder.distinct('userId', liveFilter(now)),
+        PackageOrder.distinct('userId', { 'payment.status': 'paid', status: { $in: ['expired', 'cancelled'] } })
+      ]);
+      const live = new Set(liveIds.filter(Boolean).map(String));
+      return everLapsed.filter(Boolean).filter((id) => !live.has(String(id))).length;
+    })(),
     // Members with an account and no paid order at all. The gap between
     // "signed up" and "bought something" is the one a gym can actually close.
     (async () => {
@@ -94,6 +99,7 @@ module.exports = {
 
       const [
         revenueRows,
+        shopRows,
         memberships,
         todayAttendance,
         openContacts,
@@ -119,11 +125,26 @@ module.exports = {
           { $group: { _id: '$payment.currency', total: { $sum: '$payment.amount' }, n: { $sum: 1 } } }
         ]),
 
+        // Till sales are money in beside memberships, as the accounts
+        // overview already counts them.
+        Sale.aggregate([
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end } } },
+          { $group: { _id: '$currency', total: { $sum: '$total' }, n: { $sum: 1 } } }
+        ]).catch(() => []),
+
         membershipCounts(now),
 
+        // Distinct people, not rows: somebody who came in twice today is one
+        // person in the building, and is "still in" if any visit is open.
         Attendance.aggregate([
           { $match: { shiftDate: today } },
-          { $group: { _id: '$personType', n: { $sum: 1 }, open: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } } } }
+          {
+            $group: {
+              _id: { type: '$personType', person: '$personId' },
+              open: { $max: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } }
+            }
+          },
+          { $group: { _id: '$_id.type', n: { $sum: 1 }, open: { $sum: '$open' } } }
         ]),
 
         Contact.countDocuments({ status: { $in: ['new', 'pending', 'open'] } }).catch(() => 0),
@@ -146,8 +167,7 @@ module.exports = {
           .lean(),
 
         PackageOrder.find({
-          'payment.status': 'paid',
-          status: 'active',
+          ...liveFilter(now),
           'subscription.endDate': { $gte: now, $lt: new Date(now.getTime() + EXPIRING_WINDOW_DAYS * 86400000) }
         })
           .sort({ 'subscription.endDate': 1 })
@@ -156,12 +176,25 @@ module.exports = {
           .lean()
       ]);
 
+      // Three totals, each per currency: memberships, the shop, and the two
+      // together -- which is what "revenue" has always meant on the accounts
+      // screen this links to.
+      const membershipRevenue = {};
+      const shopRevenue = {};
       const revenue = {};
       let paidOrders = 0;
+      let shopSales = 0;
       for (const row of revenueRows) {
         const code = String(row._id || base).toUpperCase();
+        L.addTo(membershipRevenue, code, row.total || 0);
         L.addTo(revenue, code, row.total || 0);
         paidOrders += row.n;
+      }
+      for (const row of shopRows) {
+        const code = String(row._id || base).toUpperCase();
+        L.addTo(shopRevenue, code, row.total || 0);
+        L.addTo(revenue, code, row.total || 0);
+        shopSales += row.n;
       }
 
       const attendance = { member: 0, staff: 0, still_in: 0 };
@@ -193,8 +226,19 @@ module.exports = {
         revenue: {
           ...L.presentTotals(revenue, base),
           orders: paidOrders,
+          sales: shopSales,
           period: range.label,
-          note: 'Membership and package sales recorded in this system'
+          note: 'Membership sales and shop takings recorded in this system'
+        },
+        membership_revenue: {
+          ...L.presentTotals(membershipRevenue, base),
+          orders: paidOrders,
+          period: range.label
+        },
+        shop_revenue: {
+          ...L.presentTotals(shopRevenue, base),
+          sales: shopSales,
+          period: range.label
         },
 
         members: {

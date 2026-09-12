@@ -20,13 +20,17 @@ const {
   loginLimiter,
   passwordResetLimiter,
   passwordResetConfirmLimiter,
-  signupLimiter
+  signupLimiter,
+  googleLoginLimiter,
+  contactLimiter,
+  newsletterLimiter,
+  blogViewLimiter
 } = require('../middleware/rateLimit');
 
 // Map each HTTP method to the corresponding controller function
 router.post('/user/login', loginLimiter, userController.loginUser);
 router.post('/user/signup', signupLimiter, userController.createUser);
-router.post('/user/google-login', userController.googleLoginUser);
+router.post('/user/google-login', googleLoginLimiter, userController.googleLoginUser);
 
 // ---------------------------------------------------------------------------
 // Password reset
@@ -139,6 +143,10 @@ router.get('/admin/reports/export/:kind', auth, requirePermission('reports'), re
 // needing permission to find out you have none.
 // ---------------------------------------------------------------------------
 router.get('/roles/me', auth, roleController.me);
+// The role names for the pickers on the Users and Staff tabs. Any staff
+// account may read them: needing the `roles` tab just to pick a role would
+// keep a receptionist from doing the user edits they are allowed to make.
+router.get('/roles/options', auth, requirePermission.requireStaff, roleController.options);
 router.get('/roles/catalog', auth, requirePermission('roles'), roleController.catalog);
 router.get('/roles', auth, requirePermission('roles'), roleController.list);
 router.post('/roles', auth, requirePermission('roles', 'manage'), roleController.create);
@@ -191,7 +199,11 @@ router.put('/user/addresses/:addressId', auth, userController.updateUserAddress)
 router.delete('/user/addresses/:addressId', auth, userController.deleteUserAddress);
 router.put('/user/addresses/:addressId/default', auth, userController.setDefaultAddress);
 
-// Blog Category routes
+// Blog Category routes -- same permission tab as the posts themselves.
+router.get('/admin/blogs/categories', auth, requirePermission('blogs'), blogController.listCategories);
+router.post('/admin/blogs/categories', auth, requirePermission('blogs'), blogController.createCategory);
+router.put('/admin/blogs/categories/:id', auth, requirePermission('blogs'), blogController.updateCategory);
+router.delete('/admin/blogs/categories/:id', auth, requirePermission('blogs'), blogController.deleteCategory);
 
 // Blog routes
 router.get('/blogs', blogController.getAllBlogs);
@@ -218,7 +230,7 @@ router.put(
   blogController.updateBlog
 );
 router.delete('/blogs/:id', auth, requirePermission('blogs'), blogController.deleteBlog);
-router.patch('/blogs/:id/views', blogController.incrementViews);
+router.patch('/blogs/:id/views', blogViewLimiter, blogController.incrementViews);
 router.patch('/blogs/:id/featured', auth, requirePermission('blogs'), blogController.toggleFeatured);
 router.patch('/blogs/:id/status', auth, requirePermission('blogs'), blogController.toggleStatus);
 router.get('/categories/:categoryId/blogs', blogController.getBlogsByCategory);
@@ -273,6 +285,7 @@ router.post('/banks/:id/qr-code', auth, requirePermission('settings'), uploadFie
 router.delete('/banks/:id/qr-code', auth, requirePermission('settings'), bankController.removeQrCode);
 
 router.post('/settings/test-smtp', auth, requirePermission('settings'), settingsController.testSmtp);
+router.post('/settings/stripe/test', auth, requirePermission('settings', 'manage'), settingsController.testStripe);
 
 // Hero Slide routes
 router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Public route
@@ -326,10 +339,11 @@ router.delete('/testimonials/:id', auth, requirePermission('testimonials'), test
 
 // Newsletter routes
 const newsletterController = require('../controller/newsletterController');
-router.post('/api/newsletter/subscribe', newsletterController.subscribe);
-router.post('/api/newsletter/unsubscribe', newsletterController.unsubscribe);
-router.get('/api/newsletter/stats', auth, newsletterController.getStats);
-router.get('/api/newsletter/subscribers', auth, newsletterController.getAllSubscribers);
+router.post('/api/newsletter/subscribe', newsletterLimiter, newsletterController.subscribe);
+router.post('/api/newsletter/unsubscribe', newsletterLimiter, newsletterController.unsubscribe);
+// The list of subscribers is an audience, so it sits under the messaging tab.
+router.get('/api/newsletter/stats', auth, requirePermission('messaging'), newsletterController.getStats);
+router.get('/api/newsletter/subscribers', auth, requirePermission('messaging'), newsletterController.getAllSubscribers);
 
 // ---------------------------------------------------------------------------
 // Messaging: channels, campaigns, announcements, wording, push -- see
@@ -363,7 +377,7 @@ router.delete('/admin/messaging/announcements/:id', auth, requirePermission('mes
 router.post('/admin/messaging/automations/run', auth, requirePermission('messaging', 'manage'), messagingController.runAutomationsNow);
 
 // Contact routes
-router.post('/api/contact/submit', contactController.submitContact); // Public route
+router.post('/api/contact/submit', contactLimiter, contactController.submitContact); // Public route
 router.get('/api/contact', auth, requirePermission('contact-queries'), contactController.getAllContacts); // Admin only
 router.get('/api/contact/stats', auth, requirePermission('contact-queries'), contactController.getContactStats); // Admin only
 router.get('/api/contact/:id', auth, requirePermission('contact-queries'), contactController.getContactById); // Admin only

@@ -64,6 +64,12 @@ const attendanceLogSchema = new mongoose.Schema(
 attendanceLogSchema.index({ createdAt: -1 });
 attendanceLogSchema.index({ userId: 1, createdAt: -1 });
 attendanceLogSchema.index({ personType: 1, personId: 1, createdAt: -1 });
+// This is the audit trail of the READER -- logins, template downloads,
+// punches as events -- not the attendance rows themselves, which are kept
+// for good. Thirteen months covers any "who downloaded the templates last
+// year" question; after that the rows are noise in a collection that would
+// otherwise grow for the life of the gym.
+attendanceLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 400 * 24 * 60 * 60 });
 
 // Logging must never be the reason a punch fails, so every call site fires
 // this without awaiting a result and swallows its errors here.

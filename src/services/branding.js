@@ -42,6 +42,18 @@ function siteOrigin() {
 }
 
 /**
+ * An address a member can write to. Settings has no "support email" field of
+ * its own; what it does carry is the address the gym's emails are sent
+ * FROM, which is where a reply to any of them lands anyway -- unless it is a
+ * no-reply address, in which case there is nothing to offer.
+ */
+function supportEmail(settings) {
+  const candidates = [settings.contactEmail, settings.supportEmail, settings.smtp && settings.smtp.fromEmail];
+  const value = candidates.map((c) => String(c || '').trim()).find(Boolean) || '';
+  return /^no-?reply/i.test(value) ? '' : value;
+}
+
+/**
  * @param {string} apiOrigin e.g. https://api.gympilot.app — used to make
  *                           relative logo paths loadable off-site.
  */
@@ -49,11 +61,18 @@ async function branding(apiOrigin = '') {
   const settings = await Settings.getSettings();
   const gym = currentTenant();
   const theme = themeFor(settings.theme);
+  const site = siteOrigin();
+  const email = supportEmail(settings);
+  const phone = settings.contactPhone || settings.mobileNumber || '';
 
   return {
     gym: gym ? { slug: gym.slug, name: gym.name } : null,
     siteName: settings.siteName || (gym && gym.name) || 'GymPilot',
-    logoUrl: absoluteAsset(settings.logoUrl, siteOrigin(), settings.siteUrl, apiOrigin),
+    // Where the gym's website lives, for the things the app hands over to
+    // it: buying or changing a plan, invoices, the password reset link. The
+    // registered domain first; failing that, whatever Settings says.
+    siteUrl: site || String(settings.siteUrl || '').trim().replace(/\/+$/, ''),
+    logoUrl: absoluteAsset(settings.logoUrl, site, settings.siteUrl, apiOrigin),
     logoWidth: settings.logoWidth || 160,
     logoHeight: settings.logoHeight || 56,
     theme: theme.key,
@@ -62,9 +81,13 @@ async function branding(apiOrigin = '') {
     themeTokens: theme.tokens,
     currency: settings.currency || 'USD',
     locale: settings.locale || { language: 'en', direction: 'ltr' },
+    // How to reach the gym, twice over: the nested shape the app has always
+    // read, and the two flat fields for anything that only wants a way in.
+    supportEmail: email,
+    phone,
     contact: {
-      email: settings.contactEmail || '',
-      phone: settings.contactPhone || settings.mobileNumber || '',
+      email,
+      phone,
       address: settings.address || ''
     },
     openingHours: settings.openingHours || [],

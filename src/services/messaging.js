@@ -1,8 +1,8 @@
 // src/services/messaging.js
 //
 // The channels beside email: SMS and WhatsApp through whichever provider the
-// gym has put in Settings → Messaging, and web push to the browsers members
-// have allowed.
+// gym has put in Settings → Messaging, web push to the browsers members
+// have allowed, and Expo push to the phones running the member app.
 //
 // Providers are deliberately thin and talk plain HTTP -- no SDKs -- so a gym
 // in Lahore on a local SMS gateway and a gym in London on Twilio are the
@@ -17,9 +17,15 @@ const webpush = require('web-push');
 const Settings = require('../models/settings');
 const MessageLog = require('../models/messageLogModel');
 const PushSubscription = require('../models/pushSubscriptionModel');
+const MobilePushToken = require('../models/mobilePushTokenModel');
 
 const TWILIO_API = 'https://api.twilio.com/2010-04-01';
 const META_API = 'https://graph.facebook.com/v20.0';
+// Expo's push service, which delivers to the member app through APNs and
+// FCM. It needs nothing from the gym: no keys, no settings.
+const EXPO_PUSH_API = 'https://exp.host/--/api/v2/push/send';
+// The most messages Expo takes in one request.
+const EXPO_BATCH_SIZE = 100;
 const REQUEST_TIMEOUT_MS = 15000;
 
 async function messagingConfig() {
@@ -177,46 +183,146 @@ async function sendText(channel, rawTo, body, meta = {}) {
 const sendSms = (to, body, meta) => sendText('sms', to, body, meta);
 const sendWhatsApp = (to, body, meta) => sendText('whatsapp', to, body, meta);
 
+/** "ExponentPushToken[...]" (or the newer "ExpoPushToken[...]"): what the app registers. */
+function isExpoPushToken(token) {
+  return /^Expo(nent)?PushToken\[[^\]\s]+\]$/.test(String(token || '').trim());
+}
+
 /**
- * Pushes to every browser a member has registered. Subscriptions the
- * browser has revoked are dropped as they are discovered.
+ * Reads Expo's answer to one batch: one ticket per message, in the order
+ * the messages were sent. A ticket of DeviceNotRegistered means the app was
+ * uninstalled or its token rotated; that token is handed back as dead so
+ * the caller can delete it rather than push into the void forever.
+ */
+function expoTicketOutcomes(messages, tickets) {
+  const outcome = { sent: 0, failed: 0, dead: [], lastError: '' };
+  messages.forEach((message, index) => {
+    const ticket = (Array.isArray(tickets) && tickets[index]) || {};
+    if (ticket.status === 'ok') {
+      outcome.sent += 1;
+      return;
+    }
+    outcome.failed += 1;
+    outcome.lastError = ticket.message || 'Expo push rejected the message';
+    if (ticket.details && ticket.details.error === 'DeviceNotRegistered') outcome.dead.push(message.to);
+  });
+  return outcome;
+}
+
+/**
+ * Sends one notification to a list of Expo push tokens, a hundred at a time.
+ * Never throws: a batch that cannot be delivered counts as failed and the
+ * rest still go. Resolves to { sent, failed, dead, lastError }.
+ */
+async function expoSend(tokens, payload) {
+  const totals = { sent: 0, failed: 0, dead: [], lastError: '' };
+  const messages = tokens.map((to) => ({
+    to,
+    title: payload.title || '',
+    body: payload.body || '',
+    // What the app opens when the notification is tapped.
+    data: { url: payload.url || '/', ...(payload.data || {}) },
+    sound: 'default'
+  }));
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  // Optional. With "enhanced push security" on in the Expo project, only a
+  // server holding the project's access token may send.
+  if (process.env.EXPO_ACCESS_TOKEN) headers.Authorization = `Bearer ${process.env.EXPO_ACCESS_TOKEN}`;
+
+  for (let i = 0; i < messages.length; i += EXPO_BATCH_SIZE) {
+    const batch = messages.slice(i, i + EXPO_BATCH_SIZE);
+    try {
+      const res = await fetch(EXPO_PUSH_API, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(batch),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+      const json = await readJson(res);
+      if (!res.ok) {
+        throw new Error((json.errors && json.errors[0] && json.errors[0].message) || `Expo push answered ${res.status}`);
+      }
+      const outcome = expoTicketOutcomes(batch, json.data);
+      totals.sent += outcome.sent;
+      totals.failed += outcome.failed;
+      totals.dead.push(...outcome.dead);
+      if (outcome.lastError) totals.lastError = outcome.lastError;
+    } catch (error) {
+      totals.failed += batch.length;
+      totals.lastError = error.message || String(error);
+    }
+  }
+  return totals;
+}
+
+/** The app tokens a member has registered in this gym. */
+async function expoTokensFor(userId) {
+  try {
+    const rows = await MobilePushToken.find({ userId }).select('token').lean();
+    return rows.map((row) => row.token).filter(isExpoPushToken);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pushes to every device a member has registered: browsers through web
+ * push, and phones running the member app through Expo. Subscriptions a
+ * browser has revoked and tokens Expo reports as gone are dropped as they
+ * are discovered.
+ *
+ * Web push needs the gym's VAPID keys from Settings → Messaging; the app
+ * does not, so a gym that never set push up still reaches its members'
+ * phones.
  */
 async function sendPush(userId, payload, meta = {}) {
   const cfg = await messagingConfig();
   const p = pushConfig(cfg);
-  if (!p) return { success: false, skipped: 'push is not set up' };
 
-  const subs = await PushSubscription.find({ userId }).lean();
-  if (!subs.length) return { success: false, skipped: 'no devices' };
+  const [subs, tokens] = await Promise.all([p ? PushSubscription.find({ userId }).lean() : [], expoTokensFor(userId)]);
 
-  const vapidDetails = {
-    subject: p.subject || 'mailto:no-reply@gympilot.app',
-    publicKey: p.vapidPublicKey,
-    privateKey: p.vapidPrivateKey
-  };
-  const data = JSON.stringify({
-    title: payload.title || '',
-    body: payload.body || '',
-    url: payload.url || '/',
-    icon: payload.icon || '/images/logo.png'
-  });
+  if (!p && !tokens.length) return { success: false, skipped: 'push is not set up' };
+  if (!subs.length && !tokens.length) return { success: false, skipped: 'no devices' };
 
   let sent = 0;
   let failed = 0;
   let lastError = '';
-  for (const sub of subs) {
-    try {
-      await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, data, { vapidDetails, TTL: 24 * 60 * 60 });
-      sent += 1;
-    } catch (error) {
-      failed += 1;
-      lastError = error.message || String(error);
-      if (error.statusCode === 404 || error.statusCode === 410) {
-        await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
+
+  if (subs.length) {
+    const vapidDetails = {
+      subject: p.subject || 'mailto:no-reply@gympilot.app',
+      publicKey: p.vapidPublicKey,
+      privateKey: p.vapidPrivateKey
+    };
+    const data = JSON.stringify({
+      title: payload.title || '',
+      body: payload.body || '',
+      url: payload.url || '/',
+      icon: payload.icon || '/images/logo.png'
+    });
+
+    for (const sub of subs) {
+      try {
+        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, data, { vapidDetails, TTL: 24 * 60 * 60 });
+        sent += 1;
+      } catch (error) {
+        failed += 1;
+        lastError = error.message || String(error);
+        if (error.statusCode === 404 || error.statusCode === 410) {
+          await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
+        }
       }
     }
+    if (sent) PushSubscription.updateMany({ userId }, { $set: { lastUsedAt: new Date() } }).catch(() => {});
   }
-  if (sent) PushSubscription.updateMany({ userId }, { $set: { lastUsedAt: new Date() } }).catch(() => {});
+
+  if (tokens.length) {
+    const expo = await expoSend(tokens, payload);
+    sent += expo.sent;
+    failed += expo.failed;
+    if (expo.lastError) lastError = expo.lastError;
+    if (expo.dead.length) await MobilePushToken.deleteMany({ token: { $in: expo.dead } }).catch(() => {});
+  }
 
   MessageLog.record({
     channel: 'push',
@@ -227,7 +333,7 @@ async function sendPush(userId, payload, meta = {}) {
     context: meta.context || '',
     campaignId: meta.campaignId || null,
     sentBy: meta.sentBy || null,
-    provider: 'webpush',
+    provider: subs.length && tokens.length ? 'webpush+expo' : tokens.length ? 'expo' : 'webpush',
     status: sent ? 'sent' : 'failed',
     error: sent ? '' : lastError
   });
@@ -238,14 +344,26 @@ function generateVapidKeys() {
   return webpush.generateVAPIDKeys();
 }
 
+/** Whether any member of this gym has the app's notifications switched on. */
+async function anyMobileDevices() {
+  try {
+    return !!(await MobilePushToken.exists({}));
+  } catch {
+    return false;
+  }
+}
+
 /** Which channels this gym can actually send on right now. */
 async function channels() {
   const cfg = await messagingConfig();
+  // Push works with the gym's VAPID keys (browsers), or with no setup at
+  // all once a member has the app -- Expo carries those.
+  const push = !!pushConfig(cfg) || (await anyMobileDevices());
   return {
     email: true,
     sms: !!providerFor(cfg, 'sms'),
     whatsapp: !!providerFor(cfg, 'whatsapp'),
-    push: !!pushConfig(cfg)
+    push
   };
 }
 
@@ -257,5 +375,11 @@ module.exports = {
   sendText,
   sendPush,
   generateVapidKeys,
-  channels
+  channels,
+  // Expo push, exported for the app's register route and for the tests.
+  isExpoPushToken,
+  expoTicketOutcomes,
+  expoSend,
+  EXPO_PUSH_API,
+  EXPO_BATCH_SIZE
 };

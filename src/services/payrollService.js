@@ -119,6 +119,11 @@ async function draftFor(person, range, { createdBy = null } = {}) {
 
 /** Drafts (or refreshes drafts) for every active staff member. */
 async function generate(range, { createdBy = null } = {}) {
+  // `employment.payroll` is `select: false` on the model, but an inclusive
+  // select of the whole `employment` block still returns it (the exclusion
+  // only applies to default and exclusive projections), which is what the
+  // pay calculation below relies on. Do not add `+employment.payroll` here:
+  // naming both the parent and the child is a projection path collision.
   const staff = await User.find({ 'employment.isStaff': true, isActive: true }).select('firstName lastName email employment').lean();
   const year = range.to.slice(0, 4);
   const created = [];
