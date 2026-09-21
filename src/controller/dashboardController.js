@@ -27,6 +27,7 @@ const Sale = require('../models/saleModel');
 const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
+const { openVisitExpr } = require('../attendance/services/staleVisits');
 const sessions = require('../gymfolio/services/classSessions');
 const { sweepIfDue, liveFilter, countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
@@ -141,7 +142,7 @@ module.exports = {
           {
             $group: {
               _id: { type: '$personType', person: '$personId' },
-              open: { $max: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } }
+              open: { $max: { $cond: [openVisitExpr(now), 1, 0] } }
             }
           },
           { $group: { _id: '$_id.type', n: { $sum: 1 }, open: { $sum: '$open' } } }

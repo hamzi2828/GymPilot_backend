@@ -533,6 +533,17 @@ const deleteTrainer = async (req, res) => {
 
     await Trainer.findByIdAndDelete(id);
 
+    // Their fingerprints go with them: a template is biometric data with no
+    // owner left to keep it for, and every desk would otherwise go on
+    // downloading it. Must not block the deletion itself -- a failure is
+    // logged and the trainer is still gone.
+    try {
+      const Fingerprint = require('../../attendance/models/fingerprintModel');
+      await Fingerprint.deleteMany({ personType: 'staff', personId: trainer._id });
+    } catch (cleanupError) {
+      console.error('[trainers] could not delete fingerprints of', String(trainer._id), '-', cleanupError.message);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Trainer deleted successfully'

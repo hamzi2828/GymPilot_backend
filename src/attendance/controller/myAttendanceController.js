@@ -12,6 +12,7 @@ const mongoose = require('mongoose');
 
 const Attendance = require('../models/attendanceModel');
 const T = require('../services/timeUtils');
+const { openVisitMatch, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -132,8 +133,10 @@ module.exports = {
 
       // Asked directly rather than inferred from `rows`: those are filtered to
       // one month when drilling in, and "you are checked in right now" must not
-      // depend on which month is on screen.
-      const openVisit = await Attendance.exists({ personId, checkOutAt: null });
+      // depend on which month is on screen. Bounded like the punch itself: a
+      // visit nobody checked out of last week is not "inside" today.
+      const now = new Date();
+      const openVisit = await Attendance.exists({ personId, ...openVisitMatch(now) });
 
       const summary = totals || { visits: 0, minutes: 0, days: [], first: null, last: null };
       const dateKeys = new Set(summary.days || []);
@@ -204,7 +207,10 @@ module.exports = {
           day_name: T.weekdayNameForKey(row.shiftDate),
           check_in_time: T.timeLabel(row.checkInAt),
           check_out_time: T.timeLabel(row.checkOutAt),
-          still_in: !row.checkOutAt,
+          still_in: isOpenVisit(row, now),
+          // Ended without a check-out: no time out and no duration, rather
+          // than "still in" for ever.
+          no_check_out: missedCheckOut(row, now),
           minutes: row.workedMinutes === undefined ? null : row.workedMinutes,
           duration_label: T.durationLabel(row.workedMinutes),
           // The package the visit was taken on, snapshotted at the time -- so a

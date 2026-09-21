@@ -22,6 +22,13 @@ const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const { fullName } = require('../services/peopleDirectory');
+const {
+  openVisitMatch,
+  openVisitExpr,
+  missedCheckOutMatch,
+  isOpenVisit,
+  missedCheckOut
+} = require('../services/staleVisits');
 const T = require('../services/timeUtils');
 
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
@@ -71,30 +78,45 @@ function readPaging(query, defaultLimit, maxLimit) {
   return { page, limit, skip: (page - 1) * limit };
 }
 
+// A staff departure verdict lives in its own field (see punchService), but is
+// picked from the same Status list. These names cannot collide with an
+// arrival verdict, which is what lets one dropdown ask both questions.
+const DEPARTURE_FILTERS = { left_early: 'early', overtime: 'overtime' };
+
 // The WHERE the punch log is built from. `presence` and `status` are
 // deliberately separate filters: "still inside" is a fact about the row and
 // "late" is a verdict about it, and an operator asks the two at different
 // moments.
-function buildMatch(query) {
+function buildMatch(query, now = new Date()) {
   const { from, to } = readRange(query);
   const match = { shiftDate: { $gte: from, $lte: to } };
+  // Clauses that each carry their own $or, ANDed so they cannot overwrite
+  // one another.
+  const and = [];
 
   if (query.personType === 'member' || query.personType === 'staff') {
     match.personType = query.personType;
   }
 
   if (query.status && query.status !== 'all') {
-    match.status = String(query.status);
+    const status = String(query.status);
+    if (DEPARTURE_FILTERS[status]) match.departureStatus = DEPARTURE_FILTERS[status];
+    else match.status = status;
   }
 
-  if (query.presence === 'in') match.checkOutAt = null;
+  // "Still in" is bounded by the punch's own window: a visit nobody checked
+  // out of last week is a missed check-out, not somebody inside.
+  if (query.presence === 'in') Object.assign(match, openVisitMatch(now));
   if (query.presence === 'out') match.checkOutAt = { $ne: null };
+  if (query.presence === 'missed') and.push(missedCheckOutMatch(now));
 
   const term = String(query.q || '').trim();
   if (term) {
     const rx = new RegExp(escapeRx(term), 'i');
-    match.$or = [{ personName: rx }, { personCode: rx }];
+    and.push({ $or: [{ personName: rx }, { personCode: rx }] });
   }
+
+  if (and.length) match.$and = and;
 
   if (query.personId && OBJECT_ID.test(String(query.personId))) {
     match.personId = toObjectId(query.personId);
@@ -114,13 +136,18 @@ function punchContext(context) {
     device: context.device || '',
     os_user: context.osUser || '',
     method: context.method || '',
-    ip: context.ip || ''
+    ip: context.ip || '',
+    location: context.location || ''
   };
 }
 
 // The same fields the desktop receipt renders, in the same vocabulary, so a
 // row read in the office and a receipt read at the desk cannot disagree.
-function shapeRecord(row) {
+//
+// For staff, `status` is the ARRIVAL verdict and `departure_*` how the shift
+// ended. A visit nobody checked out of has `no_check_out` and neither a time
+// out nor a duration.
+function shapeRecord(row, now = new Date()) {
   const membership = row.membership || {};
   const schedule = row.schedule || {};
 
@@ -139,7 +166,9 @@ function shapeRecord(row) {
     check_out_at: row.checkOutAt || null,
     check_in_time: T.timeLabel(row.checkInAt),
     check_out_time: T.timeLabel(row.checkOutAt),
-    still_in: !row.checkOutAt,
+    still_in: isOpenVisit(row, now),
+    no_check_out: missedCheckOut(row, now),
+    auto_closed_at: row.autoClosedAt || null,
 
     worked_minutes: row.workedMinutes === undefined ? null : row.workedMinutes,
     worked_label: T.durationLabel(row.workedMinutes),
@@ -147,6 +176,10 @@ function shapeRecord(row) {
     status: row.status || '',
     status_label: row.statusLabel || '',
     variance_minutes: row.varianceMinutes === undefined ? null : row.varianceMinutes,
+    departure_status: row.departureStatus || '',
+    departure_label: row.departureLabel || '',
+    departure_variance_minutes:
+      row.departureVarianceMinutes === undefined ? null : row.departureVarianceMinutes,
 
     membership: {
       status: membership.status || 'none',
@@ -168,7 +201,7 @@ function shapeRecord(row) {
 
 // Counted over the WHOLE filtered set rather than the page: a summary that
 // changed when you turned the page would be worse than no summary.
-async function summarise(match) {
+async function summarise(match, now = new Date()) {
   const result = await Attendance.aggregate([
     { $match: match },
     {
@@ -179,20 +212,24 @@ async function summarise(match) {
               _id: null,
               visits: { $sum: 1 },
               minutes: { $sum: { $ifNull: ['$workedMinutes', 0] } },
-              closed: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 0, 1] } }
+              closed: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 0, 1] } },
+              openNow: { $sum: { $cond: [openVisitExpr(now), 1, 0] } }
             }
           }
         ],
         byType: [{ $group: { _id: '$personType', count: { $sum: 1 } } }],
         byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-        people: [{ $group: { _id: { t: '$personType', p: '$personId' } } }, { $count: 'n' }],
-        openNow: [{ $match: { checkOutAt: null } }, { $count: 'n' }]
+        byDeparture: [
+          { $match: { departureStatus: { $nin: [null, ''] } } },
+          { $group: { _id: '$departureStatus', count: { $sum: 1 } } }
+        ],
+        people: [{ $group: { _id: { t: '$personType', p: '$personId' } } }, { $count: 'n' }]
       }
     }
   ]);
 
   const facet = result[0] || {};
-  const totals = (facet.totals && facet.totals[0]) || { visits: 0, minutes: 0, closed: 0 };
+  const totals = (facet.totals && facet.totals[0]) || { visits: 0, minutes: 0, closed: 0, openNow: 0 };
 
   const byType = {};
   for (const entry of facet.byType || []) byType[entry._id] = entry.count;
@@ -200,8 +237,20 @@ async function summarise(match) {
   const byStatus = {};
   for (const entry of facet.byStatus || []) byStatus[entry._id || 'unknown'] = entry.count;
 
+  const byDeparture = {};
+  for (const entry of facet.byDeparture || []) byDeparture[entry._id] = entry.count;
+
+  // The departure filters' counts, under the names the Status list uses for
+  // them (DEPARTURE_FILTERS), so every option can say how many it will show.
+  for (const [name, departure] of Object.entries(DEPARTURE_FILTERS)) {
+    byStatus[name] = byDeparture[departure] || 0;
+  }
+
   const uniquePeople = (facet.people && facet.people[0] && facet.people[0].n) || 0;
-  const stillIn = (facet.openNow && facet.openNow[0] && facet.openNow[0].n) || 0;
+  const stillIn = totals.openNow || 0;
+  // Everything neither checked out nor still inside ended without a
+  // check-out, whether or not the daily job has marked it yet.
+  const noCheckOut = totals.visits - totals.closed - stillIn;
 
   // Averaged over CLOSED visits only -- an open one has no duration yet, and
   // counting it as zero would drag the average down all day.
@@ -213,14 +262,22 @@ async function summarise(match) {
     staff: byType.staff || 0,
     unique_people: uniquePeople,
     still_in: stillIn,
+    no_check_out: noCheckOut,
     completed: totals.closed,
     total_minutes: totals.minutes,
     total_label: T.durationLabel(totals.minutes) || '0 m',
     avg_minutes: avgMinutes,
     avg_label: avgMinutes === null ? null : T.durationLabel(avgMinutes),
+    // Arrivals, now that check-out no longer overwrites them: every late start
+    // in the range, not only the staff still on shift.
     late: byStatus.late || 0,
     on_time: byStatus.on_time || 0,
-    membership_issues: (byStatus.membership_expired || 0) + (byStatus.membership_none || 0),
+    left_early: byDeparture.early || 0,
+    overtime: byDeparture.overtime || 0,
+    // The visits the desk would have stopped: counted as the desk counts
+    // "lapsed" (expired, none, suspended), so the two screens agree.
+    membership_issues:
+      (byStatus.membership_expired || 0) + (byStatus.membership_none || 0) + (byStatus.membership_suspended || 0),
     expiring_soon: byStatus.membership_expiring || 0,
     by_status: byStatus
   };
@@ -326,13 +383,17 @@ module.exports = {
   // -------------------------------------------------------------------------
   records: async (req, res) => {
     try {
-      const { match, from, to } = buildMatch(req.query);
+      const now = new Date();
+      const { match, from, to } = buildMatch(req.query, now);
       const { page, limit, skip } = readPaging(req.query, 25, 500);
+      // ?summary=0 skips the range summary -- for the CSV export, which walks
+      // every page and would otherwise recount the whole range on each one.
+      const wantSummary = req.query.summary !== '0';
 
       const [rows, total, summary] = await Promise.all([
         Attendance.find(match).sort({ checkInAt: -1, updatedAt: -1 }).skip(skip).limit(limit).lean(),
         Attendance.countDocuments(match),
-        summarise(match)
+        wantSummary ? summarise(match, now) : null
       ]);
 
       return res.json({
@@ -341,7 +402,7 @@ module.exports = {
         range: { from, to, label: rangeLabel(from, to), today: T.dateKey() },
         summary,
         pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
-        records: rows.map(shapeRecord)
+        records: rows.map((row) => shapeRecord(row, now))
       });
     } catch (err) {
       console.error('[attendance] admin records failed:', err);
@@ -419,7 +480,9 @@ module.exports = {
             visits: { $sum: 1 },
             minutes: { $sum: { $ifNull: ['$workedMinutes', 0] } },
             days: { $addToSet: '$shiftDate' },
-            open: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } },
+            // Inside right now -- bounded, so a forgotten check-out from last
+            // week does not keep somebody "in the gym".
+            open: { $sum: { $cond: [openVisitExpr(new Date()), 1, 0] } },
             lastCheckIn: { $last: '$checkInAt' },
             lastStatus: { $last: '$status' },
             lastStatusLabel: { $last: '$statusLabel' },

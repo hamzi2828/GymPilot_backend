@@ -19,6 +19,9 @@ const punchContextSchema = new mongoose.Schema(
     osUser: { type: String, default: '' },   // Windows account on that PC
     clientApp: { type: String, default: '' },
     ip: { type: String, default: '' },
+    // The site the desk account is set up for (its attendanceLocation), so a
+    // visit that starts at one branch and ends at another says so.
+    location: { type: String, default: '' },
     // How the person was identified. Recorded because a hand-picked punch is
     // a weaker claim than a matched fingerprint, and an audit should be able
     // to tell them apart.
@@ -96,13 +99,30 @@ const attendanceSchema = new mongoose.Schema(
       hasSchedule: { type: Boolean, default: false }
     },
 
-    // on_time | late | early | overtime | no_schedule  (staff)
-    // membership_active | membership_expired | membership_none  (members)
+    // Staff: the ARRIVAL verdict -- on_time | late | early | no_schedule --
+    // kept for good once written. Members: the membership_* verdict.
     status: { type: String, default: '' },
     statusLabel: { type: String, default: '' },
-    // Signed minutes away from the rostered time: negative = early,
+    // Signed minutes away from the rostered start: negative = early,
     // positive = late. Kept as a number so reports can aggregate it.
-    varianceMinutes: { type: Number, default: null }
+    varianceMinutes: { type: Number, default: null },
+
+    // Staff: how the shift ENDED -- on_time | early (left early) | overtime |
+    // no_schedule -- written at check-out. Separate fields rather than the
+    // three above: someone who arrived late and left on time was still late,
+    // and overwriting the arrival is how "late" came to count only the staff
+    // who had not gone home yet. Rows closed before these existed carry the
+    // departure in `status` instead.
+    departureStatus: { type: String, default: '' },
+    departureLabel: { type: String, default: '' },
+    departureVarianceMinutes: { type: Number, default: null },
+
+    // Nobody checked out, and the visit is past the point a scan could still
+    // close it (services/staleVisits.js). No check-out time and no duration
+    // are invented for it: an hours total should not include hours nobody
+    // recorded.
+    autoClosed: { type: Boolean, default: false },
+    autoClosedAt: { type: Date, default: null }
   },
   {
     timestamps: true,
@@ -121,6 +141,9 @@ const attendanceSchema = new mongoose.Schema(
 attendanceSchema.index({ personType: 1, personId: 1, shiftDate: -1 });
 attendanceSchema.index({ shiftDate: -1, personType: 1 });
 attendanceSchema.index({ checkInAt: -1 });
+// "Who is inside right now" and the daily sweep of forgotten visits both ask
+// for the open rows first; without this they would walk the whole history.
+attendanceSchema.index({ checkOutAt: 1, autoClosed: 1, checkInAt: -1 });
 
 module.exports =
   tenantModel('Attendance', attendanceSchema);

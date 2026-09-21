@@ -18,9 +18,10 @@ const Attendance = require('../models/attendanceModel');
 const AttendanceLog = require('../models/attendanceLogModel');
 
 const { deviceContext } = require('../middleware/desktopAuth');
-const { listPeople, resolvePerson } = require('../services/peopleDirectory');
+const { listPeople, resolvePerson, activePersonKeys } = require('../services/peopleDirectory');
 const { currentPalette } = require('../services/deskTheme');
-const { recordPunch } = require('../services/punchService');
+const { recordPunch, currentVerdict } = require('../services/punchService');
+const { openVisitExpr, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 const T = require('../services/timeUtils');
 const { verifyQrToken } = require('../services/qrToken');
 const { findByCode } = require('../services/peopleDirectory');
@@ -205,7 +206,10 @@ module.exports = {
     return res.json({
       success: true,
       user: sessionPayload(req.desktopUser),
-      theme: await currentPalette()
+      theme: await currentPalette(),
+      // Moves forward while the desk is in use (see desktopAuth's sliding
+      // renewal), so a desk that saved the login's expiry can refresh it.
+      expires_at: new Date(req.desktopToken.expiresAt).toISOString()
     });
   },
 
@@ -245,10 +249,21 @@ module.exports = {
         .select('+template personType personId fingerIndex')
         .lean();
 
+      // A finger can outlive its owner. A deleted trainer or a deactivated
+      // member must stop matching at the desk rather than keep checking in
+      // as a ghost -- and their templates are not even decrypted.
+      const live = await activePersonKeys(rows);
+
       const templates = [];
       let unreadable = 0;
+      let departed = 0;
 
       for (const row of rows) {
+        if (!live.has(`${row.personType}:${String(row.personId)}`)) {
+          departed++;
+          continue;
+        }
+
         const plain = Fingerprint.decryptTemplate(row.template);
         if (!plain) {
           // Encrypted under a secret this process no longer has. Skip it --
@@ -274,7 +289,7 @@ module.exports = {
         osUser: req.deviceContext.osUser,
         clientApp: req.deviceContext.clientApp,
         ip: req.deviceContext.ip,
-        meta: { count: templates.length, unreadable }
+        meta: { count: templates.length, unreadable, departed }
       });
 
       if (unreadable > 0) {
@@ -284,7 +299,10 @@ module.exports = {
         );
       }
 
-      return res.json({ success: true, far: FAR_DENOMINATOR, templates });
+      // `unreadable` is said out loud rather than only logged: those people
+      // have a finger on file that can never match, and the desk has to be
+      // able to tell them to re-enrol.
+      return res.json({ success: true, far: FAR_DENOMINATOR, templates, unreadable });
     } catch (err) {
       console.error('[attendance] templates failed:', err);
       return res.status(500).json({ success: false, message: 'Could not load the fingerprint list.' });
@@ -302,14 +320,26 @@ module.exports = {
       const q = String((req.body && req.body.q) || '').trim();
       const { members, staff } = await listPeople({ q });
 
-      // Which people already have at least one finger on file. The picker
-      // uses this to keep them out of the enrolment list, and the lookup
-      // panel to show who can use the reader.
-      const enrolled = await Fingerprint.find({ isActive: true })
-        .select('personType personId')
-        .lean();
+      // Which of the listed people have at least one finger the desk can
+      // actually match. The picker uses this to keep them out of the
+      // enrolment list, and the lookup panel to show who can use the reader.
+      // A template that no longer decrypts (the key changed since it was
+      // enrolled) is left out of /templates, so counting it here would hide
+      // its owner from the one screen they can be re-enrolled on.
+      const listedIds = members.concat(staff).map((person) => person.id);
+      const enrolled = listedIds.length
+        ? await Fingerprint.find({ isActive: true, personId: { $in: listedIds } })
+            .select('+template personType personId')
+            .lean()
+        : [];
 
-      const enrolledKeys = enrolled.map((row) => `${row.personType}:${String(row.personId)}`);
+      const enrolledKeys = Array.from(
+        new Set(
+          enrolled
+            .filter((row) => Fingerprint.decryptTemplate(row.template) !== null)
+            .map((row) => `${row.personType}:${String(row.personId)}`)
+        )
+      );
 
       return res.json({
         success: true,
@@ -513,14 +543,15 @@ module.exports = {
   // change with the page size:
   //
   //   total     visits today (rows)
-  //   in_now    visits still open
+  //   in_now    visits still open, and recent enough that a scan could close them
   //   lapsed    member visits on an expired, missing or suspended membership
   //   expiring  member visits whose membership ends within the warning window
   recent: async (req, res) => {
     try {
       const wanted = parseInt((req.body && req.body.limit) || 12, 10);
       const limit = Math.min(Math.max(1, Number.isFinite(wanted) ? wanted : 12), 200);
-      const today = T.dateKey();
+      const now = new Date();
+      const today = T.dateKey(now);
 
       const [rows, tally] = await Promise.all([
         Attendance.find({ shiftDate: today })
@@ -533,7 +564,7 @@ module.exports = {
             $group: {
               _id: null,
               total: { $sum: 1 },
-              in_now: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } },
+              in_now: { $sum: { $cond: [openVisitExpr(now), 1, 0] } },
               lapsed: {
                 $sum: {
                   $cond: [
@@ -565,16 +596,21 @@ module.exports = {
           lapsed: counts.lapsed || 0,
           expiring: counts.expiring || 0
         },
-        entries: rows.map((row) => ({
-          person_type: row.personType,
-          name: row.personName,
-          code: row.personCode,
-          check_in_time: T.timeLabel(row.checkInAt),
-          check_out_time: T.timeLabel(row.checkOutAt),
-          still_in: !row.checkOutAt,
-          status: row.status,
-          status_label: row.statusLabel
-        }))
+        entries: rows.map((row) => {
+          // Worded as the receipt was: how a staff shift ended once it has.
+          const verdict = currentVerdict(row);
+          return {
+            person_type: row.personType,
+            name: row.personName,
+            code: row.personCode,
+            check_in_time: T.timeLabel(row.checkInAt),
+            check_out_time: T.timeLabel(row.checkOutAt),
+            still_in: isOpenVisit(row, now),
+            no_check_out: missedCheckOut(row, now),
+            status: verdict.status,
+            status_label: verdict.label
+          };
+        })
       });
     } catch (err) {
       console.error('[attendance] recent failed:', err);

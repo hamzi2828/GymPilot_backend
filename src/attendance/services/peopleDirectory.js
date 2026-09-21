@@ -356,6 +356,34 @@ async function resolvePerson(personType, personId) {
 }
 
 /**
+ * resolvePerson's "still on file and active" test for a whole list at once:
+ * the 'member:<id>' / 'staff:<id>' keys, out of `pairs` ({ personType,
+ * personId }), that belong to someone who could still punch. Three queries
+ * however long the list, where resolving one by one would be one each.
+ */
+async function activePersonKeys(pairs) {
+  const memberIds = [];
+  const staffIds = [];
+  for (const pair of pairs) {
+    if (pair.personType === 'member') memberIds.push(pair.personId);
+    else if (pair.personType === 'staff') staffIds.push(pair.personId);
+  }
+
+  const [members, trainers, staffUsers] = await Promise.all([
+    memberIds.length ? User.find({ _id: { $in: memberIds }, isActive: true }).select('_id').lean() : [],
+    staffIds.length ? Trainer.find({ _id: { $in: staffIds }, isActive: true }).select('_id').lean() : [],
+    staffIds.length
+      ? User.find({ _id: { $in: staffIds }, isActive: true, 'employment.isStaff': true }).select('_id').lean()
+      : []
+  ]);
+
+  const keys = new Set();
+  for (const row of members) keys.add('member:' + String(row._id));
+  for (const row of trainers.concat(staffUsers)) keys.add('staff:' + String(row._id));
+  return keys;
+}
+
+/**
  * The one person whose member or staff code matches exactly. Case does not
  * matter; a search that merely contains the code does not count.
  */
@@ -368,6 +396,7 @@ async function findByCode(code) {
 }
 
 module.exports = {
+  activePersonKeys,
   findByCode,
   fullName,
   ensureMemberCode,

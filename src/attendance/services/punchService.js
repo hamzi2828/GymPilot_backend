@@ -12,6 +12,7 @@
 
 const Attendance = require('../models/attendanceModel');
 const { resolvePerson, membershipFor } = require('./peopleDirectory');
+const { OPEN_VISIT_HOURS, openVisitMatch } = require('./staleVisits');
 const T = require('./timeUtils');
 
 // A finger resting on the reader fires repeatedly, and a member who scans
@@ -19,11 +20,9 @@ const T = require('./timeUtils');
 // this window a second scan is reported as a no-op rather than acted on.
 const MIN_PUNCH_GAP_SECONDS = Number(process.env.ATTENDANCE_MIN_PUNCH_GAP_SECONDS || 60);
 
-// How far back a check-out may reach to find its own check-in. Longer than a
-// working day so a night shift ending at 06:00 still closes the row it opened
-// at 22:00, but short enough that a member who forgot to check out on Monday
-// is not "checked out" by Tuesday morning's arrival.
-const OPEN_VISIT_HOURS = Number(process.env.ATTENDANCE_OPEN_VISIT_HOURS || 18);
+// How far back a check-out may reach to find its own check-in is
+// OPEN_VISIT_HOURS, defined in staleVisits.js: the same window decides who
+// counts as "still inside" everywhere else, so the two cannot disagree.
 
 // Minutes past the rostered start before a staff arrival counts as late.
 const LATE_GRACE_MINUTES = Number(process.env.ATTENDANCE_LATE_GRACE_MINUTES || 5);
@@ -50,6 +49,9 @@ function punchContext(operator, device, method) {
     osUser: device.osUser || '',
     clientApp: device.clientApp || '',
     ip: device.ip || '',
+    // The branch the signed-in desk account is set up for -- what the desk
+    // shows in its header, recorded so each half of a visit says where.
+    location: operator.attendanceLocation || '',
     // How the person was identified: a finger on the reader, a staff pick
     // from the list, a scanned QR code, or a typed member number.
     method: ['manual', 'qr', 'code', 'fingerprint'].includes(method) ? method : 'fingerprint'
@@ -283,8 +285,19 @@ function ordinal(n) {
   }
 }
 
+// What the desk calls a visit: how a staff shift ended once it has, and
+// otherwise the arrival (or membership) verdict. Only the wording changes --
+// the arrival verdict stays on the row, where the office counts it.
+function currentVerdict(record) {
+  if (record.personType === 'staff' && record.checkOutAt && record.departureStatus) {
+    return { status: record.departureStatus, label: record.departureLabel };
+  }
+  return { status: record.status, label: record.statusLabel };
+}
+
 async function buildReceipt(record, action, person) {
   const rows = [];
+  const verdict = currentVerdict(record);
 
   rows.push(row('Day', `${T.weekdayNameForKey(record.shiftDate)}, ${T.dateLabelForKey(record.shiftDate)}`));
 
@@ -325,7 +338,12 @@ async function buildReceipt(record, action, person) {
     rows.push(row('Visit', `${ordinal(visits)} this month`));
   }
 
-  rows.push(row('Status', record.statusLabel));
+  if (verdict.label !== record.statusLabel) {
+    // A check-out receipt is judged on the departure; the arrival still
+    // deserves its line, or a late start disappears at the end of the shift.
+    rows.push(row('Arrival', record.statusLabel));
+  }
+  rows.push(row('Status', verdict.label));
   rows.push(row('Recorded by', recordedByLine(record, action)));
 
   return {
@@ -346,8 +364,8 @@ async function buildReceipt(record, action, person) {
     check_out_time: T.timeLabel(record.checkOutAt),
     worked_label: T.durationLabel(record.workedMinutes),
 
-    status: record.status,
-    status_label: record.statusLabel,
+    status: verdict.status,
+    status_label: verdict.label,
     // The one line the desk must act on, rendered in red above everything
     // else. Null on a normal visit.
     warning: record.warning || null,
@@ -378,8 +396,7 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   const openRecord = await Attendance.findOne({
     personType,
     personId: person.id,
-    checkOutAt: null,
-    checkInAt: { $gte: new Date(now.getTime() - OPEN_VISIT_HOURS * 60 * 60 * 1000) }
+    ...openVisitMatch(now)
   }).sort({ checkInAt: -1 });
 
   // ---- Double-scan guard ----
@@ -423,10 +440,12 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     );
 
     if (personType === 'staff') {
+      // Into its own fields: status keeps the arrival verdict, so a late
+      // start is still a late start after an on-time finish.
       const verdict = departureVerdict(openRecord.schedule, now);
-      openRecord.status = verdict.status;
-      openRecord.statusLabel = verdict.label;
-      openRecord.varianceMinutes = verdict.variance;
+      openRecord.departureStatus = verdict.status;
+      openRecord.departureLabel = verdict.label;
+      openRecord.departureVarianceMinutes = verdict.variance;
     }
     // Members keep the membership verdict they arrived with: the receipt on
     // the way out should still say the visit was on an expired package.
@@ -529,8 +548,10 @@ function membershipWarningFor(record) {
 module.exports = {
   recordPunch,
   MIN_PUNCH_GAP_SECONDS,
+  OPEN_VISIT_HOURS,
   membershipVerdict,
   scheduleFor,
   arrivalVerdict,
-  departureVerdict
+  departureVerdict,
+  currentVerdict
 };

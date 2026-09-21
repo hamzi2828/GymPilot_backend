@@ -438,6 +438,7 @@ async function runRemindersRoute(req, res) {
     await ensureConnection();
     const { runDaily } = require('./src/services/reminderJobs');
     const { forEachActiveGym, rollSubscriptionStatuses, sendOwnerBillingNotices } = require('./src/platform/jobs');
+    const { closeStaleVisits } = require('./src/attendance/services/staleVisits');
     // ?dryRun=1 to check what it would do without sending anything.
     const dryRun = req.query.dryRun === '1';
 
@@ -447,8 +448,19 @@ async function runRemindersRoute(req, res) {
     // Then the owners: trial ending, payment overdue, access ended -- each
     // notice once, after the statuses above have settled.
     const notices = await sendOwnerBillingNotices({ dryRun });
-    // Then every gym, each inside its own database.
-    const gyms = await forEachActiveGym(() => runDaily({ dryRun }));
+    // Then every gym, each inside its own database. Visits nobody checked out
+    // of are closed first, on their own: a failure there must not cost the
+    // gym its reminders, and a failed email run must not leave members
+    // "inside" for ever.
+    const gyms = await forEachActiveGym(async () => {
+      let staleVisits;
+      try {
+        staleVisits = await closeStaleVisits({ dryRun });
+      } catch (error) {
+        staleVisits = { error: error.message };
+      }
+      return { staleVisits, ...(await runDaily({ dryRun })) };
+    });
 
     return res.json({ success: true, dryRun, subscriptions, notices, gyms });
   } catch (error) {
