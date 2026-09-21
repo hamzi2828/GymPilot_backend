@@ -65,6 +65,10 @@ router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile
 router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
 router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
 router.post('/admin/users/:id/username', auth, requirePermission('users', 'manage'), userController.regenerateUsername);
+// The member picker on the desk screens (lockers, till, bookings, PT,
+// messaging, package orders): any staff account, searched and bounded. See
+// controller/memberOptionsController.js.
+router.get('/admin/members/options', auth, requirePermission.requireStaff, require('../controller/memberOptionsController').options);
 
 // ---------------------------------------------------------------------------
 // Member profiles (photo, health, agreement, documents, tags, notes) and the
