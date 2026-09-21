@@ -54,29 +54,81 @@ const SHARED = {
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 
+// The account a sign-in or reset is aimed at, as it was typed: the email on
+// the website and the platform panel, the username on the phone app, the
+// challenge id at the emailed-code step. Lowercased, so "Ann@Gym.com" and
+// "ann@gym.com" are one bucket.
+function submittedIdentifier(req) {
+  const body = (req && req.body) || {};
+  const value = body.email || body.username || body.challengeId || '';
+  return String(value).toLowerCase().trim().slice(0, 200);
+}
+
+// One bucket per address AND account. A gym's members share one public
+// address on the gym Wi-Fi; keyed on the address alone, one member fumbling
+// a password locked every member out.
+function identityKey(req) {
+  return `${clientKey(req)}|${submittedIdentifier(req)}`;
+}
+
+// Two limiters run as one middleware, so every route that mounts
+// `loginLimiter` or `passwordResetLimiter` gets both without changing.
+function both(first, second) {
+  return function limited(req, res, next) {
+    first(req, res, (error) => (error ? next(error) : second(req, res, next)));
+  };
+}
+
 /**
- * Sign-in. Counts only failures, so somebody legitimately signing in and out
+ * Sign-in: the website, the phone app, the platform panel and the 2FA code
+ * step. Counts only failures, so somebody legitimately signing in and out
  * all day at the front desk is never locked out by their own success.
+ *
+ * Twenty failures per address and account, the ceiling that stops a guessing
+ * attack on one account; and a looser two hundred per address, which a whole
+ * gym's Wi-Fi of members will not reach but a script working through a list
+ * of accounts will.
  */
-const loginLimiter = rateLimit({
-  ...SHARED,
-  windowMs: 15 * MINUTE,
-  max: 20,
-  skipSuccessfulRequests: true,
-  message: 'Too many sign-in attempts. Please wait a few minutes and try again.'
-});
+const loginLimiter = both(
+  rateLimit({
+    ...SHARED,
+    windowMs: 15 * MINUTE,
+    max: 200,
+    skipSuccessfulRequests: true,
+    message: 'Too many sign-in attempts from this network. Please wait a few minutes and try again.'
+  }),
+  rateLimit({
+    ...SHARED,
+    keyGenerator: identityKey,
+    windowMs: 15 * MINUTE,
+    max: 20,
+    skipSuccessfulRequests: true,
+    message: 'Too many sign-in attempts. Please wait a few minutes and try again.'
+  })
+);
 
 /**
  * Password reset requests. Tighter, and it counts successes too: the thing
  * being limited here is how many emails one address can cause to be sent, and
- * a successful request is exactly what sends one.
+ * a successful request is exactly what sends one. Five an hour per address
+ * and account, thirty per address -- the same split as sign-in, for the same
+ * shared-Wi-Fi reason.
  */
-const passwordResetLimiter = rateLimit({
-  ...SHARED,
-  windowMs: HOUR,
-  max: 5,
-  message: 'Too many password reset requests. Please wait an hour and try again.'
-});
+const passwordResetLimiter = both(
+  rateLimit({
+    ...SHARED,
+    windowMs: HOUR,
+    max: 30,
+    message: 'Too many password reset requests from this network. Please wait an hour and try again.'
+  }),
+  rateLimit({
+    ...SHARED,
+    keyGenerator: identityKey,
+    windowMs: HOUR,
+    max: 5,
+    message: 'Too many password reset requests. Please wait an hour and try again.'
+  })
+);
 
 /**
  * Consuming a reset token. Separate from the request limiter because this is
@@ -193,6 +245,7 @@ const paymentLimiter = rateLimit({
 
 module.exports = {
   clientKey,
+  identityKey,
   loginLimiter,
   passwordResetLimiter,
   passwordResetConfirmLimiter,
