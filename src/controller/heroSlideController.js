@@ -1,7 +1,7 @@
 const HeroSlide = require('../models/heroSlideModel');
 const path = require('path');
 const fs = require('fs');
-const { localUploadPath, MAX_HERO_FILE_BYTES } = require('../helper/upload');
+const { localUploadPath, tenantUploadFolder, MAX_HERO_FILE_BYTES } = require('../helper/upload');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -13,6 +13,20 @@ if (USE_BLOB_STORAGE) {
 // Hero images are the biggest pictures on the site; they get the same ceiling
 // the blog hero does rather than the 5 MB default.
 const HERO_UPLOAD_OPTIONS = { kind: 'image', maxBytes: MAX_HERO_FILE_BYTES };
+
+// An image too large for this API goes from the browser straight to the store
+// (controller/uploadController.js) and arrives here as `uploadedImageUrl`
+// instead of a file. Undefined when none was sent; null when one was sent
+// but is not in this gym's own hero-slides folder of the store, which is
+// refused rather than stored.
+const UPLOADED_URL_REFUSED = 'The uploaded image could not be used. Please upload it again.';
+
+function uploadedImageUrl(req) {
+  const value = req.body && req.body.uploadedImageUrl;
+  if (req.file || value === undefined || value === '') return undefined;
+  if (!USE_BLOB_STORAGE || !blobUpload) return null;
+  return blobUpload.ownBlobUrl(value, tenantUploadFolder(req), 'hero-slides');
+}
 
 // The admin page and the model grew different names for the same three
 // fields (subtitle/description, ctaText/buttonText, ctaLink/buttonLink).
@@ -120,6 +134,7 @@ const createSlide = async (req, res) => {
       ariaLabel
     } = req.body;
     const { description, buttonText, buttonLink } = readAliases(req.body);
+    const uploaded = uploadedImageUrl(req);
 
     // Handle file upload
     let imageUrl = '';
@@ -131,6 +146,10 @@ const createSlide = async (req, res) => {
       } else {
         imageUrl = `/uploads/${req.file.filename}`;
       }
+    } else if (uploaded === null) {
+      return res.status(400).json({ success: false, message: UPLOADED_URL_REFUSED });
+    } else if (uploaded) {
+      imageUrl = uploaded;
     } else {
       return res.status(400).json({
         success: false,
@@ -211,6 +230,11 @@ const updateSlide = async (req, res) => {
 
     const oldImagePath = slide.imageUrl;
 
+    const uploaded = uploadedImageUrl(req);
+    if (uploaded === null) {
+      return res.status(400).json({ success: false, message: UPLOADED_URL_REFUSED });
+    }
+
     const active = readBoolean(isActive);
     const updateData = {
       title: title || slide.title,
@@ -241,8 +265,10 @@ const updateSlide = async (req, res) => {
           }
         }
       }
+    } else if (uploaded) {
+      updateData.imageUrl = uploaded;
     }
-    
+
     const updatedSlide = await HeroSlide.findByIdAndUpdate(id, updateData, {
       new: true,
       runValidators: true

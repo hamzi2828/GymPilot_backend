@@ -5,9 +5,43 @@ const { EXTENSION_FOR_MIME } = require('./upload');
 
 // Every gym's files sit under their own prefix in the store, named by the
 // gym's slug, so listings and clean-ups can be scoped to one customer.
+function folderFor(slug, folder) {
+  return slug ? `${slug}/${folder}` : folder;
+}
+
 function tenantFolder(folder) {
   const gym = currentTenant();
-  return gym && gym.slug ? `${gym.slug}/${folder}` : folder;
+  return folderFor(gym && gym.slug, folder);
+}
+
+// Where the store serves public files from: <store id> + this suffix.
+const BLOB_HOST_SUFFIX = '.public.blob.vercel-storage.com';
+
+/**
+ * A URL the browser says it uploaded straight to the store (see
+ * controller/uploadController.js), returned without query or fragment when
+ * it is an https file on the Blob host under this gym's `<slug>/<folder>/`;
+ * otherwise null. The check is on the parsed path, so `..` segments are
+ * already resolved and cannot climb into another gym's folder.
+ * @param {string} value - the URL as submitted
+ * @param {string} slug - the gym's slug ('' outside a gym, as tenantFolder)
+ * @param {string} folder - e.g. 'hero-slides'
+ * @returns {string|null}
+ */
+function ownBlobUrl(value, slug, folder) {
+  if (typeof value !== 'string' || !value || value.length > 2048) return null;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) return null;
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith(BLOB_HOST_SUFFIX) || host.length === BLOB_HOST_SUFFIX.length) return null;
+  const prefix = `/${folderFor(slug, folder)}/`;
+  if (!url.pathname.startsWith(prefix) || url.pathname.length === prefix.length) return null;
+  return `${url.origin}${url.pathname}`;
 }
 
 // What may be stored, by kind. Images are what every caller originally sent
@@ -314,6 +348,8 @@ module.exports = {
   processUploadedFiles,
   uploadScreenshot,
   inferKind,
+  folderFor,
+  ownBlobUrl,
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_DOCUMENT_MIME_TYPES,
   ALLOWED_VIDEO_MIME_TYPES,

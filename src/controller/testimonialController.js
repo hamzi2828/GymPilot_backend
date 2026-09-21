@@ -4,12 +4,27 @@
 // admin panel can reuse the same list / modal / reorder patterns.
 
 const Testimonial = require('../models/testimonialModel');
+const { tenantUploadFolder } = require('../helper/upload');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 let blobUpload;
 if (USE_BLOB_STORAGE) {
   blobUpload = require('../helper/blobUpload');
+}
+
+// A photo too large for this API goes from the browser straight to the store
+// (controller/uploadController.js) and arrives here as `uploadedImageUrl`
+// instead of a file. Undefined when none was sent; null when one was sent
+// but is not in this gym's own testimonials folder of the store, which is
+// refused rather than stored.
+const UPLOADED_URL_REFUSED = 'The uploaded photo could not be used. Please upload it again.';
+
+function uploadedImageUrl(req) {
+  const value = req.body && req.body.uploadedImageUrl;
+  if (req.file || value === undefined || value === '') return undefined;
+  if (!USE_BLOB_STORAGE || !blobUpload) return null;
+  return blobUpload.ownBlobUrl(value, tenantUploadFolder(req), 'testimonials');
 }
 
 async function resolveUploadedImage(req) {
@@ -69,7 +84,11 @@ const testimonialController = {
     try {
       const { name, role, quote, rating, isActive, order } = req.body;
 
-      const imageUrl = await resolveUploadedImage(req);
+      const uploaded = uploadedImageUrl(req);
+      if (uploaded === null) {
+        return res.status(400).json({ success: false, message: UPLOADED_URL_REFUSED });
+      }
+      const imageUrl = uploaded || (await resolveUploadedImage(req));
 
       const testimonial = new Testimonial({
         name,
@@ -107,6 +126,11 @@ const testimonialController = {
         return res.status(404).json({ success: false, message: 'Testimonial not found' });
       }
 
+      const uploaded = uploadedImageUrl(req);
+      if (uploaded === null) {
+        return res.status(400).json({ success: false, message: UPLOADED_URL_REFUSED });
+      }
+
       const { name, role, quote, rating, isActive, order } = req.body;
       if (name !== undefined) testimonial.name = name;
       if (role !== undefined) testimonial.role = role;
@@ -115,7 +139,7 @@ const testimonialController = {
       if (isActive !== undefined) testimonial.isActive = isActive === 'true' || isActive === true;
       if (order !== undefined) testimonial.order = parseInt(order, 10) || 0;
 
-      const imageUrl = await resolveUploadedImage(req);
+      const imageUrl = uploaded || (await resolveUploadedImage(req));
       if (imageUrl) testimonial.imageUrl = imageUrl;
 
       await testimonial.save();

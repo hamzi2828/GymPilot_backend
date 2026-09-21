@@ -349,6 +349,14 @@ router.put('/testimonials/:id', auth, requirePermission('testimonials'), uploadS
 router.patch('/testimonials/:id/status', auth, requirePermission('testimonials'), testimonialController.toggleTestimonialStatus);
 router.delete('/testimonials/:id', auth, requirePermission('testimonials'), testimonialController.deleteTestimonial);
 
+// Large files straight from the browser to Vercel Blob -- see
+// controller/uploadController.js. The token route checks its own permission
+// (by the kind of file asked for) and also takes Vercel's signed completion
+// callback, which carries no user.
+const uploadController = require('../controller/uploadController');
+router.get('/api/uploads/capabilities', auth, requirePermission.requireStaff, uploadController.capabilities);
+router.post('/api/uploads/blob', uploadController.authorizeBlobUpload, uploadController.handleBlobUpload);
+
 // Newsletter routes
 const newsletterController = require('../controller/newsletterController');
 router.post('/api/newsletter/subscribe', newsletterLimiter, newsletterController.subscribe);
