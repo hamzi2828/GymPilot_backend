@@ -49,7 +49,17 @@ async function loadOrder(req, { staffLevel = 'manage', allowMember = true } = {}
 
   const me = userId(req);
   const isOwner = me && order.userId && String(order.userId) === String(me);
-  const isStaff = req.user && (await can(req.user.role, 'package-orders', staffLevel));
+
+  // The account's live role, never the one written into its token: a
+  // manager demoted this morning still carries "manager" in a token that
+  // may have weeks left to run. requirePermission has already read it on
+  // the routes it guards; everywhere else it is read here.
+  let role = req.roleSlug || null;
+  if (!role && me && mongoose.Types.ObjectId.isValid(String(me))) {
+    const account = await User.findById(me).select('role isActive').lean();
+    role = account && account.isActive !== false ? account.role : null;
+  }
+  const isStaff = !!role && (await can(role, 'package-orders', staffLevel));
 
   if (isStaff) return { order, source: 'staff' };
   if (isOwner && allowMember) return { order, source: 'member' };

@@ -4,6 +4,7 @@
 // person), and the webhook that keeps Stripe and the orders in step. What
 // happens to a membership afterwards lives in membershipController.
 
+const mongoose = require('mongoose');
 const gymfolioPaymentService = require('../../services/gymfolioPaymentService');
 const PackageOrder = require('../models/packageOrderModel');
 const Package = require('../models/packageModel');
@@ -173,7 +174,15 @@ const gymfolioPaymentController = {
       const { id, orderId } = req.params;
       const wanted = orderId || id;
       const { can } = require('../../services/roleService');
-      const staff = req.user && (await can(req.user.role, 'package-orders', 'view'));
+      // The live role, as loadOrder reads it: a demoted manager's token still
+      // says "manager" until it expires.
+      let role = req.roleSlug || null;
+      const me = userIdOf(req);
+      if (!role && me && mongoose.Types.ObjectId.isValid(String(me))) {
+        const account = await User.findById(me).select('role isActive').lean();
+        role = account && account.isActive !== false ? account.role : null;
+      }
+      const staff = !!role && (await can(role, 'package-orders', 'view'));
       const order = await gymfolioPaymentService.getOrderById(wanted, staff ? null : userIdOf(req));
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       return res.status(200).json({ success: true, data: order });

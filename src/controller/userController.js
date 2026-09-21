@@ -1182,7 +1182,7 @@ const userController = {
             // revokes the administrator role; and losing the last active
             // administrator would leave nobody able to hand the role back out
             // (services/roleGuards.js).
-            const current = await User.findById(id).select('role isActive').lean();
+            const current = await User.findById(id).select('role isActive employment.isStaff').lean();
             if (!current) {
                 return res.status(404).json({ message: 'User not found' });
             }
@@ -1202,15 +1202,25 @@ const userController = {
                 ? { 'employment.isStaff': true, 'employment.endedAt': null }
                 : { 'employment.isStaff': false };
 
+            // A new role ends the account's sessions. A token carries the
+            // role it was signed in with, and not every check re-reads the
+            // live one, so a demoted manager must not keep a token saying
+            // "manager" for the weeks it has left to run.
+            const roleChanges = current.role !== target.slug
+                || !!(current.employment && current.employment.isStaff) !== !!target.isStaff;
+            const change = { $set: { role: target.slug, ...employmentPatch } };
+            if (roleChanges) change.$inc = { tokenVersion: 1 };
+
             const updated = await User.findByIdAndUpdate(
                 id,
-                { $set: { role: target.slug, ...employmentPatch } },
+                change,
                 { new: true, runValidators: true }
             );
 
             if (!updated) {
                 return res.status(404).json({ message: 'User not found' });
             }
+            if (roleChanges) forgetSession(updated._id);
 
             const { password: _pw, ...safe } = updated.toObject();
             return res.status(200).json({ message: 'Role updated successfully', data: safe });

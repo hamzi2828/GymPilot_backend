@@ -459,6 +459,11 @@ module.exports = {
       const user = await User.findById(id).select('+employment.payroll');
       if (!user) return res.status(404).json({ message: 'Staff member not found' });
 
+      // Who the account was before this edit: a change of role, or on or
+      // off the staff list, ends its sessions below.
+      const wasRole = user.role;
+      const wasStaff = !!(user.employment && user.employment.isStaff);
+
       const { firstName, lastName, phone, role } = req.body || {};
 
       if (firstName !== undefined) user.firstName = String(firstName).trim() || user.firstName;
@@ -511,8 +516,15 @@ module.exports = {
         user.attendanceLocation = String(req.body.attendanceLocation).trim();
       }
 
+      // A token carries the role it was signed in with, and not every check
+      // re-reads the live one: a new role ends the old sessions rather than
+      // leaving a demoted manager weeks of "manager".
+      const roleChanged = user.role !== wasRole || !!(user.employment && user.employment.isStaff) !== wasStaff;
+      if (roleChanged) user.tokenVersion = (user.tokenVersion || 0) + 1;
+
       await user.save();
       invalidate();
+      if (roleChanged) forgetSession(user._id);
 
       return res.json({
         success: true,
@@ -600,13 +612,18 @@ module.exports = {
       });
       if (refusal) return res.status(403).json({ message: refusal });
 
+      // Sessions signed in as staff end with the job (see update above).
+      const roleChanged = user.role !== MEMBER_SLUG || !!(user.employment && user.employment.isStaff);
+
       user.role = MEMBER_SLUG;
       user.employment.isStaff = false;
       user.employment.endedAt = new Date();
       user.allowAttendanceApp = false;
       user.allowFingerprintEnrollment = false;
+      if (roleChanged) user.tokenVersion = (user.tokenVersion || 0) + 1;
       await user.save();
       invalidate();
+      if (roleChanged) forgetSession(user._id);
 
       return res.json({
         success: true,
