@@ -60,19 +60,30 @@ const GYMFOLIO_URL = process.env.GYMFOLIO_URL || 'http://localhost:3000';
 // reach this API from a browser -- the member app's web build, which Expo
 // serves from http://localhost:8081, is the usual one. The app on a phone
 // sends no Origin header at all, so it never needs an entry here.
+//
+// PLATFORM_ADMIN_ORIGIN (the marketing site + panel) may be a list too, so
+// the apex and the www host can both be named. Every entry is compared the
+// way a browser writes an Origin: lowercase, no trailing slash -- an env
+// value typed as "https://GymPilot.com/" used to match nothing.
+function normalizeOrigin(value) {
+  return String(value || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+function originList(value) {
+  return String(value || '').split(',').map(normalizeOrigin);
+}
 const STATIC_ORIGINS = new Set(
   [
     FRONTEND_ORIGIN,
     GYMFOLIO_URL,
-    process.env.PLATFORM_ADMIN_ORIGIN,
+    ...originList(process.env.PLATFORM_ADMIN_ORIGIN),
     'http://localhost:3000',
     'http://localhost:3001',
     'https://www.thejymor.com',
     'https://thejymor.com',
-    ...String(process.env.EXTRA_CORS_ORIGINS || '')
-      .split(',')
-      .map((entry) => entry.trim().replace(/\/+$/, ''))
-  ].filter(Boolean)
+    ...originList(process.env.EXTRA_CORS_ORIGINS)
+  ]
+    .map(normalizeOrigin)
+    .filter(Boolean)
 );
 const { isRegisteredOrigin } = require('./src/platform/middleware/resolveTenant');
 
@@ -81,7 +92,7 @@ app.use(cors({
     // No Origin header: not a browser (curl, the desktop app, Stripe). CORS
     // does not apply, so there is nothing to refuse.
     if (!origin) return callback(null, true);
-    if (STATIC_ORIGINS.has(origin)) return callback(null, true);
+    if (STATIC_ORIGINS.has(normalizeOrigin(origin))) return callback(null, true);
     try {
       await ensureConnection();
       return callback(null, await isRegisteredOrigin(origin));
@@ -91,6 +102,10 @@ app.use(cors({
     }
   },
   credentials: true,
+  // Downloads (report CSVs, invoice PDFs) name their file in this header;
+  // without exposing it, script on another origin cannot read it and every
+  // download is saved as "download".
+  exposedHeaders: ['Content-Disposition'],
 }));
 
 // ---------------------------------------------------------------------------
@@ -538,6 +553,16 @@ app.use((error, req, res, next) => {
     return res.status(400).json({ success: false, error: 'Upload error', message: error.message });
   }
   
+  // The body parsers' refusals are the caller's mistake too: a body that is
+  // not JSON, or one over the size limit. Answering 500 made both look like a
+  // server fault and hid what to fix.
+  if (error && error.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, error: 'Invalid JSON', message: 'The request body is not valid JSON.' });
+  }
+  if (error && error.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, error: 'Payload too large', message: 'The request body is too large.' });
+  }
+
   // Default error handler
   console.error(error);
   res.status(500).json({ 

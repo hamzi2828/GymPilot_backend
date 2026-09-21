@@ -53,7 +53,9 @@ function maskEmail(email) {
  * a reset link pointing at an attacker's domain would hand them the token.
  */
 async function panelOrigin(req) {
-  if (process.env.PLATFORM_ADMIN_ORIGIN) return process.env.PLATFORM_ADMIN_ORIGIN.replace(/\/+$/, '');
+  // May be a comma-separated list (www and apex, for CORS); the first entry
+  // is the one links point at.
+  if (process.env.PLATFORM_ADMIN_ORIGIN) return process.env.PLATFORM_ADMIN_ORIGIN.split(',')[0].trim().replace(/\/+$/, '');
   const origin = String(req.headers.origin || '').replace(/\/+$/, '');
   if (origin) {
     const trusted = new Set([process.env.FRONTEND_ORIGIN, process.env.GYMFOLIO_URL].filter(Boolean).map((o) => o.replace(/\/+$/, '')));

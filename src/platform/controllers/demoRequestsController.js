@@ -126,7 +126,8 @@ function validateDemoRequest(body) {
 }
 
 function panelUrl() {
-  const origin = (process.env.PLATFORM_ADMIN_ORIGIN || process.env.FRONTEND_ORIGIN || 'http://localhost:3001').replace(/\/+$/, '');
+  // PLATFORM_ADMIN_ORIGIN may list several origins for CORS; links use the first.
+  const origin = (process.env.PLATFORM_ADMIN_ORIGIN || process.env.FRONTEND_ORIGIN || 'http://localhost:3001').split(',')[0].trim().replace(/\/+$/, '');
   return `${origin}/super-admin/demo-requests`;
 }
 
