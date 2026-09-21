@@ -179,6 +179,20 @@ function bindEmitters(req, res) {
   }
 }
 
+// What a gym whose subscription lapsed may still do: its owner signs in (both
+// steps, when 2FA is on) and pays. Without this, an expired gym answers 402
+// to everything -- including the checkout that would end the 402. Each of
+// these is still behind its own login / auth + Settings permission; every
+// other path keeps the 402. Suspended and unknown gyms get no exceptions.
+const RENEWAL_EXACT = new Set(['POST /user/login', 'POST /user/login/2fa']);
+const RENEWAL_PREFIX = '/api/billing/';
+
+function isRenewalRequest(req) {
+  const path = String(req.path || (req.originalUrl || '').split('?')[0] || '').replace(/\/+$/, '');
+  if (path === RENEWAL_PREFIX.slice(0, -1) || path.startsWith(RENEWAL_PREFIX)) return true;
+  return RENEWAL_EXACT.has(`${req.method} ${path}`);
+}
+
 async function resolveTenant(req, res, next) {
   try {
     const resolved = await resolveGymForRequest(req);
@@ -195,7 +209,13 @@ async function resolveTenant(req, res, next) {
 
     const blocked = Gym.accessBlock(gym);
     if (blocked) {
-      return res.status(blocked.status).json({ success: false, code: blocked.code, message: blocked.message });
+      const renewable = blocked.code === 'SUBSCRIPTION_INACTIVE';
+      if (!(renewable && isRenewalRequest(req))) {
+        const body = { success: false, code: blocked.code, message: blocked.message };
+        // Tells the website to offer the gym's owner a way to pay.
+        if (renewable) body.renewable = true;
+        return res.status(blocked.status).json(body);
+      }
     }
 
     const connection = await getTenantConnection(gym);
@@ -251,5 +271,6 @@ module.exports = {
   findGymBySlug,
   isRegisteredOrigin,
   invalidateTenantCache,
-  candidateHosts
+  candidateHosts,
+  isRenewalRequest
 };

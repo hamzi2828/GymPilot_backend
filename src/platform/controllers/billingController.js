@@ -12,7 +12,11 @@
 //                                        addons, stripeConfigured, hasStripeSubscription,
 //                                        contactEmail } }
 //   POST /api/billing/checkout      { billingCycle? } -> { success, data: { url } }
+//                                   409 { code: 'ALREADY_SUBSCRIBED' } when Stripe already bills the gym
 //   POST /api/billing/portal        -> { success, data: { url } }
+//
+// Stripe sends the owner back to /admin/settings?tab=billing, with
+// &billing=success or &billing=cancelled after a checkout.
 
 const Gym = require('../models/gymModel');
 const { planFor } = require('../entitlements');
@@ -34,6 +38,20 @@ function fail(res, error) {
 /** The gym as it is now, not as the resolver cached it half a minute ago. */
 async function freshGym(req) {
   return (await Gym.findByIdWithUri(req.tenant._id)) || req.tenant;
+}
+
+// A Stripe subscription in one of these is still charging the gym; a second
+// checkout would bill it twice. Expired / cancelled gyms may start afresh.
+const LIVE_STATUSES = ['trialing', 'active', 'past_due'];
+
+function hasLiveStripeSubscription(gym) {
+  const sub = (gym && gym.subscription) || {};
+  return !!sub.stripeSubscriptionId && LIVE_STATUSES.includes(sub.status);
+}
+
+/** Where Stripe sends the owner back to: the Billing tab of Settings. */
+function billingTabUrl(origin, outcome) {
+  return `${origin}/admin/settings?tab=billing${outcome ? `&billing=${outcome}` : ''}`;
 }
 
 function daysUntil(date, now = new Date()) {
@@ -94,12 +112,20 @@ module.exports = {
         return res.status(400).json({ success: false, message: `Billing cycle must be one of: ${Gym.BILLING_CYCLES.join(', ')}` });
       }
 
+      if (hasLiveStripeSubscription(gym)) {
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_SUBSCRIBED',
+          message: 'This gym already has a subscription. Change the plan, card or cycle from Manage billing.'
+        });
+      }
+
       const origin = frontendOrigin();
       const { url } = await createCheckoutSession({
         gym,
         billingCycle: body.billingCycle,
-        successUrl: `${origin}/admin/settings?billing=success`,
-        cancelUrl: `${origin}/admin/settings?billing=cancelled`
+        successUrl: billingTabUrl(origin, 'success'),
+        cancelUrl: billingTabUrl(origin, 'cancelled')
       });
       return res.json({ success: true, data: { url } });
     } catch (error) {
@@ -114,10 +140,14 @@ module.exports = {
       if (!(gym.subscription && gym.subscription.stripeCustomerId)) {
         return res.status(409).json({ success: false, code: 'NO_STRIPE_CUSTOMER', message: 'This gym has not paid through Stripe yet, so there is no billing account to open.' });
       }
-      const { url } = await createPortalSession({ gym, returnUrl: `${frontendOrigin()}/admin/settings` });
+      const { url } = await createPortalSession({ gym, returnUrl: billingTabUrl(frontendOrigin()) });
       return res.json({ success: true, data: { url } });
     } catch (error) {
       return fail(res, error);
     }
-  }
+  },
+
+  // exported for tests
+  hasLiveStripeSubscription,
+  billingTabUrl
 };
