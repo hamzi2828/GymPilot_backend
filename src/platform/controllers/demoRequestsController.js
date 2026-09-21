@@ -167,6 +167,48 @@ async function notifyAdmins(request) {
   await Promise.all(admins.map((a) => sendEmail(a.email, subject, shell(PLATFORM_NAME, 'New demo request', body))));
 }
 
+/**
+ * Tells the person who sent it that it arrived and what happens next -- a
+ * checkout with no email back reads like one that went nowhere. Like the
+ * admins' notice, a failure is logged and never surfaced: the request is
+ * already saved.
+ */
+async function confirmToRequester(request) {
+  const trial = request.kind === 'trial';
+  const first = request.firstName || String(request.name || '').trim().split(/\s+/)[0] || 'there';
+  const gym = escapeHtml(request.gymName || 'your gym');
+  const plan = request.plan && request.plan.slug ? request.plan : null;
+  const body = [
+    paragraph(
+      trial
+        ? `Hi ${escapeHtml(first)}, thanks for choosing ${escapeHtml(PLATFORM_NAME)}. We have everything we need for ${gym} and are setting it up now.`
+        : `Hi ${escapeHtml(first)}, thanks for asking to see ${escapeHtml(PLATFORM_NAME)} for ${gym}. Your request reached us.`
+    ),
+    plan
+      ? detailTable([
+          ['Plan', `${plan.name} (${plan.billingCycle})`],
+          ['Add-ons', (plan.addonNames || []).join(', ') || 'none'],
+          ['Free trial', plan.trialDays ? `${plan.trialDays} days` : ''],
+          ['Then', `${plan.currency} ${Number(plan.amount || 0).toLocaleString('en-US')} / ${plan.billingCycle === 'yearly' ? 'year' : 'month'}`]
+        ])
+      : '',
+    paragraph(
+      trial
+        ? 'Usually within one working day you will get a second email with your gym\'s web address and a link to set your admin password. Nothing to pay today.'
+        : 'We will be in touch within one working day to arrange a walkthrough on your own numbers.'
+    )
+  ].join('');
+  const subject = trial ? `We are setting up ${request.gymName || 'your gym'} on ${PLATFORM_NAME}` : `Your ${PLATFORM_NAME} demo request`;
+  const result = await sendEmail(
+    request.email,
+    subject,
+    shell(PLATFORM_NAME, trial ? 'Your gym is on its way' : 'Thanks for getting in touch', body, `You are receiving this because this address was entered on the ${escapeHtml(PLATFORM_NAME)} website. If that was not you, ignore this email.`)
+  );
+  if (!result || !result.success) {
+    console.error(`[platform] demo request confirmation to ${request.email} failed:`, (result && result.error) || 'unknown error');
+  }
+}
+
 function publicRow(doc) {
   return {
     id: String(doc._id),
@@ -186,6 +228,8 @@ function publicRow(doc) {
     source: doc.source || '',
     status: doc.status,
     notes: doc.notes || '',
+    gymId: doc.gymId ? String(doc.gymId) : null,
+    convertedAt: doc.convertedAt || null,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt
   };
@@ -211,18 +255,16 @@ module.exports = {
         createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
       });
       if (recent) {
-        // Somebody going back to checkout to change their mind: the newer
-        // choice replaces the older one on the same record rather than
-        // being dropped on the floor.
-        if (result.data.kind === 'trial') {
-          if (priced) {
-            recent.plan = priced.plan;
-            recent.warnings = priced.warnings;
-          }
-          recent.preferredSlug = result.data.preferredSlug;
-          recent.message = result.data.message;
-          await recent.save();
+        // Somebody going back to fix a typo or change their mind: everything
+        // they sent the second time replaces the first on the same record --
+        // a corrected name or phone number as much as a different plan --
+        // rather than being dropped on the floor.
+        recent.set(fields);
+        if (priced) {
+          recent.plan = priced.plan;
+          recent.warnings = priced.warnings;
         }
+        await recent.save();
         return res.status(201).json({ success: true, message: THANKS, id: String(recent._id) });
       }
 
@@ -234,6 +276,7 @@ module.exports = {
         userAgent: text(req.headers['user-agent'], 500)
       });
       notifyAdmins(doc).catch((err) => console.error('[platform] demo request email failed:', err.message));
+      confirmToRequester(doc).catch((err) => console.error('[platform] demo request confirmation failed:', err.message));
       return res.status(201).json({ success: true, message: THANKS, id: String(doc._id) });
     } catch (error) {
       console.error('[platform] demo request failed:', error);
