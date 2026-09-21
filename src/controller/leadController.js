@@ -13,6 +13,7 @@ const { sendEmail } = require('../services/emailService');
 const { shell, paragraph, button, escapeHtml } = require('../templates/gymEmails');
 const notify = require('../services/gymNotifications');
 const { checkLimit } = require('../platform/planLimits');
+const T = require('../attendance/services/timeUtils');
 
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
@@ -83,6 +84,45 @@ function generatePassword(length = 14) {
 }
 
 /**
+ * The lead already open for this person, matched on email or phone -- the
+ * one a new enquiry from them is added to rather than duplicated. A lead
+ * that was won or lost is closed: asking again starts a new one.
+ */
+function openLeadFor(email, phone) {
+  const or = [];
+  if (email) or.push({ email });
+  if (phone) or.push({ phone });
+  return or.length ? Lead.findOne({ $or: or, status: { $nin: ['won', 'lost'] } }) : null;
+}
+
+// A lead's follow-up date comes from a date input, which stores the chosen
+// day as midnight UTC. So "due today or overdue" is "on or before today's
+// date at the gym": anything before midnight UTC of the gym's tomorrow.
+function followUpCutoff(todayKey) {
+  return new Date(`${T.shiftDateKey(todayKey, 1)}T00:00:00.000Z`);
+}
+
+/**
+ * The leads whose follow-up is due: still being worked (neither won nor
+ * lost) with a follow-up date of today at the gym or earlier. The board's
+ * "due for follow-up" filter (list's ?due=1) and the admin bell's "Lead
+ * follow-ups due" both read this, so the count and the list agree.
+ */
+function followUpDueFilter(todayKey = T.dateKey()) {
+  return {
+    isActive: { $ne: false },
+    status: { $nin: ['won', 'lost'] },
+    nextFollowUpAt: { $ne: null, $lt: followUpCutoff(todayKey) }
+  };
+}
+
+/** "Ann Marie Smith" -> first "Ann", last "Marie Smith". */
+function splitName(fullName, fallback = 'Enquiry') {
+  const [firstName, ...rest] = String(fullName || fallback).trim().split(/\s+/);
+  return { firstName: (firstName || fallback).slice(0, 80), lastName: rest.join(' ').slice(0, 80) };
+}
+
+/**
  * Called by the public contact form: an enquiry becomes a lead unless one
  * is already open for the same person, in which case it becomes a note on
  * it. Never throws -- the enquiry itself has already been saved.
@@ -91,10 +131,7 @@ async function leadFromContact(contact) {
   try {
     const email = String(contact.emailAddress || '').toLowerCase().trim();
     const phone = String(contact.phoneNumber || '').trim();
-    const or = [];
-    if (email) or.push({ email });
-    if (phone) or.push({ phone });
-    const existing = or.length ? await Lead.findOne({ $or: or, status: { $nin: ['won', 'lost'] } }) : null;
+    const existing = await openLeadFor(email, phone);
     const summary = [contact.subject, contact.message].filter(Boolean).join(' — ').slice(0, 500);
     if (existing) {
       existing.notes.push({ text: `Website enquiry: ${summary}`, byName: 'Website' });
@@ -104,10 +141,10 @@ async function leadFromContact(contact) {
     }
     // Already a member? Then it is a support message, not a lead.
     if (email && (await User.exists({ email }))) return null;
-    const [firstName, ...rest] = String(contact.fullName || 'Enquiry').trim().split(/\s+/);
+    const { firstName, lastName } = splitName(contact.fullName);
     return await Lead.create({
-      firstName: firstName || 'Enquiry',
-      lastName: rest.join(' '),
+      firstName,
+      lastName,
       email,
       phone,
       source: 'website',
@@ -121,26 +158,172 @@ async function leadFromContact(contact) {
   }
 }
 
+/* ------------------------- the website's enquiry form ------------------------- */
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// The same words whatever happened, so the form never tells a stranger
+// whether somebody is already known to the gym.
+const ENQUIRY_THANKS = 'Thank you! We have your details and will be in touch soon.';
+// The same enquiry again inside this window is the send button pressed
+// twice, not a second enquiry.
+const REPEAT_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Checks and trims a website enquiry. Returns { spam: true } for a filled
+ * honeypot, otherwise { errors: [...], data: {...} }. A name and one way to
+ * reach them is all a lead needs.
+ */
+function validatePublicLead(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const str = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+  // Bots fill every field they find; people never see this one.
+  if (str(b.website, 10)) return { spam: true, errors: [], data: null };
+
+  const data = {
+    name: str(b.name, 160) || [str(b.firstName, 80), str(b.lastName, 80)].filter(Boolean).join(' '),
+    email: str(b.email, 200).toLowerCase(),
+    phone: str(b.phone, 40),
+    interest: str(b.interest, 200),
+    message: str(b.message, 2000),
+    // Which page of the website it was sent from, for the note.
+    page: str(b.page, 200)
+  };
+  const errors = [];
+  if (!data.name) errors.push('Please tell us your name');
+  if (data.email && !EMAIL_RE.test(data.email)) errors.push('Please enter a valid email address');
+  if (!data.email && !data.phone) errors.push('Please give an email address or phone number');
+  return { spam: false, errors, data };
+}
+
+/**
+ * A checked website enquiry, into the pipeline: a note on the lead already
+ * open for the same person, otherwise a new lead from the website. Never
+ * refused for the gym's plan -- nothing about a plan limits leads, and a
+ * visitor is not the one who could upgrade it.
+ */
+async function leadFromEnquiry(data) {
+  const summary = [data.interest, data.message].filter(Boolean).join(' — ');
+  const text = `Website enquiry${data.page ? ` (${data.page})` : ''}${summary ? `: ${summary}` : ''}`.slice(0, 2000);
+  // Somebody who asked is waiting for a reply, so the lead is due for a
+  // follow-up today -- stored the way the board's date input stores a day
+  // (midnight UTC), which is what puts it on the admin bell's "Lead
+  // follow-ups due" and the board's follow-up line.
+  const today = new Date(`${T.dateKey()}T00:00:00.000Z`);
+
+  const existing = await openLeadFor(data.email, data.phone);
+  if (existing) {
+    const last = existing.notes[existing.notes.length - 1];
+    const repeat = last && last.text === text && Date.now() - new Date(last.at).getTime() < REPEAT_WINDOW_MS;
+    if (!repeat) {
+      existing.notes.push({ text, byName: 'Website' });
+      existing.lastContactedAt = new Date();
+      // Brought forward, never pushed back.
+      if (!existing.nextFollowUpAt || new Date(existing.nextFollowUpAt) > today) existing.nextFollowUpAt = today;
+      await existing.save();
+    }
+    return { lead: existing, created: false };
+  }
+
+  // Unlike the contact form there is no other record of this enquiry, so it
+  // becomes a lead even from somebody who already has an account -- staff
+  // are told, and "Make member" links the two.
+  const member = data.email ? await User.exists({ email: data.email }) : null;
+  const { firstName, lastName } = splitName(data.name);
+  const lead = await Lead.create({
+    firstName,
+    lastName,
+    email: data.email,
+    phone: data.phone,
+    source: 'website',
+    interest: data.interest,
+    nextFollowUpAt: today,
+    notes: [{ text: member ? `${text} (already has an account with this email)` : text, byName: 'Website' }]
+  });
+  return { lead, created: true };
+}
+
 module.exports = {
   leadFromContact,
+  validatePublicLead,
+  leadFromEnquiry,
+  splitName,
+  followUpCutoff,
+  followUpDueFilter,
 
-  // GET /admin/leads?status=&search=&limit=
+  // POST /api/leads/enquiry -- public: the website's enquiry form. Rate
+  // limited and honeypot-checked; a bot is thanked and nothing is stored.
+  publicEnquiry: async (req, res) => {
+    try {
+      const result = validatePublicLead(req.body);
+      if (result.spam) return res.status(201).json({ success: true, message: ENQUIRY_THANKS });
+      if (result.errors.length) return res.status(400).json({ success: false, message: result.errors[0], errors: result.errors });
+      await leadFromEnquiry(result.data);
+      return res.status(201).json({ success: true, message: ENQUIRY_THANKS });
+    } catch (error) {
+      console.error('[leads] website enquiry failed:', error);
+      return fail(res, 500, 'We could not send your details just now. Please try again in a moment.');
+    }
+  },
+
+  // GET /admin/leads?status=&search=&due=1&limit=&page=  (or &skip= in place of page)
+  //   due=1  only the leads whose follow-up is due (followUpDueFilter) --
+  //          where the admin bell's "Lead follow-ups due" links.
   list: async (req, res) => {
     try {
-      const filter = { isActive: { $ne: false } };
-      if (req.query.status && Lead.STATUSES.includes(req.query.status)) filter.status = req.query.status;
+      const due = ['1', 'true'].includes(String(req.query.due || '').toLowerCase());
+      const filter = due ? followUpDueFilter() : { isActive: { $ne: false } };
+      if (req.query.status && Lead.STATUSES.includes(req.query.status)) {
+        // With due=1 a stage narrows the open ones: won and lost are never
+        // due, so asking for either finds nothing.
+        filter.status = due ? { ...filter.status, $eq: req.query.status } : req.query.status;
+      }
       if (req.query.search && String(req.query.search).trim()) {
-        const rx = new RegExp(String(req.query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        filter.$or = [{ firstName: rx }, { lastName: rx }, { email: rx }, { phone: rx }, { interest: rx }];
+        // Every word has to match somewhere, so "ann smith" finds Ann Smith
+        // although no one field holds both words.
+        filter.$and = String(req.query.search)
+          .trim()
+          .split(/\s+/)
+          .slice(0, 5)
+          .map((word) => {
+            const rx = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            return { $or: [{ firstName: rx }, { lastName: rx }, { email: rx }, { phone: rx }, { interest: rx }, { tags: rx }] };
+          });
       }
       const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 200));
-      const rows = await Lead.find(filter).sort({ nextFollowUpAt: 1, createdAt: -1 }).limit(limit).lean();
+      // `page` counts from 1; an explicit `skip` wins over it.
+      const skipAsked = parseInt(req.query.skip, 10);
+      const skip = Number.isFinite(skipAsked) && skipAsked >= 0 ? skipAsked : (Math.max(1, parseInt(req.query.page, 10) || 1) - 1) * limit;
+      // _id last so the order is total and a page boundary never shows one
+      // lead twice or skips one.
+      const [rows, total] = await Promise.all([
+        Lead.find(filter).sort({ nextFollowUpAt: 1, createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
+        Lead.countDocuments(filter)
+      ]);
       const names = await staffNames(rows);
       const counts = await Lead.aggregate([{ $match: { isActive: { $ne: false } } }, { $group: { _id: '$status', n: { $sum: 1 } } }]);
-      return res.json({ success: true, data: rows.map((l) => view(l, names)), counts: Object.fromEntries(counts.map((c) => [c._id, c.n])) });
+      return res.json({
+        success: true,
+        data: rows.map((l) => view(l, names)),
+        counts: Object.fromEntries(counts.map((c) => [c._id, c.n])),
+        pagination: { page: Math.floor(skip / limit) + 1, limit, skip, total, pages: Math.max(1, Math.ceil(total / limit)) }
+      });
     } catch (error) {
       console.error('[leads] list failed:', error);
       return fail(res, 500, 'Could not load leads');
+    }
+  },
+
+  // GET /admin/leads/:id -- one lead, as the list shows it. For a link to a
+  // lead (the header search's ?id=) that is not on the board's current page.
+  getOne: async (req, res) => {
+    try {
+      if (!isId(req.params.id)) return fail(res, 404, 'Lead not found');
+      const lead = await Lead.findOne({ _id: req.params.id, isActive: { $ne: false } }).lean();
+      if (!lead) return fail(res, 404, 'Lead not found');
+      return res.json({ success: true, data: view(lead, await staffNames([lead])) });
+    } catch (error) {
+      console.error('[leads] get failed:', error);
+      return fail(res, 500, 'Could not load the lead');
     }
   },
 

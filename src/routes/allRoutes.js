@@ -89,12 +89,14 @@ router.post('/admin/users/:id/documents', auth, requirePermission('users', 'mana
 router.delete('/admin/users/:id/documents/:docId', auth, requirePermission('users', 'manage'), memberProfileController.removeDocument);
 router.post('/admin/users/:id/waiver', auth, requirePermission('users', 'manage'), memberProfileController.recordWaiver);
 router.get('/admin/leads', auth, requirePermission('leads'), leadController.list);
+router.get('/admin/leads/:id', auth, requirePermission('leads'), leadController.getOne);
 router.post('/admin/leads', auth, requirePermission('leads', 'manage'), leadController.create);
 router.put('/admin/leads/:id', auth, requirePermission('leads', 'manage'), leadController.update);
 router.patch('/admin/leads/:id/status', auth, requirePermission('leads', 'manage'), leadController.setStatus);
 router.post('/admin/leads/:id/notes', auth, requirePermission('leads', 'manage'), leadController.addNote);
 router.post('/admin/leads/:id/convert', auth, requirePermission('leads', 'manage'), leadController.convert);
 router.delete('/admin/leads/:id', auth, requirePermission('leads', 'manage'), leadController.remove);
+router.post('/api/leads/enquiry', contactLimiter, leadController.publicEnquiry); // Public route: the website's enquiry form -> a lead (shares the contact form's limit)
 
 // Bulk import from a spreadsheet -- see controller/userImportController.js.
 const userImportController = require('../controller/userImportController');
