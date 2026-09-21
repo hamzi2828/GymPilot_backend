@@ -14,13 +14,29 @@ const Trainer = require('../gymfolio/models/trainerModel');
 const payroll = require('../services/payrollService');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
+const { payChangeProblem } = require('../services/payGuards');
 
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
+// The live role requirePermission just read, never the token's claim.
+const actorRole = (req) => req.roleSlug || (req.user && req.user.role) || '';
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 
 function fail(res, code, message) {
   return res.status(code).json({ success: false, message });
+}
+
+// Why this manager may not act on this person's leave or payslip, or null
+// (services/payGuards.js): not their own, and not an administrator's unless
+// they are one.
+async function payRefusal(req, staffId, what) {
+  const person = await User.findById(staffId).select('role').lean();
+  return payChangeProblem({
+    actorId: actorId(req),
+    actorRole: actorRole(req),
+    target: { _id: staffId, role: person ? person.role : '' },
+    what
+  });
 }
 
 async function actorName(req) {
@@ -230,8 +246,10 @@ module.exports = {
     try {
       const { staffId, type, from, to, reason, approve } = req.body || {};
       if (!isId(staffId)) return fail(res, 400, 'A valid staffId is required');
-      const person = await User.findById(staffId).select('firstName lastName email employment.isStaff').lean();
+      const person = await User.findById(staffId).select('firstName lastName email role employment.isStaff').lean();
       if (!person || !person.employment || !person.employment.isStaff) return fail(res, 404, 'Staff member not found');
+      const refusal = payChangeProblem({ actorId: actorId(req), actorRole: actorRole(req), target: person, what: 'leave' });
+      if (refusal) return fail(res, 403, refusal);
       if (!DATE_KEY.test(String(from || '')) || !DATE_KEY.test(String(to || ''))) return fail(res, 400, 'from and to must be YYYY-MM-DD');
       if (to < from) return fail(res, 400, 'The end date is before the start date');
       const approved = approve !== false && approve !== 'false';
@@ -257,13 +275,26 @@ module.exports = {
   },
 
   // PATCH /staff/leave/:id   { status: approved|rejected, note, unpaid }
+  //                          { unpaid } alone flips paid/unpaid and leaves the decision as it was
   decideLeave: async (req, res) => {
     try {
       if (!isId(req.params.id)) return fail(res, 404, 'Request not found');
       const { status, note, unpaid } = req.body || {};
-      if (!['approved', 'rejected', 'pending'].includes(status)) return fail(res, 400, 'status must be approved, rejected or pending');
+      const unpaidOnly = status === undefined && unpaid !== undefined;
+      if (!unpaidOnly && !['approved', 'rejected', 'pending'].includes(status)) return fail(res, 400, 'status must be approved, rejected or pending');
       const leave = await LeaveRequest.findById(req.params.id);
       if (!leave) return fail(res, 404, 'Request not found');
+      const refusal = await payRefusal(req, leave.staffId, 'leave');
+      if (refusal) return fail(res, 403, refusal);
+
+      // Who decided, when, and why stay as they were: marking leave unpaid is
+      // a payroll correction, not a new decision.
+      if (unpaidOnly) {
+        leave.unpaid = unpaid === true || unpaid === 'true';
+        await leave.save();
+        return res.json({ success: true, message: leave.unpaid ? 'Marked unpaid.' : 'Marked paid.', data: leaveView(leave) });
+      }
+
       leave.status = status;
       leave.decisionNote = String(note || '').trim().slice(0, 300);
       if (unpaid !== undefined) leave.unpaid = unpaid === true || unpaid === 'true';
@@ -301,7 +332,7 @@ module.exports = {
       const result = await payroll.generate(range, { createdBy: actorId(req) });
       return res.json({
         success: true,
-        message: `${result.created.length} drafted, ${result.refreshed.length} refreshed, ${result.kept.length} already issued for ${L.rangeLabel(range.from, range.to)}.`,
+        message: `${result.created.length} drafted, ${result.refreshed.length} refreshed, ${result.kept.length} already issued or covered by another payslip for ${L.rangeLabel(range.from, range.to)}.`,
         data: [...result.created, ...result.refreshed, ...result.kept].map(payslipView)
       });
     } catch (error) {
@@ -317,6 +348,8 @@ module.exports = {
       const slip = await Payslip.findById(req.params.id);
       if (!slip) return fail(res, 404, 'Payslip not found');
       if (slip.status === 'paid' || slip.status === 'void') return fail(res, 409, `A ${slip.status} payslip cannot be changed`);
+      const refusal = await payRefusal(req, slip.staffId, 'payslip');
+      if (refusal) return fail(res, 403, refusal);
       const body = req.body || {};
       const earnings = readLines(body.earnings);
       const deductions = readLines(body.deductions);
@@ -341,6 +374,8 @@ module.exports = {
       const action = req.params.action;
       const slip = await Payslip.findById(req.params.id);
       if (!slip) return fail(res, 404, 'Payslip not found');
+      const refusal = await payRefusal(req, slip.staffId, 'payslip');
+      if (refusal) return fail(res, 403, refusal);
       const body = req.body || {};
 
       if (action === 'issue') {
@@ -349,32 +384,55 @@ module.exports = {
         slip.issuedAt = new Date();
       } else if (action === 'pay') {
         if (!['draft', 'issued'].includes(slip.status)) return fail(res, 409, `This payslip is ${slip.status}`);
-        slip.status = 'paid';
-        slip.issuedAt = slip.issuedAt || new Date();
-        slip.paidOn = body.paidOn ? new Date(body.paidOn) : new Date();
-        slip.paymentMethod = ['cash', 'bank_transfer', 'card', 'cheque', 'online', 'other'].includes(body.paymentMethod) ? body.paymentMethod : 'bank_transfer';
-        slip.reference = String(body.reference || '').trim().slice(0, 120);
+        const paidOn = body.paidOn ? new Date(body.paidOn) : new Date();
+        const paymentMethod = ['cash', 'bank_transfer', 'card', 'cheque', 'online', 'other'].includes(body.paymentMethod) ? body.paymentMethod : 'bank_transfer';
+        const reference = String(body.reference || '').trim().slice(0, 120);
+
+        // Claimed in one conditional write. Two clicks, or a form sent
+        // twice, both get past the check above; only the request that
+        // actually moves the payslip to paid goes on to file the wage, so it
+        // is never filed twice.
+        const paid = await Payslip.findOneAndUpdate(
+          { _id: slip._id, status: { $in: ['draft', 'issued'] } },
+          { $set: { status: 'paid', issuedAt: slip.issuedAt || new Date(), paidOn, paymentMethod, reference } },
+          { new: true }
+        );
+        if (!paid) return fail(res, 409, 'This payslip has already been paid');
+
         // Paying files the wage so the accounts overview has it.
-        if (!slip.expenseId) {
-          const expense = await Expense.create({
-            reference: await nextExpenseReference(slip.paidOn),
-            title: `Salary — ${slip.staffName} (${slip.period.label || slip.period.from})`,
-            category: 'salaries',
-            amount: slip.net,
-            currency: slip.currency,
-            incurredOn: slip.paidOn,
-            status: 'paid',
-            paidOn: slip.paidOn,
-            paymentMethod: slip.paymentMethod,
-            vendor: slip.staffName,
-            staffId: slip.staffId,
-            staffName: slip.staffName,
-            notes: `Payslip ${slip.number}${slip.reference ? ` · ref ${slip.reference}` : ''}`,
-            createdBy: actorId(req),
-            createdByName: await actorName(req)
-          });
-          slip.expenseId = expense._id;
+        if (!paid.expenseId) {
+          let expense;
+          try {
+            expense = await Expense.create({
+              reference: await nextExpenseReference(paid.paidOn),
+              title: `Salary — ${paid.staffName} (${paid.period.label || paid.period.from})`,
+              category: 'salaries',
+              amount: paid.net,
+              currency: paid.currency,
+              incurredOn: paid.paidOn,
+              status: 'paid',
+              paidOn: paid.paidOn,
+              paymentMethod: paid.paymentMethod,
+              vendor: paid.staffName,
+              staffId: paid.staffId,
+              staffName: paid.staffName,
+              notes: `Payslip ${paid.number}${paid.reference ? ` · ref ${paid.reference}` : ''}`,
+              createdBy: actorId(req),
+              createdByName: await actorName(req)
+            });
+          } catch (error) {
+            // Put the payslip back as it was, so paying it can simply be
+            // tried again rather than leaving it paid with no wage filed.
+            await Payslip.updateOne(
+              { _id: paid._id, status: 'paid', expenseId: null },
+              { $set: { status: slip.status, issuedAt: slip.issuedAt, paidOn: slip.paidOn, paymentMethod: slip.paymentMethod, reference: slip.reference } }
+            ).catch(() => {});
+            throw error;
+          }
+          paid.expenseId = expense._id;
+          await paid.save();
         }
+        return res.json({ success: true, message: `Payslip ${paid.status}.`, data: payslipView(paid) });
       } else if (action === 'void') {
         if (slip.status === 'paid') return fail(res, 409, 'A paid payslip cannot be voided');
         slip.status = 'void';

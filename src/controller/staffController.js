@@ -22,9 +22,11 @@ const { sendEmail } = require('../services/emailService');
 const { defaultCurrency, FALLBACK: FALLBACK_CURRENCY } = require('../services/currency');
 const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate } = require('../services/roleService');
 const T = require('../attendance/services/timeUtils');
+const { openVisitExpr } = require('../attendance/services/staleVisits');
 const { frontendOrigin: tenantOrigin } = require('../platform/tenantContext');
 const { checkLimit } = require('../platform/planLimits');
 const guards = require('../services/roleGuards');
+const { payChangeProblem } = require('../services/payGuards');
 const { gymSiteName } = require('../services/gymName');
 const { forgetSession } = require('../middleware/auth');
 
@@ -119,6 +121,21 @@ function cleanPayroll(input = {}, fallbackCurrency = FALLBACK_CURRENCY) {
     accountNumber: String(input.accountNumber || '').trim(),
     notes: String(input.notes || '').trim()
   };
+}
+
+// The fields that decide what someone is paid and where the money goes.
+const PAY_FIELDS = ['basis', 'salary', 'hourlyRate', 'currency', 'cycle', 'contractHoursPerWeek', 'bankName', 'accountTitle', 'accountNumber'];
+
+// Whether an edit changes any of them. The stored side is cleaned the same
+// way the save cleans the new one, so a form that sends back what is already
+// on file (the staff form always sends the whole block) is no change.
+function payChanged(stored, next, fallbackCurrency) {
+  const before = cleanPayroll(stored || {}, fallbackCurrency);
+  return PAY_FIELDS.some((field) => {
+    // A currency never stored is not "changed" by the form filling one in.
+    if (field === 'currency' && !(stored && stored.currency)) return false;
+    return before[field] !== next[field];
+  });
 }
 
 function cleanEmployment(input = {}, existing = {}, fallbackCurrency = FALLBACK_CURRENCY) {
@@ -500,11 +517,24 @@ module.exports = {
       }
 
       if (roleDoc && roleDoc.isStaff) {
-        user.employment = cleanEmployment(
-          req.body.employment || req.body,
-          (user.employment && user.employment.toObject ? user.employment.toObject() : user.employment) || {},
-          await defaultCurrency()
-        );
+        const existing = (user.employment && user.employment.toObject ? user.employment.toObject() : user.employment) || {};
+        const currency = await defaultCurrency();
+        const next = cleanEmployment(req.body.employment || req.body, existing, currency);
+
+        // Nobody below an administrator sets their own salary or bank
+        // account, or an administrator's (services/payGuards.js). Judged on
+        // the role the account had before this edit.
+        if (payChanged(existing.payroll, next.payroll, currency)) {
+          const refusal = payChangeProblem({
+            actorId: actorId(req),
+            actorRole: actorRole(req),
+            target: { _id: user._id, role: wasRole },
+            what: 'pay'
+          });
+          if (refusal) return res.status(403).json({ message: refusal });
+        }
+
+        user.employment = next;
         if (!user.staffCode) user.staffCode = await nextStaffCode();
       }
 
