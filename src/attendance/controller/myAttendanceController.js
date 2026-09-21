@@ -91,6 +91,10 @@ module.exports = {
         ? { personId, shiftDate: { $regex: '^' + month } }
         : { personId };
 
+      // A visit the gym voided (a scan of the wrong person, a test) is left out
+      // of the list, the totals and the months alike -- the attendance model
+      // does that for every read -- so the three always agree, including for
+      // a client that does not know what "voided" means.
       const rows = await Attendance.find(visitFilter)
         .sort({ checkInAt: -1 })
         .limit(month ? 200 : limit)
@@ -217,7 +221,12 @@ module.exports = {
           // visit on a since-expired package still says what it was used for.
           package_name: (row.membership && row.membership.packageName) || '',
           status: row.status || '',
-          status_label: row.statusLabel || ''
+          status_label: row.statusLabel || '',
+          // The gym corrected this visit's times (attendanceCorrectionController).
+          edited: Array.isArray(row.edits) && row.edits.some((entry) => entry && entry.action === 'edit'),
+          // Always false here -- voided visits are not listed (see above) --
+          // and carried so a client can filter on it without special cases.
+          voided: !!row.voided
         })),
 
         // Stated rather than implied: a member with no fingerprint enrolled has

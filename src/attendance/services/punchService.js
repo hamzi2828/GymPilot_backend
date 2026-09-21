@@ -11,8 +11,10 @@
 // of two hardcoded layouts that drift apart.
 
 const Attendance = require('../models/attendanceModel');
+const PackageOrder = require('../../gymfolio/models/packageOrderModel');
+const Settings = require('../../models/settings');
 const { resolvePerson, membershipFor } = require('./peopleDirectory');
-const { OPEN_VISIT_HOURS, openVisitMatch } = require('./staleVisits');
+const { OPEN_VISIT_HOURS, openVisitMatch, staffOpenUntil } = require('./staleVisits');
 const T = require('./timeUtils');
 
 // A finger resting on the reader fires repeatedly, and a member who scans
@@ -21,8 +23,9 @@ const T = require('./timeUtils');
 const MIN_PUNCH_GAP_SECONDS = Number(process.env.ATTENDANCE_MIN_PUNCH_GAP_SECONDS || 60);
 
 // How far back a check-out may reach to find its own check-in is
-// OPEN_VISIT_HOURS, defined in staleVisits.js: the same window decides who
-// counts as "still inside" everywhere else, so the two cannot disagree.
+// OPEN_VISIT_HOURS -- or, for staff, the visit's own `openUntil` -- defined
+// in staleVisits.js: the same window decides who counts as "still inside"
+// everywhere else, so the two cannot disagree.
 
 // Minutes past the rostered start before a staff arrival counts as late.
 const LATE_GRACE_MINUTES = Number(process.env.ATTENDANCE_LATE_GRACE_MINUTES || 5);
@@ -133,6 +136,16 @@ function membershipVerdict(membership) {
     }
 
     if (days !== null && days <= EXPIRY_WARNING_DAYS) {
+      // A subscription that will renew itself is not running out: there is
+      // nothing to sell the member, so no amber and no warning -- only when
+      // it renews. (`autoRenews` is found by the punch; see autoRenews.)
+      if (m.autoRenews && m.endDate) {
+        return {
+          status: 'membership_active',
+          label: `Renews automatically on ${T.dateLabel(m.endDate)}`,
+          warning: null
+        };
+      }
       return {
         status: 'membership_expiring',
         label: `${plural(Math.max(0, days), 'day')} left`,
@@ -152,6 +165,16 @@ function membershipVerdict(membership) {
   }
 
   if (m.status === 'expired') {
+    // Over with its end date still ahead: a session pack with every session
+    // used. It is as over as a lapsed one -- same key, same warning -- but it
+    // did not end "30 days ago", which is what the magnitude below would say.
+    if (days !== null && days > 0) {
+      return {
+        status: 'membership_expired',
+        label: `No sessions left · ends in ${plural(days, 'day')}`,
+        warning: WARNINGS.membership_expired
+      };
+    }
     // daysLeft is negative once the end date has passed, so its magnitude is
     // how long ago that was.
     const ago = days === null ? null : Math.abs(days);
@@ -379,6 +402,65 @@ async function buildReceipt(record, action, person) {
 // The punch itself
 // ---------------------------------------------------------------------------
 
+// The answer to a scan that lands while the person's check-in is still fresh:
+// a second scan out of habit, a finger left on the reader, or another desk's
+// scan arriving at the same moment. The visit's receipt, and nothing recorded.
+async function alreadyCheckedIn(record, person) {
+  const detail = await buildReceipt(record, 'ignore', person);
+  return {
+    success: false,
+    ignored: true,
+    message: 'Already checked in a moment ago.',
+    detail,
+    person
+  };
+}
+
+// Its twin for a check-out that has just happened: a repeat scan on the way
+// out, or a second desk scanning the same person as the first checked them
+// out. Either way one desk prints the check-out and the other prints this.
+async function alreadyCheckedOut(record, person) {
+  const detail = await buildReceipt(record, 'ignore', person);
+  return {
+    success: false,
+    ignored: true,
+    message: 'Already checked out a moment ago.',
+    detail,
+    person
+  };
+}
+
+// Whether this gym asks members to scan on the way OUT as well as in
+// (Settings attendance.memberScanOut, default yes). Where members only scan
+// in, a member's second scan of the day is their next visit, not the end of
+// the first. Read from the settings row on the one scan that needs it -- a
+// member's scan while a visit is open -- rather than cached, so flipping the
+// setting takes effect at the very next scan on every server.
+async function memberScanOut() {
+  const settings = await Settings.findOne({ isActive: true }).select('attendance').lean();
+  return !(settings && settings.attendance && settings.attendance.memberScanOut === false);
+}
+
+// Whether the membership the desk is about to warn about will simply renew:
+// a Stripe subscription nobody has asked to cancel at the period's end. The
+// rule is reminderJobs.willAutoRenew -- the one that also keeps the renewal
+// reminder email from going out -- so the desk and the reminders agree.
+// (Required here, not at the top: it is a job module with its own
+// dependencies.) Only asked inside the warning window, so an ordinary
+// check-in pays nothing for it.
+async function autoRenews(membership) {
+  const m = membership || {};
+  const days = daysLeftOf(m);
+  if (m.status !== 'active' || !m.orderId || days === null || days > EXPIRY_WARNING_DAYS) return false;
+  if (m.sessionsLeft !== null && m.sessionsLeft !== undefined) return false;
+
+  const order = await PackageOrder.findById(m.orderId)
+    .select('payment.stripeSubscriptionId subscription.autoRenew subscription.cancelAtPeriodEnd subscription.stripeStatus')
+    .lean();
+  const { willAutoRenew } = require('../../services/reminderJobs');
+  return willAutoRenew(order);
+}
+
 async function recordPunch({ personType, personId, operator, device, method = 'fingerprint' }) {
   const person = await resolvePerson(personType, personId);
   if (!person) {
@@ -392,10 +474,16 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   const context = punchContext(operator, device, method);
 
   // An open visit is the whole state machine: if one exists this scan closes
-  // it, otherwise this scan opens a new one.
-  const openRecord = await Attendance.findOne({
+  // it, otherwise this scan opens a new one. Found by checkOutAt and the
+  // window, not by the `open` flag: a visit opened before the flag existed is
+  // still one this scan should close. A staff member who is also a trainer
+  // may have a visit open under the trainer record's id (aliasIds, see
+  // peopleDirectory) from before the two were treated as one person; this
+  // scan closes that visit rather than opening a second one.
+  const personIds = [person.id, ...(person.aliasIds || [])];
+  let openRecord = await Attendance.findOne({
     personType,
-    personId: person.id,
+    personId: { $in: personIds },
     ...openVisitMatch(now)
   }).sort({ checkInAt: -1 });
 
@@ -403,38 +491,41 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   if (openRecord) {
     const sinceCheckIn = (now.getTime() - new Date(openRecord.checkInAt).getTime()) / 1000;
     if (sinceCheckIn < MIN_PUNCH_GAP_SECONDS) {
-      const detail = await buildReceipt(openRecord, 'ignore', person);
-      return {
-        success: false,
-        ignored: true,
-        message: 'Already checked in a moment ago.',
-        detail,
-        person
-      };
+      return alreadyCheckedIn(openRecord, person);
     }
   } else {
     const lastClosed = await Attendance.findOne({
       personType,
-      personId: person.id,
+      personId: { $in: personIds },
       checkOutAt: { $ne: null }
     }).sort({ checkOutAt: -1 });
 
     if (lastClosed && (now.getTime() - new Date(lastClosed.checkOutAt).getTime()) / 1000 < MIN_PUNCH_GAP_SECONDS) {
-      const detail = await buildReceipt(lastClosed, 'ignore', person);
-      return {
-        success: false,
-        ignored: true,
-        message: 'Already checked out a moment ago.',
-        detail,
-        person
-      };
+      return alreadyCheckedOut(lastClosed, person);
     }
+  }
+
+  // ---- Members who only scan in ----
+  // Where the gym does not ask members to scan out, this scan is a new visit.
+  // The one still open is closed the way the daily job closes a forgotten
+  // visit -- no check-out time and no duration invented -- which also gives
+  // up its one-open-visit slot for the check-in below. Conditional, so a
+  // visit another desk has just closed is left as that desk left it.
+  if (openRecord && personType === 'member' && !(await memberScanOut())) {
+    await Attendance.updateOne(
+      { _id: openRecord._id, checkOutAt: null, autoClosed: { $ne: true } },
+      { $set: { autoClosed: true, autoClosedAt: now }, $unset: { open: '' } }
+    );
+    openRecord = null;
   }
 
   // ---- Check out ----
   if (openRecord) {
     openRecord.checkOutAt = now;
     openRecord.checkOut = context;
+    // The visit is over: it gives up the one-open-visit slot, so the next
+    // check-in can take it. (Absent rather than false -- see the model.)
+    openRecord.open = undefined;
     openRecord.workedMinutes = Math.round(
       (now.getTime() - new Date(openRecord.checkInAt).getTime()) / 60000
     );
@@ -450,7 +541,20 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     // Members keep the membership verdict they arrived with: the receipt on
     // the way out should still say the visit was on an expired package.
 
-    await openRecord.save();
+    // Only if nobody has checked this visit out since it was read. Two desks
+    // scanning someone who is inside both find the visit open; without this
+    // both would save a check-out and both would print one. The second save
+    // matches nothing, and that desk is told it was the repeat.
+    openRecord.$where = { checkOutAt: null };
+    try {
+      await openRecord.save();
+    } catch (error) {
+      if (error && error.name === 'DocumentNotFoundError') {
+        const winner = await Attendance.findById(openRecord._id);
+        if (winner && winner.checkOutAt) return alreadyCheckedOut(winner, person);
+      }
+      throw error;
+    }
 
     const detail = await buildReceipt(openRecord, 'check_out', person);
     detail.warning = personType === 'member' ? membershipWarningFor(openRecord) : null;
@@ -475,12 +579,13 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     personCode: person.code,
     shiftDate,
     checkInAt: now,
-    checkIn: context
+    checkIn: context,
+    open: true
   });
 
   if (personType === 'member') {
     const membership = await membershipFor(person.record);
-    const verdict = membershipVerdict(membership);
+    const verdict = membershipVerdict({ ...membership, autoRenews: await autoRenews(membership) });
 
     record.membership = {
       orderId: membership.orderId,
@@ -498,9 +603,36 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     record.status = verdict.status;
     record.statusLabel = verdict.label;
     record.varianceMinutes = verdict.variance;
+    // Open until the rostered shift is over, not for a member's 18 hours: a
+    // forgotten check-out must not be closed by tomorrow's arrival.
+    record.openUntil = staffOpenUntil(schedule, now, shiftDate);
   }
 
-  await record.save();
+  // A visit the lookup above did not count as open -- typically yesterday's,
+  // never checked out, that the daily job has not closed yet -- may still
+  // hold the one-open-visit slot and would refuse this check-in on the index.
+  // The lookup has already ruled it over, so it lets go. Exactly the lookup's
+  // complement ($nor): a row inside the window is never released, because
+  // that is another scan that has just checked this person in. It is not
+  // marked auto-closed here; that stays the job's call.
+  await Attendance.updateMany(
+    { personType, personId: person.id, open: true, $nor: [openVisitMatch(now)] },
+    { $unset: { open: '' } }
+  );
+
+  try {
+    await record.save();
+  } catch (error) {
+    // Another scan for this person checked them in between the lookup above
+    // and this insert. Theirs is the visit; this scan is the repeat. Anything
+    // else -- including a clash whose winner cannot be found -- is a real
+    // failure and goes up.
+    if (error && error.code === 11000) {
+      const winner = await Attendance.findOne({ personType, personId: person.id, open: true });
+      if (winner) return alreadyCheckedIn(winner, person);
+    }
+    throw error;
+  }
 
   const detail = await buildReceipt(record, 'check_in', person);
   detail.warning = personType === 'member' ? membershipWarningFor(record) : null;
@@ -549,6 +681,7 @@ module.exports = {
   recordPunch,
   MIN_PUNCH_GAP_SECONDS,
   OPEN_VISIT_HOURS,
+  memberScanOut,
   membershipVerdict,
   scheduleFor,
   arrivalVerdict,

@@ -305,6 +305,14 @@ const settingsSchema = new mongoose.Schema(
       noShowBanDays: { type: Number, default: 7, min: 1 },
       autoNoShow: { type: Boolean, default: false }
     },
+    // Front-desk attendance. Set from the admin attendance page
+    // (attendance/controller/attendanceCorrectionController.js).
+    attendance: {
+      // Members scan on the way out as well as in. Off for a gym where they
+      // only scan in: every member scan is then a new visit (see
+      // attendance/services/punchService.js).
+      memberScanOut: { type: Boolean, default: true }
+    },
     // Personal training.
     pt: {
       slotMinutes: { type: Number, default: 60, min: 15 },

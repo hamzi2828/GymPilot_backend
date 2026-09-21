@@ -204,7 +204,9 @@ module.exports = {
       const [orders, bookings, attendance, fingerprints, contacts] = await Promise.all([
         PackageOrder.find({ $or: [{ userId: user._id }, { 'customerInfo.email': user.email }] }).lean(),
         ClassBooking.find({ userId: user._id }).lean(),
-        Attendance.find({ personId: user._id }).sort({ checkInAt: -1 }).lean(),
+        // Every visit on record, voided ones included: an export is the
+        // member's whole data, not what the totals count.
+        Attendance.find({ personId: user._id }).setOptions({ withVoided: true }).sort({ checkInAt: -1 }).lean(),
         Fingerprint.find({ personId: user._id }).select('fingerIndex enrolledByName enrolledDevice isActive createdAt updatedAt').lean(),
         Contact.find({ email: user.email }).lean().catch(() => [])
       ]);

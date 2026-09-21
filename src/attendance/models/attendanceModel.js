@@ -36,6 +36,31 @@ const punchContextSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// The times on the row at one moment, for either side of a correction.
+const visitTimesSchema = new mongoose.Schema(
+  {
+    checkInAt: { type: Date, default: null },
+    checkOutAt: { type: Date, default: null },
+    workedMinutes: { type: Number, default: null }
+  },
+  { _id: false }
+);
+
+// One administrator correction (controller/attendanceCorrectionController.js):
+// who made it, when, why, and the times either side of it.
+const correctionSchema = new mongoose.Schema(
+  {
+    action: { type: String, enum: ['edit', 'void'], required: true },
+    at: { type: Date, default: Date.now },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    byName: { type: String, default: '' },
+    note: { type: String, default: '' },
+    before: { type: visitTimesSchema, default: () => ({}) },
+    after: { type: visitTimesSchema, default: () => ({}) }
+  },
+  { _id: false }
+);
+
 const attendanceSchema = new mongoose.Schema(
   {
     personType: {
@@ -122,7 +147,35 @@ const attendanceSchema = new mongoose.Schema(
     // are invented for it: an hours total should not include hours nobody
     // recorded.
     autoClosed: { type: Boolean, default: false },
-    autoClosedAt: { type: Date, default: null }
+    autoClosedAt: { type: Date, default: null },
+
+    // True on the one visit a scan would close, and absent on every other row:
+    // set at check-in, removed at check-out, when the daily job auto-closes the
+    // visit, and when a later check-in finds it past the window. It exists for
+    // the unique index below and for nothing else -- "is this visit open" is
+    // still answered from checkOutAt and the window (services/staleVisits.js),
+    // because rows written before the flag existed, and by the seeder, do not
+    // carry it.
+    open: { type: Boolean },
+
+    // Staff: the last moment a scan may still close this visit -- the rostered
+    // shift's end plus a grace, or a fixed span when there is no roster
+    // (staleVisits.staffOpenUntil). Written at check-in so the window can be
+    // asked of the database. Null for members, whose window is
+    // OPEN_VISIT_HOURS alone, and on rows written before it existed.
+    openUntil: { type: Date, default: null },
+
+    // A visit that should never have been recorded -- the wrong person picked
+    // at the desk, a test scan -- voided by an administrator. The row stays
+    // for the record, but no read counts it (see the middleware below).
+    voided: { type: Boolean, default: false },
+    voidedAt: { type: Date, default: null },
+    voidReason: { type: String, default: '' },
+
+    // Every administrator correction to this visit, oldest first. A punch is
+    // evidence: a correction does not erase what the desk recorded, it is
+    // written down beside it.
+    edits: { type: [correctionSchema], default: [] }
   },
   {
     timestamps: true,
@@ -144,6 +197,59 @@ attendanceSchema.index({ checkInAt: -1 });
 // "Who is inside right now" and the daily sweep of forgotten visits both ask
 // for the open rows first; without this they would walk the whole history.
 attendanceSchema.index({ checkOutAt: 1, autoClosed: 1, checkInAt: -1 });
+
+// One open visit per person. Two scans that arrive together -- the
+// fingerprint desk and the kiosk QR, or a finger left on the reader -- both
+// find no open visit and both go to check the person in; the second insert
+// fails here, and punchService answers it as the repeat scan it is.
+//
+// Partial on `open: true` (equality on a boolean, which every MongoDB version
+// accepts in a partial index), so finished visits and rows from before the
+// flag existed are not in it at all, and the index builds on a gym's existing
+// history without a migration.
+attendanceSchema.index(
+  { personType: 1, personId: 1 },
+  { unique: true, partialFilterExpression: { open: true }, name: 'one_open_visit_per_person' }
+);
+
+// A voided visit is left out of every read of this model -- find, count,
+// distinct and aggregate -- so the punch log's totals, "inside now", the
+// dashboard, reports, a member's own history and both payroll paths stop
+// counting it the moment it is voided, without each of them having to
+// remember to ask. A read that means to see voided rows says so, either by
+// filtering on `voided` itself or with the withVoided option:
+//
+//   Attendance.find(filter).setOptions({ withVoided: true })
+//   Attendance.aggregate(pipeline).option({ withVoided: true })
+//
+// Writes are not scoped: the few that could touch a voided row (the daily
+// close of forgotten visits) say `voided` in their own filter.
+const NOT_VOIDED = { voided: { $ne: true } };
+
+// Stages MongoDB requires to come first in a pipeline; the filter goes after.
+const FIRST_STAGES = ['$geoNear', '$search', '$searchMeta', '$vectorSearch', '$collStats', '$indexStats'];
+
+attendanceSchema.pre(['find', 'findOne', 'countDocuments', 'distinct'], function excludeVoided() {
+  const options = this.getOptions();
+  if (options.withVoided) {
+    // Ours, not the driver's: taken off before the query is sent.
+    delete options.withVoided;
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(this.getFilter(), 'voided')) return;
+  this.where(NOT_VOIDED);
+});
+
+attendanceSchema.pre('aggregate', function excludeVoided() {
+  if (this.options && this.options.withVoided) {
+    delete this.options.withVoided;
+    return;
+  }
+  const pipeline = this.pipeline();
+  const first = pipeline[0] || {};
+  const at = FIRST_STAGES.some((stage) => stage in first) ? 1 : 0;
+  pipeline.splice(at, 0, { $match: { ...NOT_VOIDED } });
+});
 
 module.exports =
   tenantModel('Attendance', attendanceSchema);

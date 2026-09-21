@@ -74,11 +74,16 @@ async function draftFor(person, range, { createdBy = null } = {}) {
   const currency = String(payroll.currency || 'PKR').toUpperCase();
 
   // Hours: punches filed against the staff account and against a trainer
-  // profile linked to it.
-  const trainer = await Trainer.findOne({ userId: person._id }).select('_id commissionPercent').lean();
-  const punchIds = [person._id, ...(trainer ? [trainer._id] : [])];
+  // profile linked to it. A visit an administrator voided pays nothing --
+  // the model leaves it out of every read anyway; said here as well because
+  // this is money.
+  // Every trainer profile linked to the account counts for hours (rarely more
+  // than one); the first one's terms are the PT commission, as before.
+  const trainers = await Trainer.find({ userId: person._id }).select('_id commissionPercent').lean();
+  const trainer = trainers[0] || null;
+  const punchIds = [person._id, ...trainers.map((entry) => entry._id)];
   const worked = await Attendance.aggregate([
-    { $match: { personType: 'staff', personId: { $in: punchIds }, checkInAt: { $gte: range.start, $lt: range.end }, workedMinutes: { $ne: null } } },
+    { $match: { personType: 'staff', personId: { $in: punchIds }, checkInAt: { $gte: range.start, $lt: range.end }, workedMinutes: { $ne: null }, voided: { $ne: true } } },
     { $group: { _id: null, minutes: { $sum: '$workedMinutes' } } }
   ]);
   const hours = round(((worked[0] && worked[0].minutes) || 0) / 60);
