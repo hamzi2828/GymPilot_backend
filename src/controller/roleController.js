@@ -82,8 +82,12 @@ module.exports = {
   options: async (_req, res) => {
     try {
       await ensureDefaultRoles();
-      const roles = await Role.find({ isActive: true }).select('slug name order').sort({ order: 1, name: 1 }).lean();
-      return res.json({ success: true, data: roles.map((role) => ({ slug: role.slug, name: role.name })) });
+      const roles = await Role.find({ isActive: true }).select('slug name order isStaff').sort({ order: 1, name: 1 }).lean();
+      // is_staff lets the Staff page offer staff roles only.
+      return res.json({
+        success: true,
+        data: roles.map((role) => ({ slug: role.slug, name: role.name, is_staff: role.isStaff !== false }))
+      });
     } catch (error) {
       console.error('[roles] options failed:', error);
       return res.status(500).json({ message: 'Could not load roles', error: error.message });
