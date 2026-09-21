@@ -11,6 +11,7 @@ const ClassBooking = require('../models/classBookingModel');
 const Trainer = require('../models/trainerModel');
 const User = require('../../models/user');
 const notify = require('../../services/gymNotifications');
+const { afterResponse } = require('../../services/afterResponse');
 const { refundSession } = require('../services/membershipService');
 const PackageOrder = require('../models/packageOrderModel');
 const T = require('../../attendance/services/timeUtils');
@@ -57,11 +58,14 @@ async function cancelCoveredBookings(exception, by) {
       const order = await PackageOrder.findById(booking.orderId);
       if (order) await refundSession(order).catch(() => {});
     }
-    User.findById(booking.userId)
-      .select('firstName lastName email phone notificationPreferences')
-      .lean()
-      .then((member) => notify.bookingCancelled(booking, member, true))
-      .catch(() => {});
+    // Kept alive past the response on Vercel, the member lookup included.
+    afterResponse(
+      User.findById(booking.userId)
+        .select('firstName lastName email phone notificationPreferences')
+        .lean()
+        .then((member) => notify.bookingCancelled(booking, member, true)),
+      'session cancelled notice'
+    );
   }
   return cancelled;
 }

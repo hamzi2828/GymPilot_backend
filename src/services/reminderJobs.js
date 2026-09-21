@@ -41,6 +41,53 @@ function localDayBounds(dateKey) {
   return { start, end: new Date(start.getTime() + 86400000) };
 }
 
+// What Stripe calls a subscription that will not take another payment on its
+// own: ended, never got going, or given up on.
+const NOT_RENEWING_STRIPE_STATUSES = ['canceled', 'incomplete', 'incomplete_expired', 'unpaid', 'paused'];
+
+/**
+ * Whether the order renews itself at its end date: a card subscription at
+ * Stripe that nobody has told to stop. Such a member is charged and carries
+ * on, so "your membership ends -- renew" would be wrong, and a renewal bought
+ * because of it would be paid for twice.
+ *
+ * autoRenew is set only for Stripe subscriptions and cleared on every way
+ * one stops (cancel at period end, deleted at Stripe, refund), so it is
+ * required as well as the subscription id.
+ */
+function willAutoRenew(order) {
+  if (!order) return false;
+  const sub = order.subscription || {};
+  if (!(order.payment && order.payment.stripeSubscriptionId)) return false;
+  if (sub.autoRenew !== true || sub.cancelAtPeriodEnd === true) return false;
+  return !NOT_RENEWING_STRIPE_STATUSES.includes(String(sub.stripeStatus || '').toLowerCase());
+}
+
+/**
+ * Whether the member already holds a paid membership running past this
+ * order's end -- a renewal bought early starts when the current term ends
+ * (membershipService.startDateFor), so for them nothing is about to run out.
+ */
+async function hasFollowingTerm(order) {
+  const end = order.subscription && order.subscription.endDate;
+  if (!end) return false;
+  const owner = [];
+  if (order.userId) owner.push({ userId: order.userId });
+  const email = order.customerInfo && order.customerInfo.email;
+  if (email) owner.push({ 'customerInfo.email': String(email).toLowerCase().trim() });
+  if (!owner.length) return false;
+
+  const next = await PackageOrder.exists({
+    _id: { $ne: order._id },
+    $or: owner,
+    'payment.status': 'paid',
+    status: { $in: ['active', 'frozen'] },
+    $and: [{ $or: [{ 'packageDetails.kind': 'membership' }, { 'packageDetails.kind': { $exists: false } }] }],
+    'subscription.endDate': { $gt: new Date(end) }
+  });
+  return !!next;
+}
+
 /**
  * Emails members whose membership ends in one of EXPIRY_NOTICE_DAYS days.
  *
@@ -48,6 +95,11 @@ function localDayBounds(dateKey) {
  * table: `remindersSent` accumulates the day-counts already used, so a member
  * gets the 14-day notice once, then the 7-day notice, then the 1-day notice,
  * and never the same one twice however often the cron runs.
+ *
+ * Nobody is told to renew what is not ending: a subscription that renews
+ * itself, or a membership already renewed, is skipped -- and not marked as
+ * sent, so a member who switches renewal off next week still gets the notices
+ * that are left.
  */
 async function sendExpiryReminders({ dryRun = false } = {}) {
   const now = new Date();
@@ -63,13 +115,23 @@ async function sendExpiryReminders({ dryRun = false } = {}) {
       status: 'active',
       'subscription.endDate': { $gte: start, $lt: end }
     })
-      .select('orderNumber userId customerInfo packageDetails subscription remindersSent')
+      .select('orderNumber userId customerInfo packageDetails subscription remindersSent status payment.stripeSubscriptionId')
       .lean();
 
     for (const order of orders) {
       const already = Array.isArray(order.remindersSent) ? order.remindersSent : [];
       if (already.includes(days)) {
         skipped.push({ order: order.orderNumber, days, reason: 'already sent' });
+        continue;
+      }
+
+      if (willAutoRenew(order)) {
+        skipped.push({ order: order.orderNumber, days, reason: 'renews automatically' });
+        continue;
+      }
+
+      if (await hasFollowingTerm(order)) {
+        skipped.push({ order: order.orderNumber, days, reason: 'already renewed' });
         continue;
       }
 
@@ -195,20 +257,119 @@ async function sendPtReminders({ dryRun = false } = {}) {
   return { date: tomorrow, sent, skipped, counts: { sent: sent.length, skipped: skipped.length } };
 }
 
+// How long before a class a check-in still counts as being there for it: the
+// member who arrives early to warm up, or trains first and joins the class
+// after, was there.
+const ARRIVED_EARLY_MINUTES = 120;
+// A booking made before sessions carried an end time.
+const DEFAULT_CLASS_MINUTES = 60;
+
+function clockOf(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || ''));
+  return match ? { hour: Number(match[1]), minute: Number(match[2]) } : null;
+}
+
+/** When a booked session ran, as instants, from its local date and times. */
+function sessionWindow(booking) {
+  const from = clockOf(booking.sessionStart) || { hour: 0, minute: 0 };
+  const start = T.localInstant(booking.sessionDate, from.hour, from.minute);
+  const to = clockOf(booking.sessionEnd);
+  let end = to ? T.localInstant(booking.sessionDate, to.hour, to.minute) : null;
+  if (!end || end <= start) end = new Date(start.getTime() + DEFAULT_CLASS_MINUTES * 60000);
+  return { start, end };
+}
+
 /**
- * Marks yesterday's unattended bookings as no-shows, when the gym has
- * switched that on (Settings → booking rules → autoNoShow). Only bookings
- * still sitting at "booked" after the session has passed are touched.
+ * Whether a visit puts the member in the building for the class. A visit
+ * that was checked out must have lasted until the class began; one never
+ * checked out (forgotten, or closed by the daily job) has only its check-in
+ * to go on, which must fall shortly before the class or during it.
+ */
+function visitCoversSession(visit, window) {
+  if (!visit || !visit.checkInAt) return false;
+  const inAt = new Date(visit.checkInAt).getTime();
+  if (inAt > window.end.getTime()) return false;
+  if (visit.checkOutAt) return new Date(visit.checkOutAt).getTime() >= window.start.getTime();
+  return inAt >= window.start.getTime() - ARRIVED_EARLY_MINUTES * 60000;
+}
+
+/**
+ * Splits past bookings into the ones the member turned up for (by their
+ * check-ins) and the ones they missed. Checked a session date at a time: a
+ * member visit is filed on the local day it began, so the day of the class
+ * and the one before (a visit running over midnight) are all it can be on.
+ */
+async function sortByAttendance(bookings) {
+  const Attendance = require('../attendance/models/attendanceModel');
+  const byDate = new Map();
+  for (const booking of bookings) {
+    if (!byDate.has(booking.sessionDate)) byDate.set(booking.sessionDate, []);
+    byDate.get(booking.sessionDate).push(booking);
+  }
+
+  const attended = [];
+  const missed = [];
+  for (const [date, rows] of byDate) {
+    const memberIds = [...new Set(rows.map((b) => String(b.userId)))];
+    const visits = await Attendance.find({
+      personType: 'member',
+      personId: { $in: memberIds },
+      shiftDate: { $in: [T.shiftDateKey(date, -1), date] }
+    })
+      .select('personId checkInAt checkOutAt')
+      .lean();
+
+    for (const booking of rows) {
+      const window = sessionWindow(booking);
+      const visit = visits.find((v) => String(v.personId) === String(booking.userId) && visitCoversSession(v, window));
+      if (visit) attended.push({ booking, at: visit.checkInAt });
+      else missed.push(booking);
+    }
+  }
+  return { attended, missed };
+}
+
+/**
+ * Settles yesterday's (and any older) bookings still sitting at "booked",
+ * when the gym has switched that on (Settings → booking rules → autoNoShow):
+ * a member who checked in for the class is marked attended, everyone else a
+ * no-show. Checking in at the desk does not touch bookings, so without the
+ * first half every class a member turned up to would count against them.
  */
 async function markMissedBookings({ dryRun = false } = {}) {
   const { bookingRules } = require('../gymfolio/services/bookingRules');
   const rules = await bookingRules();
-  if (!rules.autoNoShow) return { enabled: false, marked: 0 };
+  if (!rules.autoNoShow) return { enabled: false, marked: 0, attended: 0 };
   const yesterday = T.shiftDateKey(T.dateKey(), -1);
-  const filter = { status: 'booked', sessionDate: { $lte: yesterday } };
-  if (dryRun) return { enabled: true, marked: await ClassBooking.countDocuments(filter), dryRun: true };
-  const result = await ClassBooking.updateMany(filter, { $set: { status: 'no_show' } });
-  return { enabled: true, marked: result.modifiedCount || 0 };
+  const bookings = await ClassBooking.find({ status: 'booked', sessionDate: { $lte: yesterday } })
+    .select('userId sessionDate sessionStart sessionEnd')
+    .lean();
+  const { attended, missed } = await sortByAttendance(bookings);
+  if (dryRun) return { enabled: true, marked: missed.length, attended: attended.length, dryRun: true };
+
+  // Each write is conditional on the booking still being "booked": the desk
+  // may have marked it by hand since it was read.
+  let attendedCount = 0;
+  if (attended.length) {
+    const result = await ClassBooking.bulkWrite(
+      attended.map(({ booking, at }) => ({
+        updateOne: {
+          filter: { _id: booking._id, status: 'booked' },
+          update: { $set: { status: 'attended', attendedAt: at } }
+        }
+      }))
+    );
+    attendedCount = result.modifiedCount || 0;
+  }
+  let marked = 0;
+  if (missed.length) {
+    const result = await ClassBooking.updateMany(
+      { _id: { $in: missed.map((b) => b._id) }, status: 'booked' },
+      { $set: { status: 'no_show' } }
+    );
+    marked = result.modifiedCount || 0;
+  }
+  return { enabled: true, marked, attended: attendedCount };
 }
 
 /** Everything the daily cron should do, in one call. */
@@ -236,6 +397,9 @@ async function runDaily(options = {}) {
 
 module.exports = {
   EXPIRY_NOTICE_DAYS,
+  willAutoRenew,
+  sessionWindow,
+  visitCoversSession,
   sendExpiryReminders,
   sendClassReminders,
   sendPtReminders,

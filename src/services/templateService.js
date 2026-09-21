@@ -21,7 +21,8 @@ const EVENTS = [
     key: 'member_welcome',
     label: 'Welcome',
     group: 'Members',
-    vars: [...COMMON],
+    // username: the member-app sign-in, when the gym has the app.
+    vars: [...COMMON, 'username'],
     text: '{{siteName}}: welcome, {{firstName}}! Your account is ready — see the timetable and your membership at {{portalUrl}}'
   },
   {
@@ -263,6 +264,7 @@ async function renderText(key, vars = {}) {
 function sampleVars(siteName = 'GymPilot', origin = 'https://example.com') {
   return {
     firstName: 'Alex',
+    username: 'alex.smith',
     siteName,
     portalUrl: `${origin}/user-detail`,
     timetableUrl: `${origin}/timetable`,

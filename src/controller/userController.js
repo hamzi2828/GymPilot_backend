@@ -12,6 +12,8 @@ const { forgetSession } = require('../middleware/auth');
 const { publicUserView } = require('../services/userView');
 const guards = require('../services/roleGuards');
 const { gymSiteName } = require('../services/gymName');
+const notify = require('../services/gymNotifications');
+const { afterResponse } = require('../services/afterResponse');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -69,6 +71,62 @@ async function releaseAccount(user) {
         console.error('[users] could not delete push registrations of', String(id), '-', error.message);
     }
     forgetSession(id);
+}
+
+// A card subscription has to stop before its member's account goes. The
+// order stays (it is the gym's record of the sale), but with the account gone
+// nobody could sign in to cancel it, and Stripe would go on charging.
+//
+// The cancelling belongs to the payment service --
+// gymfolioPaymentService.cancelMemberSubscriptions(userId, { source, by }),
+// which resolves once every subscription of the member is stopped at Stripe
+// and throws (STRIPE_CANCEL_FAILED) when one could not be. It is looked up
+// when needed, so the account screens do not load Stripe, and checked for, so
+// a build without it refuses rather than deletes a member still being billed.
+//
+// Resolves to null when the account may go, or to the 409 body to send.
+async function subscriptionsBlockDeletion(userId, { self, by = null }) {
+    const refusal = (staffDetail) => ({
+        code: 'SUBSCRIPTION_ACTIVE',
+        message: self
+            ? 'Your membership renews by card and we could not cancel it just now. Cancel it from your account page or at reception, then delete your account.'
+            // Staff get the payment service's own account of what failed
+            // (which subscription, and what to do about it) where there is one.
+            : staffDetail || 'This member has a card subscription that could not be cancelled. Cancel it from Package Orders first, then delete the account.'
+    });
+
+    let payments = null;
+    try {
+        payments = require('../services/gymfolioPaymentService');
+    } catch (error) {
+        console.error('[users] payment service unavailable:', error.message);
+    }
+
+    if (payments && typeof payments.cancelMemberSubscriptions === 'function') {
+        try {
+            await payments.cancelMemberSubscriptions(userId, {
+                source: self ? 'member' : 'staff',
+                by,
+                reason: 'Account deleted'
+            });
+            return null;
+        } catch (error) {
+            console.error('[users] could not cancel the subscriptions of', String(userId), '-', error.message);
+            return refusal(error && error.code === 'STRIPE_CANCEL_FAILED' ? error.message : '');
+        }
+    }
+
+    // No way to cancel from here: refuse only while a subscription would
+    // still take another payment.
+    const PackageOrder = require('../gymfolio/models/packageOrderModel');
+    const live = await PackageOrder.exists({
+        userId,
+        'payment.stripeSubscriptionId': { $nin: [null, ''] },
+        status: { $in: ['active', 'frozen', 'past_due'] },
+        'subscription.cancelAtPeriodEnd': { $ne: true },
+        'subscription.stripeStatus': { $nin: ['canceled', 'incomplete_expired'] }
+    });
+    return live ? refusal('') : null;
 }
 
 /** Generates a readable but strong temporary password. */
@@ -411,6 +469,10 @@ const userController = {
                 password: hashed,
             });
 
+            // The welcome email carries their username for the phone app,
+            // which they are told nowhere else. Not waited for.
+            afterResponse(() => notify.memberWelcome(user), 'welcome email');
+
             // Sanitize output
             return res.status(201).json({ message: 'User created successfully', data: publicUserView(user) });
         } catch (error) {
@@ -525,6 +587,9 @@ const userController = {
                     googleId: googleId || null,
                     avatarUrl: picture || null,
                 });
+                // A new member, as from the sign-up form -- with no password
+                // yet, which the phone app needs.
+                afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
             } else {
                 user = await linkGoogleAccount(user, { googleId, picture });
             }
@@ -696,11 +761,10 @@ const userController = {
             // other emails go out), so the answer comes back just as fast
             // whether or not the address has an account. Waiting on the mail
             // server only when it does would tell anyone with a stopwatch
-            // who is a member.
+            // who is a member. afterResponse keeps the send alive on Vercel
+            // once the answer has gone.
             if (user && user.isActive !== false) {
-                sendResetLink(user, normalisedEmail).catch((error) => {
-                    console.error('forgotPassword error:', error);
-                });
+                afterResponse(() => sendResetLink(user, normalisedEmail), 'password reset email');
             }
 
             return res.status(200).json(genericResponse);
@@ -870,6 +934,7 @@ const userController = {
                     googleId: googleId || null,
                     avatarUrl: picture || null,
                 });
+                afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
             } else {
                 user = await linkGoogleAccount(user, { googleId, picture });
             }
@@ -980,6 +1045,9 @@ const userController = {
                     message: 'You are the last active administrator. Promote someone else before deleting this account.'
                 });
             }
+
+            const billing = await subscriptionsBlockDeletion(currentUser.id, { self: true, by: currentUser.id });
+            if (billing) return res.status(409).json(billing);
 
             await User.findByIdAndDelete(currentUser.id);
             await releaseAccount(user);
@@ -1264,6 +1332,9 @@ const userController = {
                 activeAdmins: target.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
             });
             if (refusal) return res.status(403).json({ message: refusal });
+
+            const billing = await subscriptionsBlockDeletion(id, { self: false, by: currentUser.id });
+            if (billing) return res.status(409).json(billing);
 
             const deleted = await User.findByIdAndDelete(id);
             if (!deleted) {

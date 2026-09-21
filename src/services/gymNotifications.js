@@ -7,7 +7,9 @@
 // First, sending is never allowed to break the thing that triggered it. A
 // member books a class; if SMTP is misconfigured the booking still stands and
 // the failure goes to the log. Every function here swallows its own errors and
-// callers fire them without awaiting.
+// callers fire them without awaiting -- through afterResponse
+// (services/afterResponse.js), so that on Vercel the send is not cut off when
+// the response goes.
 //
 // Second, nothing is hardcoded to a brand. The gym's name, its address and the
 // links in the footer all come from the Settings document, so a template says
@@ -25,7 +27,8 @@ const { sendEmail } = require('./emailService');
 const t = require('../templates/gymEmails');
 const templates = require('./templateService');
 const messaging = require('./messaging');
-const { tenantKey, frontendOrigin } = require('../platform/tenantContext');
+const { afterResponse } = require('./afterResponse');
+const { tenantKey, frontendOrigin, currentTenant } = require('../platform/tenantContext');
 
 // Settings are read on nearly every notification and change about once a year,
 // so they are cached briefly rather than fetched per email. One entry per gym:
@@ -92,7 +95,7 @@ async function enrich(member) {
   if (!id) return base;
   if (base.notificationPreferences !== undefined && base.phone !== undefined) return base;
   try {
-    const full = await User.findById(id).select('firstName lastName email phone notificationPreferences').lean();
+    const full = await User.findById(id).select('firstName lastName email username phone notificationPreferences').lean();
     return full ? { ...base, ...full } : base;
   } catch {
     return base;
@@ -127,29 +130,34 @@ async function deliver(to, built, context, options = {}) {
 
 /**
  * The same event as a short text, on the channels that are on. Fired and
- * forgotten by every event below; nothing waits on a carrier.
+ * forgotten by every event below -- nothing waits on a carrier -- but kept
+ * alive until the last carrier has answered (see afterResponse).
  */
-async function fanOut(member, key, vars, context, url) {
-  try {
-    if (!member || !member._id) return;
-    const b = await brand();
-    const prefs = member.notificationPreferences || {};
-    const text = await templates.renderText(key, vars);
-    if (!text) return;
+function fanOut(member, key, vars, context, url) {
+  return afterResponse(() => sendTexts(member, key, vars, context, url), `${context} text channels`);
+}
 
-    const phone = member.phone;
-    if (b.channels.sms && prefs.sms !== false && phone) {
-      messaging.sendSms(phone, text, { context, userId: member._id }).catch(() => {});
-    }
-    if (b.channels.whatsapp && prefs.whatsapp !== false && phone) {
-      messaging.sendWhatsApp(phone, text, { context, userId: member._id }).catch(() => {});
-    }
-    if (b.channels.push && prefs.push !== false) {
-      messaging.sendPush(member._id, { title: b.siteName, body: text, url: url || b.accountUrl }, { context }).catch(() => {});
-    }
-  } catch (error) {
-    console.error(`[notify] ${context} text channels threw:`, error.message);
+async function sendTexts(member, key, vars, context, url) {
+  if (!member || !member._id) return;
+  const b = await brand();
+  const prefs = member.notificationPreferences || {};
+  const text = await templates.renderText(key, vars);
+  if (!text) return;
+
+  const phone = member.phone;
+  const sends = [];
+  if (b.channels.sms && prefs.sms !== false && phone) {
+    sends.push(messaging.sendSms(phone, text, { context, userId: member._id }));
   }
+  if (b.channels.whatsapp && prefs.whatsapp !== false && phone) {
+    sends.push(messaging.sendWhatsApp(phone, text, { context, userId: member._id }));
+  }
+  if (b.channels.push && prefs.push !== false) {
+    sends.push(messaging.sendPush(member._id, { title: b.siteName, body: text, url: url || b.accountUrl }, { context }));
+  }
+  // One carrier failing does not stop the others; each records its own
+  // outcome in the message log.
+  await Promise.allSettled(sends);
 }
 
 /** First name for a greeting, from whatever shape the caller has to hand. */
@@ -448,10 +456,20 @@ async function membershipCancelled(order, member) {
   return deliver(emailOf(m, order), built, 'membership cancelled', { member: m });
 }
 
+// A card subscription the member has told not to renew. Carrying on means
+// switching renewal back on from their account ("Keep renewing"), not buying
+// a second subscription -- which checkout refuses while this one still runs.
+function resumable(order) {
+  const sub = order.subscription || {};
+  return !!(order.payment && order.payment.stripeSubscriptionId) && sub.cancelAtPeriodEnd === true && order.status !== 'cancelled';
+}
+
 async function membershipExpiring(order, member, daysLeft) {
   const m = await enrich(member);
   const b = await brand();
-  const vars = { ...orderVars(order, m, b), daysLeft };
+  const canResume = resumable(order);
+  const renewUrl = canResume ? `${b.accountUrl}?tab=history` : b.renewUrl;
+  const vars = { ...orderVars(order, m, b), daysLeft, renewUrl };
   const built = await emailFor('membership_expiring', vars, () =>
     t.membershipExpiring({
       firstName: vars.firstName,
@@ -459,10 +477,11 @@ async function membershipExpiring(order, member, daysLeft) {
       endDate: order.subscription && order.subscription.endDate,
       daysLeft,
       siteName: b.siteName,
-      renewUrl: b.renewUrl
+      renewUrl,
+      resumable: canResume
     })
   );
-  fanOut(m, 'membership_expiring', vars, `membership expiring in ${daysLeft}d`, b.renewUrl);
+  fanOut(m, 'membership_expiring', vars, `membership expiring in ${daysLeft}d`, renewUrl);
   return deliver(emailOf(m, order), built, `membership expiring in ${daysLeft}d`, { member: m });
 }
 
@@ -483,16 +502,45 @@ async function membershipExpired(order, member) {
   return deliver(emailOf(m, order), built, 'membership expired', { member: m });
 }
 
-async function memberWelcome(member) {
+/**
+ * Whether this gym's members can use the phone app (the `member-app`
+ * add-on), asked the way the app's own sign-in asks it. Not knowing is "no":
+ * a welcome email must not send somebody to an app their gym has not got.
+ */
+async function memberAppAvailable() {
+  try {
+    const gym = currentTenant();
+    const { gymHasAddon } = require('../platform/entitlements');
+    if (!gym || typeof gymHasAddon !== 'function') return false;
+    return !!(await gymHasAddon(gym, 'member-app'));
+  } catch (error) {
+    console.error('[notify] member-app check failed:', error.message);
+    return false;
+  }
+}
+
+/**
+ * Sent once, when somebody makes their own account (the sign-up form or a
+ * first Google sign-in). Where the gym has the phone app it carries their
+ * username, which is what the app signs in with and is written nowhere else.
+ *
+ * `viaGoogle`: the account has no password yet, and the app signs in with
+ * one -- so the email says how to set it.
+ */
+async function memberWelcome(member, { viaGoogle = false } = {}) {
   const m = await enrich(member);
   const b = await brand();
-  const vars = { ...b, firstName: firstNameOf(m) };
+  const username = (m && m.username) || '';
+  const app = !!username && (await memberAppAvailable());
+  const vars = { ...b, firstName: firstNameOf(m), username };
   const built = await emailFor('member_welcome', vars, () =>
     t.memberWelcome({
       firstName: vars.firstName,
       siteName: b.siteName,
       portalUrl: b.accountUrl,
-      timetableUrl: b.timetableUrl
+      timetableUrl: b.timetableUrl,
+      username: app ? username : '',
+      needsPassword: app && viaGoogle
     })
   );
   fanOut(m, 'member_welcome', vars, 'member welcome', b.accountUrl);

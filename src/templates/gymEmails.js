@@ -112,7 +112,11 @@ function membershipConfirmed({ firstName, packageName, startDate, endDate, amoun
   };
 }
 
-function membershipExpiring({ firstName, packageName, endDate, daysLeft, siteName = BRAND_FALLBACK, renewUrl }) {
+// Never sent for a subscription that is going to renew itself (see
+// services/reminderJobs.js). `resumable`: a card subscription the member has
+// set not to renew, where carrying on means switching renewal back on from
+// their account rather than buying a new membership.
+function membershipExpiring({ firstName, packageName, endDate, daysLeft, siteName = BRAND_FALLBACK, renewUrl, resumable = false }) {
   const when =
     daysLeft <= 0
       ? 'today'
@@ -126,8 +130,10 @@ function membershipExpiring({ firstName, packageName, endDate, daysLeft, siteNam
       ['Package', packageName],
       ['Last day', dateLabel(endDate)]
     ]),
-    callout('Renew before it lapses and you keep your class bookings and your visit streak.'),
-    renewUrl ? button(renewUrl, 'Renew my membership') : ''
+    resumable
+      ? callout('Your subscription is set not to renew. Changed your mind? Switch renewal back on from your account and nothing changes.')
+      : callout('Renew before it lapses and you keep your class bookings and your visit streak.'),
+    renewUrl ? button(renewUrl, resumable ? 'Keep renewing' : 'Renew my membership') : ''
   ].join('');
 
   return {
@@ -327,7 +333,20 @@ function membershipCancelled({ firstName, packageName, endDate, immediate, siteN
   return { subject: `Your ${siteName} membership`, html: shell(siteName, immediate ? 'Membership cancelled' : 'Membership will not renew', body) };
 }
 
-function memberWelcome({ firstName, siteName = BRAND_FALLBACK, portalUrl, timetableUrl }) {
+// `username` is given only when the gym has the phone app: it is what the app
+// signs in with. `needsPassword`: the account was made with Google and has no
+// password yet, which the app also needs.
+function memberWelcome({ firstName, siteName = BRAND_FALLBACK, portalUrl, timetableUrl, username, needsPassword = false }) {
+  const app = username
+    ? [
+        paragraph(`Get the GymPilot app from the App Store or Google Play and sign in with your username${needsPassword ? '' : ' and the password you chose'}:`),
+        detailTable([['Username', username]]),
+        needsPassword
+          ? callout('You joined with Google, so there is no password on your account yet. Set one with "Forgot password" on the sign-in page and use it in the app.')
+          : ''
+      ].join('')
+    : '';
+
   const body = [
     paragraph(`Welcome ${escapeHtml(firstName || 'aboard')} — your account is ready.`),
     paragraph('Here is what you can do from here:'),
@@ -336,6 +355,7 @@ function memberWelcome({ firstName, siteName = BRAND_FALLBACK, portalUrl, timeta
        <li>See your membership and when it runs out</li>
        <li>Look back at every visit you have made</li>
      </ul>`,
+    app,
     timetableUrl ? button(timetableUrl, 'Book your first class') : portalUrl ? button(portalUrl, 'Open my account') : ''
   ].join('');
 
