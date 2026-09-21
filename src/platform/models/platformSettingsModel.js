@@ -10,6 +10,27 @@
 
 const mongoose = require('mongoose');
 const { platformModel } = require('../platformDb');
+const { seal, open, isSealed } = require('../../services/secretBox');
+const { storage } = require('../tenantContext');
+
+// The secret key and webhook secret are sealed at rest the same way a gym's
+// are (services/secretBox.js). secretBox picks its key from the gym in
+// context, and these are read from inside gym requests too (a gym's
+// /api/billing checkout) -- sealed under whichever gym happened to be asking,
+// they would open for nobody else. So both directions run with no gym in
+// context, which is secretBox's un-scoped key: the same key every time.
+function sealPlatform(value) {
+  return storage.run(undefined, () => seal(value));
+}
+function openPlatform(value) {
+  return storage.run(undefined, () => open(value));
+}
+
+// `set` before `trim`, as in secretBox.secretString(): mongoose runs setters
+// last-defined-first, so the plaintext is trimmed before it is sealed.
+const platformSecret = () => ({ type: String, default: '', set: sealPlatform, trim: true, get: openPlatform });
+
+const SECRET_PATHS = ['stripe.secretKey', 'stripe.webhookSecret'];
 
 const platformSettingsSchema = new mongoose.Schema(
   {
@@ -19,8 +40,10 @@ const platformSettingsSchema = new mongoose.Schema(
     stripe: {
       publishableKey: { type: String, default: '', trim: true },
       // Never returned in full by the API -- see platformSettingsController.
-      secretKey: { type: String, default: '', trim: true },
-      webhookSecret: { type: String, default: '', trim: true },
+      // Sealed at rest; a value saved before sealing existed still reads back
+      // as the plaintext it is, and is sealed on the next save.
+      secretKey: platformSecret(),
+      webhookSecret: platformSecret(),
       enabled: { type: Boolean, default: false },
       // What the last "test connection" saw, so the panel can say which
       // account these keys actually reach.
@@ -37,6 +60,15 @@ const platformSettingsSchema = new mongoose.Schema(
     collection: 'platform_settings'
   }
 );
+
+// Legacy plaintext is sealed whenever the document is saved for any reason,
+// not only when that key is retyped.
+platformSettingsSchema.pre('save', function sealLegacySecrets() {
+  for (const path of SECRET_PATHS) {
+    const raw = this.get(path, null, { getters: false });
+    if (raw && !isSealed(raw)) this.set(path, raw);
+  }
+});
 
 /** The one settings document, created empty the first time it is asked for. */
 platformSettingsSchema.statics.getSettings = async function getSettings() {

@@ -9,6 +9,13 @@
 // Stripe's subscription object has moved `current_period_end` between API
 // versions -- older ones carry it on the subscription, newer ones on each
 // item -- so both are read.
+//
+// Stripe also delivers out of order and keeps talking about subscriptions
+// the gym has moved on from. Two guards keep that from undoing newer state:
+//   * an event about a subscription that is not the gym's current one is
+//     ignored (only a completed checkout makes a subscription current);
+//   * an event created before the last one applied to the gym is ignored
+//     (subscription.stripeEventAt, checked atomically in the write).
 
 const mongoose = require('mongoose');
 const Gym = require('../models/gymModel');
@@ -109,8 +116,35 @@ async function summaryFor(gym, { amount, currency, interval, billingCycle }) {
   return `${parts.join(' + ')} · ${money} / ${interval || intervalFor(billingCycle)}`;
 }
 
-/** Applies named subscription fields to a gym. `newPeriodEnd` moving forward resets the notices. */
-async function applyToGym(gym, fields) {
+/**
+ * Whether an event about `subscriptionId` concerns some subscription other
+ * than the one the gym is on now: an old one it replaced, or -- once its
+ * subscription was deleted and cleared -- the one it had. A new one only
+ * becomes current through checkout.session.completed.
+ */
+function notCurrentSubscription(gym, subscriptionId) {
+  if (!subscriptionId) return false;
+  const sub = (gym && gym.subscription) || {};
+  if (sub.stripeSubscriptionId) return sub.stripeSubscriptionId !== subscriptionId;
+  return sub.status === 'cancelled';
+}
+
+/** Whether an event created at `eventAt` is older than the last one applied to the gym. */
+function staleEvent(gym, eventAt) {
+  const last = gym && gym.subscription && gym.subscription.stripeEventAt;
+  if (!eventAt || !last) return false;
+  return new Date(eventAt).getTime() < new Date(last).getTime();
+}
+
+const IGNORED_OLD_EVENT = 'ignored: older than the last event applied';
+const IGNORED_OTHER_SUBSCRIPTION = 'ignored: not the gym\'s current subscription';
+
+/**
+ * Applies named subscription fields to a gym. `newPeriodEnd` moving forward
+ * resets the notices. With `eventAt`, the write only lands when no newer
+ * event got there first; resolves false when it did not land for that reason.
+ */
+async function applyToGym(gym, fields, eventAt = null) {
   const set = {};
   for (const [key, value] of Object.entries(fields)) {
     if (value !== undefined) set[`subscription.${key}`] = value;
@@ -120,17 +154,27 @@ async function applyToGym(gym, fields) {
   if (after && after > before) {
     for (const [key, value] of Object.entries(CLEARED_NOTICES)) set[`subscription.notices.${key}`] = value;
   }
-  if (!Object.keys(set).length) return;
-  await Gym.updateOne({ _id: gym._id }, { $set: set });
+  if (!Object.keys(set).length) return true;
+
+  const filter = { _id: gym._id };
+  if (eventAt) {
+    set['subscription.stripeEventAt'] = eventAt;
+    // Checked in the write itself, so two deliveries racing cannot both win.
+    filter.$or = [{ 'subscription.stripeEventAt': null }, { 'subscription.stripeEventAt': { $lte: eventAt } }];
+  }
+  const result = await Gym.updateOne(filter, { $set: set });
+  if (eventAt && result && result.matchedCount === 0) return false;
   invalidateTenantCache();
+  return true;
 }
 
-async function onCheckoutCompleted(session, stripe) {
+async function onCheckoutCompleted(session, stripe, eventAt) {
   if (session.mode !== 'subscription') return { gym: null, result: 'not a subscription checkout' };
   const gym =
     (session.client_reference_id && mongoose.Types.ObjectId.isValid(session.client_reference_id) && (await Gym.findById(session.client_reference_id).lean())) ||
     (await gymByMetadata(session.metadata));
   if (!gym) return { gym: null, result: 'no gym matched' };
+  if (staleEvent(gym, eventAt)) return { gym, result: IGNORED_OLD_EVENT };
 
   const subscriptionId = idOf(session.subscription);
   let subscription = null;
@@ -138,7 +182,11 @@ async function onCheckoutCompleted(session, stripe) {
     try {
       subscription = await stripe.subscriptions.retrieve(subscriptionId);
     } catch (error) {
+      // Without it the gym's status and new period are unknown, and the
+      // invoice.paid that would have said so is usually older than this
+      // event, so it will not fill the gap. Failing makes Stripe redeliver.
       console.warn(`[platform] could not read subscription ${subscriptionId}:`, error.message);
+      throw error;
     }
   }
 
@@ -149,12 +197,13 @@ async function onCheckoutCompleted(session, stripe) {
     stripeSubscriptionId: subscriptionId || undefined,
     billingCycle,
     startedAt: new Date(),
-    cancelledAt: null,
-    status: 'active'
+    // Undefined (left as it is) for a status we do not record, such as a
+    // subscription still `incomplete`: invoice.paid or the next update says.
+    status: checkoutStatus(session, subscription)
   };
+  fields.cancelledAt = fields.status === 'cancelled' ? new Date() : fields.status ? null : undefined;
 
   if (subscription) {
-    fields.status = STATUS_MAP[subscription.status] || 'active';
     fields.currentPeriodEnd = periodEndOf(subscription) || undefined;
     const priced = amountOf(subscription);
     if (priced.currency) {
@@ -164,14 +213,27 @@ async function onCheckoutCompleted(session, stripe) {
     }
   }
 
-  await applyToGym(gym, fields);
-  return { gym, result: `subscription ${fields.status}` };
+  if (!(await applyToGym(gym, fields, eventAt))) return { gym, result: IGNORED_OLD_EVENT };
+  return { gym, result: fields.status ? `subscription ${fields.status}` : `subscription ${subscription ? subscription.status : 'unknown'}, status not recorded` };
 }
 
-async function onInvoicePaid(invoice, stripe) {
+/**
+ * The status a completed checkout leaves the gym in. The subscription's own
+ * status when it is one we record -- `incomplete` (a card still being
+ * authenticated, say) is not, and must not read as paid. Failing that, a paid
+ * session is active; anything else leaves the status alone (undefined).
+ */
+function checkoutStatus(session, subscription) {
+  if (subscription) return STATUS_MAP[subscription.status];
+  return session && session.payment_status === 'paid' ? 'active' : undefined;
+}
+
+async function onInvoicePaid(invoice, stripe, eventAt) {
   const subscriptionId = subscriptionIdOfInvoice(invoice);
   const gym = (await gymBySubscriptionId(subscriptionId)) || (await gymByMetadata(metadataOfInvoice(invoice)));
   if (!gym) return { gym: null, result: 'no gym matched' };
+  if (notCurrentSubscription(gym, subscriptionId)) return { gym, result: IGNORED_OTHER_SUBSCRIPTION };
+  if (staleEvent(gym, eventAt)) return { gym, result: IGNORED_OLD_EVENT };
 
   let end = periodEndOfInvoice(invoice);
   if (!end && subscriptionId) {
@@ -193,21 +255,26 @@ async function onInvoicePaid(invoice, stripe) {
   // A zero invoice is the start of a trial, not a payment: the trial stands.
   if (Number(invoice.amount_paid) > 0) fields.status = 'active';
 
-  await applyToGym(gym, fields);
+  if (!(await applyToGym(gym, fields, eventAt))) return { gym, result: IGNORED_OLD_EVENT };
   return { gym, result: fields.status ? 'period extended, active' : 'period recorded' };
 }
 
-async function onInvoicePaymentFailed(invoice) {
-  const gym = (await gymBySubscriptionId(subscriptionIdOfInvoice(invoice))) || (await gymByMetadata(metadataOfInvoice(invoice)));
+async function onInvoicePaymentFailed(invoice, eventAt) {
+  const subscriptionId = subscriptionIdOfInvoice(invoice);
+  const gym = (await gymBySubscriptionId(subscriptionId)) || (await gymByMetadata(metadataOfInvoice(invoice)));
   if (!gym) return { gym: null, result: 'no gym matched' };
   if (gym.subscription && gym.subscription.status === 'cancelled') return { gym, result: 'already cancelled' };
-  await applyToGym(gym, { status: 'past_due' });
+  if (notCurrentSubscription(gym, subscriptionId)) return { gym, result: IGNORED_OTHER_SUBSCRIPTION };
+  if (staleEvent(gym, eventAt)) return { gym, result: IGNORED_OLD_EVENT };
+  if (!(await applyToGym(gym, { status: 'past_due' }, eventAt))) return { gym, result: IGNORED_OLD_EVENT };
   return { gym, result: 'past due' };
 }
 
-async function onSubscriptionUpdated(subscription) {
+async function onSubscriptionUpdated(subscription, eventAt) {
   const gym = (await gymBySubscriptionId(subscription.id)) || (await gymByMetadata(subscription.metadata));
   if (!gym) return { gym: null, result: 'no gym matched' };
+  if (notCurrentSubscription(gym, subscription.id)) return { gym, result: IGNORED_OTHER_SUBSCRIPTION };
+  if (staleEvent(gym, eventAt)) return { gym, result: IGNORED_OLD_EVENT };
 
   const status = STATUS_MAP[subscription.status];
   const priced = amountOf(subscription);
@@ -226,19 +293,24 @@ async function onSubscriptionUpdated(subscription) {
     fields.stripePriceSummary = await summaryFor(gym, { ...priced, billingCycle: billingCycle || (gym.subscription && gym.subscription.billingCycle) });
   }
 
-  await applyToGym(gym, fields);
+  if (!(await applyToGym(gym, fields, eventAt))) return { gym, result: IGNORED_OLD_EVENT };
   return { gym, result: status ? `synced: ${status}` : `synced (${subscription.status} not mapped)` };
 }
 
-async function onSubscriptionDeleted(subscription) {
+async function onSubscriptionDeleted(subscription, eventAt) {
   const gym = (await gymBySubscriptionId(subscription.id)) || (await gymByMetadata(subscription.metadata));
   if (!gym) return { gym: null, result: 'no gym matched' };
-  await applyToGym(gym, {
+  // An old subscription ending after the gym moved to a new one must not
+  // cancel the new one.
+  if (notCurrentSubscription(gym, subscription.id)) return { gym, result: IGNORED_OTHER_SUBSCRIPTION };
+  if (staleEvent(gym, eventAt)) return { gym, result: IGNORED_OLD_EVENT };
+  const applied = await applyToGym(gym, {
     status: 'cancelled',
     cancelledAt: new Date(),
     // The customer stays (their invoices live there); the subscription is gone.
     stripeSubscriptionId: ''
-  });
+  }, eventAt);
+  if (!applied) return { gym, result: IGNORED_OLD_EVENT };
   return { gym, result: 'cancelled' };
 }
 
@@ -249,17 +321,19 @@ async function onSubscriptionDeleted(subscription) {
  */
 async function handlePlatformStripeEvent(event, stripe) {
   const object = event.data && event.data.object;
+  // When Stripe created the event: what orders it against the others.
+  const eventAt = unix(event.created);
   switch (event.type) {
     case 'checkout.session.completed':
-      return onCheckoutCompleted(object, stripe);
+      return onCheckoutCompleted(object, stripe, eventAt);
     case 'invoice.paid':
-      return onInvoicePaid(object, stripe);
+      return onInvoicePaid(object, stripe, eventAt);
     case 'invoice.payment_failed':
-      return onInvoicePaymentFailed(object);
+      return onInvoicePaymentFailed(object, eventAt);
     case 'customer.subscription.updated':
-      return onSubscriptionUpdated(object);
+      return onSubscriptionUpdated(object, eventAt);
     case 'customer.subscription.deleted':
-      return onSubscriptionDeleted(object);
+      return onSubscriptionDeleted(object, eventAt);
     default:
       return { gym: null, result: 'ignored' };
   }
@@ -272,5 +346,8 @@ module.exports = {
   periodEndOf,
   subscriptionIdOfInvoice,
   amountOf,
+  checkoutStatus,
+  notCurrentSubscription,
+  staleEvent,
   STATUS_MAP
 };

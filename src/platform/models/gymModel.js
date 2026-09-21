@@ -108,6 +108,10 @@ const gymSchema = new mongoose.Schema(
       // "Growth (GymPilot) + Member app · PKR 10,400 / month" -- what Stripe
       // is charging, in words, for the panel.
       stripePriceSummary: { type: String, default: '', trim: true },
+      // When the newest Stripe event applied to this gym was created. Stripe
+      // does not deliver in order, so an event older than this is stale news
+      // (a late "active" after a cancellation) and is not applied.
+      stripeEventAt: { type: Date, default: null },
 
       // When each lifecycle email went to the owner, so every one of them is
       // sent once per period (see jobs.js sendOwnerBillingNotices). Reset
@@ -175,7 +179,9 @@ gymSchema.statics.findByIdWithUri = function (id) {
  * Why a gym may not be served right now, or null when it may.
  *
  * `past_due` is still served: the grace period exists so a late invoice is a
- * reminder, not an outage for a gym's members.
+ * reminder, not an outage for a gym's members. SUBSCRIPTION_INACTIVE is the
+ * one block the gym can lift itself: resolveTenant still lets its owner sign
+ * in and pay (see isRenewalRequest there).
  */
 gymSchema.statics.accessBlock = function (gym) {
   if (!gym) return { status: 404, code: 'TENANT_NOT_FOUND', message: 'No gym is connected to this domain.' };

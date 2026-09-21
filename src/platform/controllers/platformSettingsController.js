@@ -29,6 +29,26 @@ function isMasked(value) {
   return typeof value === 'string' && value.includes(MASK_CHAR);
 }
 
+// How long a claimed event may sit unfinished before a redelivery may take
+// it over. Far longer than any handler runs; a claim this old belongs to a
+// request that died (killed, timed out) before it could release it.
+const STALE_CLAIM_MS = 10 * 60 * 1000;
+
+/**
+ * Takes over an event whose claim was never finished. Deleting the stale
+ * claim and claiming afresh keeps it atomic: of two retries racing here, one
+ * deletes and claims, the other finds nothing to delete.
+ */
+async function reclaimStale(event, now = Date.now()) {
+  const gone = await PlatformStripeEvent.deleteOne({
+    eventId: event.id,
+    handledAt: null,
+    createdAt: { $lt: new Date(now - STALE_CLAIM_MS) }
+  });
+  if (!gone || gone.deletedCount !== 1) return false;
+  return PlatformStripeEvent.claim(event);
+}
+
 /** What Stripe should send events to. Built from the request, not guessed. */
 function webhookUrl(req) {
   const proto = req.get('x-forwarded-proto') || req.protocol;
@@ -168,7 +188,10 @@ module.exports = {
   // Idempotent: the event id is claimed in platform_stripe_events before
   // anything is changed, so Stripe delivering the same event twice changes
   // a gym once. A handler that throws releases the claim and answers 500,
-  // which is what makes Stripe try again later.
+  // which is what makes Stripe try again later. A handler that never got to
+  // release it (the function was killed mid-event) leaves a claim with no
+  // handledAt; after STALE_CLAIM_MS a retry takes it over rather than being
+  // told "duplicate" forever.
   webhook: async (req, res) => {
     try {
       const cfg = await platformStripeConfig();
@@ -187,7 +210,7 @@ module.exports = {
         return res.status(400).json({ success: false, message: `Webhook signature failed: ${error.message}` });
       }
 
-      const first = await PlatformStripeEvent.claim(event);
+      const first = (await PlatformStripeEvent.claim(event)) || (await reclaimStale(event));
       if (!first) return res.json({ received: true, duplicate: true });
 
       let outcome;
@@ -222,5 +245,9 @@ module.exports = {
       console.error('[platform] webhook:', error);
       return res.status(500).json({ success: false, message: 'Webhook failed' });
     }
-  }
+  },
+
+  // exported for tests
+  reclaimStale,
+  STALE_CLAIM_MS
 };
