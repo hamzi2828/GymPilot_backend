@@ -22,7 +22,10 @@ const attendanceLogSchema = new mongoose.Schema(
         'template_download',
         'enroll',
         'punch',
-        'punch_denied'
+        'punch_denied',
+        // The web kiosk's staff unlock: the desk password typed again.
+        'staff_unlock',
+        'staff_unlock_denied'
       ],
       required: true,
       index: true

@@ -17,8 +17,8 @@ const Fingerprint = require('../models/fingerprintModel');
 const Attendance = require('../models/attendanceModel');
 const AttendanceLog = require('../models/attendanceLogModel');
 
-const { deviceContext } = require('../middleware/desktopAuth');
-const { listPeople, resolvePerson, activePersonKeys } = require('../services/peopleDirectory');
+const { deviceContext, issueStaffUnlock } = require('../middleware/desktopAuth');
+const { listPeople, resolvePerson, activePersonKeys, trainerProfilesOf } = require('../services/peopleDirectory');
 const { currentPalette } = require('../services/deskTheme');
 const { recordPunch, currentVerdict } = require('../services/punchService');
 const { openVisitExpr, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
@@ -213,6 +213,80 @@ module.exports = {
     });
   },
 
+  // POST /api/desktop/unlock   { password }
+  //
+  // The web kiosk's "Staff" button: the signed-in desk account's password,
+  // typed again, buys a few minutes of the staff-only actions -- the people
+  // search and checking someone in by hand (see kioskStaffOnly). Wrong
+  // guesses count toward the same throttle as sign-in, since it is the same
+  // password being guessed.
+  unlock: async (req, res) => {
+    const password = String((req.body && req.body.password) || '');
+
+    // Every attempt goes in the audit trail, granted or not: a run of wrong
+    // passwords at a kiosk is somebody at the public side of the counter
+    // trying to get at the member list.
+    const audit = (success, message) =>
+      AttendanceLog.record({
+        event: success ? 'staff_unlock' : 'staff_unlock_denied',
+        userId: req.desktopUser._id,
+        userName: sessionPayload(req.desktopUser).name,
+        userEmail: req.desktopUser.email,
+        success,
+        message,
+        device: req.deviceContext.deviceLabel,
+        osUser: req.deviceContext.osUser,
+        clientApp: req.deviceContext.clientApp,
+        ip: req.deviceContext.ip
+      });
+
+    try {
+      if (!password) {
+        return res.status(400).json({ success: false, message: 'Enter the password for this desk account.' });
+      }
+
+      const key = attemptKey(req.desktopUser.email, req.deviceContext.ip);
+      if (isThrottled(key)) {
+        audit(false, 'Throttled after too many wrong passwords');
+        return res.status(429).json({
+          success: false,
+          message: 'Too many wrong passwords. Wait a few minutes and try again.'
+        });
+      }
+
+      // desktopAuth loads the account without its password hash.
+      const account = await User.findById(req.desktopUser._id).select('password');
+      const matches = Boolean(account && account.password) && (await bcrypt.compare(password, account.password));
+      if (!matches) {
+        noteFailure(key);
+        audit(false, 'Wrong password');
+        // 400, not 401: the desk's session is fine, and a kiosk treats 401
+        // as "sign in again".
+        return res.status(400).json({
+          success: false,
+          code: 'WRONG_PASSWORD',
+          message: 'That is not the password for this desk account.'
+        });
+      }
+
+      clearFailures(key);
+
+      const { unlock, expiresAt, ttlSeconds } = issueStaffUnlock(req.desktopToken._id);
+      audit(true, '');
+      return res.json({
+        success: true,
+        unlock,
+        expires_at: expiresAt.toISOString(),
+        // Relative as well, so a kiosk whose clock is off still counts the
+        // grant down correctly.
+        expires_in: ttlSeconds
+      });
+    } catch (err) {
+      console.error('[attendance] unlock failed:', err);
+      return res.status(500).json({ success: false, message: 'Could not unlock. Try again.' });
+    }
+  },
+
   // POST /api/desktop/logout
   logout: async (req, res) => {
     try {
@@ -251,7 +325,10 @@ module.exports = {
 
       // A finger can outlive its owner. A deleted trainer or a deactivated
       // member must stop matching at the desk rather than keep checking in
-      // as a ghost -- and their templates are not even decrypted.
+      // as a ghost -- and their templates are not even decrypted. A finger
+      // filed under a trainer profile that is also a staff account goes out
+      // as that account's, the one /people lists, so the desk matches it to
+      // the person it shows.
       const live = await activePersonKeys(rows);
 
       const templates = [];
@@ -259,7 +336,8 @@ module.exports = {
       let departed = 0;
 
       for (const row of rows) {
-        if (!live.has(`${row.personType}:${String(row.personId)}`)) {
+        const personId = live.get(`${row.personType}:${String(row.personId)}`);
+        if (!personId) {
           departed++;
           continue;
         }
@@ -274,7 +352,7 @@ module.exports = {
 
         templates.push({
           person_type: row.personType,
-          person_id: String(row.personId),
+          person_id: personId,
           finger_index: row.fingerIndex,
           template: plain
         });
@@ -314,7 +392,9 @@ module.exports = {
   // Serves two screens: the enrolment picker (who has no finger registered
   // yet) and the manual-lookup panel (find someone when the reader is
   // unavailable). `q` filters server-side so a desk searching by phone
-  // number does not pull the whole directory first.
+  // number does not pull the whole directory first. A web kiosk only gets
+  // here with a staff unlock (kioskStaffOnly in desktopRoutes): the list
+  // carries phone numbers and emails.
   people: async (req, res) => {
     try {
       const q = String((req.body && req.body.q) || '').trim();
@@ -326,19 +406,28 @@ module.exports = {
       // A template that no longer decrypts (the key changed since it was
       // enrolled) is left out of /templates, so counting it here would hide
       // its owner from the one screen they can be re-enrolled on.
-      const listedIds = members.concat(staff).map((person) => person.id);
+      //
+      // A trainer who is also on the staff is listed as the staff account,
+      // and a finger filed under their trainer profile is theirs.
+      const profiles = await trainerProfilesOf(staff.map((person) => person.id));
+      const accountOf = new Map();
+      for (const [userId, trainerIds] of profiles) {
+        for (const trainerId of trainerIds) accountOf.set(String(trainerId), userId);
+      }
+
+      const listedIds = members.concat(staff).map((person) => person.id).concat(Array.from(accountOf.keys()));
       const enrolled = listedIds.length
         ? await Fingerprint.find({ isActive: true, personId: { $in: listedIds } })
             .select('+template personType personId')
             .lean()
         : [];
 
+      const keyOf = (row) => {
+        const id = String(row.personId);
+        return row.personType === 'staff' && accountOf.has(id) ? `staff:${accountOf.get(id)}` : `${row.personType}:${id}`;
+      };
       const enrolledKeys = Array.from(
-        new Set(
-          enrolled
-            .filter((row) => Fingerprint.decryptTemplate(row.template) !== null)
-            .map((row) => `${row.personType}:${String(row.personId)}`)
-        )
+        new Set(enrolled.filter((row) => Fingerprint.decryptTemplate(row.template) !== null).map(keyOf))
       );
 
       return res.json({
@@ -507,6 +596,13 @@ module.exports = {
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
+
+      // A trainer who is also on the staff enrols as the staff account, and
+      // may have this finger on file under their trainer profile from before.
+      // That is the template being replaced, so it goes too.
+      if (person.aliasIds && person.aliasIds.length) {
+        await Fingerprint.deleteMany({ personType, personId: { $in: person.aliasIds }, fingerIndex });
+      }
 
       AttendanceLog.record({
         event: 'enroll',

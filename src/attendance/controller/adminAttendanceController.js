@@ -20,8 +20,9 @@ const Attendance = require('../models/attendanceModel');
 const Fingerprint = require('../models/fingerprintModel');
 const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
-const PackageOrder = require('../../gymfolio/models/packageOrderModel');
-const { fullName } = require('../services/peopleDirectory');
+const { fullName, membershipsFor } = require('../services/peopleDirectory');
+const { membershipVerdict } = require('../services/punchService');
+const { correctionFields } = require('./attendanceCorrectionController');
 const {
   openVisitMatch,
   openVisitExpr,
@@ -195,7 +196,9 @@ function shapeRecord(row, now = new Date()) {
 
     check_in_by: punchContext(row.checkIn),
     check_out_by: punchContext(row.checkOut),
-    recorded_at: row.updatedAt || row.createdAt || null
+    recorded_at: row.updatedAt || row.createdAt || null,
+    // Edited / voided markers and the latest correction, for the log.
+    ...correctionFields(row)
   };
 }
 
@@ -288,89 +291,33 @@ async function summarise(match, now = new Date()) {
 //
 // membershipFor() in peopleDirectory answers for one person at the cost of one
 // query, which is right at a desk serving one person at a time. A roster page
-// asks about twenty-five at once, so this asks once and indexes the answer.
-// Guest orders are matched on email for the same reason it does: a package
-// bought before the account existed still belongs to them.
+// asks about twenty-five at once, so membershipsFor() asks once for all of
+// them -- with the SAME rules, and the label is the one the desk's receipt
+// prints (membershipVerdict). A cancelled plan with days left is "Cancelled ·
+// N days left" here too, and a suspended one is "Suspended", not "Active".
 // ---------------------------------------------------------------------------
+
+// `status` is membershipFor's own answer (active | frozen | past_due |
+// pending | suspended | cancelled | expired | none); `verdict` is the desk's
+// colour key for it (membership_active, membership_cancelled...).
+function membershipSummary(membership) {
+  const verdict = membershipVerdict(membership);
+  return {
+    status: membership.status,
+    label: verdict.label,
+    verdict: verdict.status,
+    package_name: membership.packageName || '',
+    end_label: membership.endDate ? T.dateLabel(membership.endDate) : null,
+    days_left: membership.daysLeft,
+    sessions_left: membership.sessionsLeft
+  };
+}
 
 async function membershipIndex(users) {
   const index = new Map();
-  if (!users.length) return index;
-
-  const ids = users.map((user) => user._id);
-  const emails = users
-    .map((user) => String(user.email || '').toLowerCase().trim())
-    .filter(Boolean);
-
-  const orders = await PackageOrder.find({
-    $or: [{ userId: { $in: ids } }, { 'customerInfo.email': { $in: emails } }],
-    'payment.status': 'paid'
-  })
-    .select('userId customerInfo.email packageDetails.name subscription status createdAt')
-    .sort({ 'subscription.endDate': -1, createdAt: -1 })
-    .lean();
-
-  const byOwner = new Map();
-  const push = (key, order) => {
-    if (!key) return;
-    if (!byOwner.has(key)) byOwner.set(key, []);
-    byOwner.get(key).push(order);
-  };
-
-  for (const order of orders) {
-    push(order.userId ? String(order.userId) : null, order);
-    const email = order.customerInfo && order.customerInfo.email;
-    push(email ? 'email:' + String(email).toLowerCase().trim() : null, order);
+  for (const [id, membership] of await membershipsFor(users)) {
+    index.set(id, membershipSummary(membership));
   }
-
-  const now = Date.now();
-  const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
-
-  for (const user of users) {
-    const candidates = (byOwner.get(String(user._id)) || []).concat(
-      byOwner.get('email:' + String(user.email || '').toLowerCase().trim()) || []
-    );
-
-    if (!candidates.length) {
-      index.set(String(user._id), {
-        status: 'none',
-        label: 'No package on file',
-        package_name: '',
-        end_label: null,
-        days_left: null
-      });
-      continue;
-    }
-
-    const live = candidates.find(
-      (order) =>
-        order.status !== 'cancelled' &&
-        order.subscription &&
-        order.subscription.endDate &&
-        new Date(order.subscription.endDate).getTime() >= now
-    );
-
-    const chosen = live || candidates[0];
-    const endDate =
-      chosen.subscription && chosen.subscription.endDate ? new Date(chosen.subscription.endDate) : null;
-    const daysLeft = endDate ? Math.ceil((endDate.getTime() - now) / 86400000) : null;
-
-    let label;
-    if (live) {
-      label = daysLeft === null ? 'Active' : 'Active · ' + plural(daysLeft, 'day') + ' left';
-    } else {
-      label = daysLeft === null ? 'Expired' : 'Expired ' + plural(Math.abs(daysLeft), 'day') + ' ago';
-    }
-
-    index.set(String(user._id), {
-      status: live ? 'active' : 'expired',
-      label,
-      package_name: (chosen.packageDetails && chosen.packageDetails.name) || 'Membership',
-      end_label: endDate ? T.dateLabel(endDate) : null,
-      days_left: daysLeft
-    });
-  }
-
   return index;
 }
 
@@ -390,9 +337,11 @@ module.exports = {
       // every page and would otherwise recount the whole range on each one.
       const wantSummary = req.query.summary !== '0';
 
+      // The log lists voided visits too (marked, so the office can see what
+      // was voided and why); the summary leaves them out, like every total.
       const [rows, total, summary] = await Promise.all([
-        Attendance.find(match).sort({ checkInAt: -1, updatedAt: -1 }).skip(skip).limit(limit).lean(),
-        Attendance.countDocuments(match),
+        Attendance.find(match).setOptions({ withVoided: true }).sort({ checkInAt: -1, updatedAt: -1 }).skip(skip).limit(limit).lean(),
+        Attendance.countDocuments(match).setOptions({ withVoided: true }),
         wantSummary ? summarise(match, now) : null
       ]);
 
@@ -633,13 +582,8 @@ module.exports = {
         const shaped = Object.assign({}, person, {
           membership:
             person.person_type === 'member'
-              ? memberships.get(person.person_id) || {
-                  status: 'none',
-                  label: 'No package on file',
-                  package_name: '',
-                  end_label: null,
-                  days_left: null
-                }
+              ? memberships.get(person.person_id) ||
+                membershipSummary({ status: 'none', packageName: '', endDate: null, daysLeft: null, sessionsLeft: null })
               : null,
           schedule_days:
             trainer && Array.isArray(trainer.availability) ? trainer.availability.length : null,

@@ -23,6 +23,7 @@ const { defaultCurrency, FALLBACK: FALLBACK_CURRENCY } = require('../services/cu
 const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate } = require('../services/roleService');
 const T = require('../attendance/services/timeUtils');
 const { openVisitExpr } = require('../attendance/services/staleVisits');
+const { trainerProfilesOf } = require('../attendance/services/peopleDirectory');
 const { frontendOrigin: tenantOrigin } = require('../platform/tenantContext');
 const { checkLimit } = require('../platform/planLimits');
 const guards = require('../services/roleGuards');
@@ -295,13 +296,25 @@ module.exports = {
 
       // This month's hours per person, in one pass -- the number a payroll
       // conversation actually starts from.
+      //
+      // A trainer profile linked to a staff account is the same person, and
+      // visits filed under it (every one, before the desk learnt to file them
+      // under the account) are counted here once, with the account's own --
+      // as payroll counts them.
       const monthPrefix = T.dateKey().slice(0, 7);
+      const profiles = await trainerProfilesOf(staff.map((row) => row._id));
+      const accountOf = new Map(staff.map((row) => [String(row._id), String(row._id)]));
+      for (const [userId, trainerIds] of profiles) {
+        for (const trainerId of trainerIds) accountOf.set(String(trainerId), userId);
+      }
+      const punchIds = staff.map((row) => row._id).concat(...profiles.values());
+
       const rollups = staff.length
         ? await Attendance.aggregate([
             {
               $match: {
                 personType: 'staff',
-                personId: { $in: staff.map((row) => row._id) },
+                personId: { $in: punchIds },
                 shiftDate: new RegExp('^' + monthPrefix)
               }
             },
@@ -321,9 +334,29 @@ module.exports = {
           ])
         : [];
 
+      // Folded onto the account: the trainer profile's visits and the
+      // account's are one person's, and the latest of either is when they
+      // were last seen.
+      const totals = new Map();
+      for (const entry of rollups) {
+        const owner = accountOf.get(String(entry._id));
+        const sum = totals.get(owner);
+        if (!sum) {
+          totals.set(owner, { ...entry });
+          continue;
+        }
+        sum.visits += entry.visits;
+        sum.minutes += entry.minutes;
+        sum.open += entry.open;
+        if (new Date(entry.lastCheckIn) > new Date(sum.lastCheckIn)) {
+          sum.lastCheckIn = entry.lastCheckIn;
+          sum.lastShiftDate = entry.lastShiftDate;
+        }
+      }
+
       const statsById = new Map(
-        rollups.map((entry) => [
-          String(entry._id),
+        Array.from(totals, ([owner, entry]) => [
+          owner,
           {
             visits: entry.visits,
             minutes: entry.minutes,

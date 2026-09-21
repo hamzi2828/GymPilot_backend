@@ -2,7 +2,8 @@
 //
 // The attendance app treats two very different records as the same kind of
 // thing -- a person who can put a finger on the reader. Members are Users;
-// staff are Trainers. This module is the only place that knows that, so
+// staff are Trainers or staff Users, and a trainer linked to a staff User is
+// that one person. This module is the only place that knows that, so
 // everything downstream (punching, enrolment, lookup) works in one shape:
 //
 //   { personType, id, name, code, meta }
@@ -116,6 +117,63 @@ async function ensureUserStaffCode(user) {
   return '';
 }
 
+// ---------------------------------------------------------------------------
+// Trainers who are also staff
+//
+// A trainer employed here is one human held in two records: the Trainer the
+// website shows, and the staff User carrying their pay and roster, tied by
+// Trainer.userId. At the desk they are ONE person -- the staff account. They
+// are listed once, their punches are filed under the User id and judged
+// against the roster (employment.schedule) rather than PT availability, and
+// the Staff page and payroll count one set of hours. A trainer whose link
+// points at nobody who could punch -- no account, a deactivated one, one no
+// longer on the staff -- stays the trainer it always was.
+// ---------------------------------------------------------------------------
+
+// A staff account that can punch.
+const STAFF_ACCOUNT = { isActive: true, 'employment.isStaff': true };
+
+/**
+ * Of these trainer profiles, the ones that belong to a staff account that can
+ * punch: a Map of String(trainer _id) -> String(User _id). Any other id is
+ * simply absent. Two queries however many ids.
+ */
+async function staffAccountsFor(trainerIds) {
+  const owners = new Map();
+  if (!trainerIds || !trainerIds.length) return owners;
+
+  const linked = await Trainer.find({ _id: { $in: trainerIds }, userId: { $ne: null } }).select('userId').lean();
+  if (!linked.length) return owners;
+
+  const accounts = await User.find({ _id: { $in: linked.map((trainer) => trainer.userId) }, ...STAFF_ACCOUNT })
+    .select('_id')
+    .lean();
+  const live = new Set(accounts.map((user) => String(user._id)));
+
+  for (const trainer of linked) {
+    if (live.has(String(trainer.userId))) owners.set(String(trainer._id), String(trainer.userId));
+  }
+  return owners;
+}
+
+/**
+ * The trainer profiles linked to each of these accounts, whatever state the
+ * profile is in: punches and fingers filed under one of them are still that
+ * person's. A Map of String(User _id) -> [trainer _id].
+ */
+async function trainerProfilesOf(userIds) {
+  const byUser = new Map();
+  if (!userIds || !userIds.length) return byUser;
+
+  const trainers = await Trainer.find({ userId: { $in: userIds } }).select('userId').lean();
+  for (const trainer of trainers) {
+    const owner = String(trainer.userId);
+    if (!byUser.has(owner)) byUser.set(owner, []);
+    byUser.get(owner).push(trainer._id);
+  }
+  return byUser;
+}
+
 // The membership behind a member, as it stands right now.
 //
 // Answers one of: active | frozen | past_due | pending | suspended |
@@ -144,6 +202,22 @@ function isLiveOrder(order, now) {
   );
 }
 
+// How many of a person's paid orders are weighed, newest end date first.
+// Shared by membershipFor and membershipsFor, so the desk's one-person answer
+// and the office's whole-page answer are drawn from the same orders.
+const RECENT_PAID_ORDERS = 5;
+
+// Paid orders, and the one kind of unpaid order the desk is told about: a
+// bank transfer that has been sent (or promised) but not yet confirmed by
+// staff, or a desk sale recorded as unpaid. Card checkouts are left out: an
+// abandoned Stripe session is not a payment anybody is waiting on.
+const PAID_ORDER = { 'payment.status': 'paid' };
+const AWAITING_PAYMENT = {
+  'payment.status': { $in: ['pending', 'processing'] },
+  'payment.method': { $ne: 'stripe' },
+  status: 'pending'
+};
+
 function describeOrder(order, status, now) {
   const endDate = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
 
@@ -164,36 +238,42 @@ function describeOrder(order, status, now) {
   };
 }
 
+// The address guest checkouts are matched on -- compared exactly, as the
+// query does, so an order the database would not return is never claimed.
+function ownerEmail(user) {
+  return user && user.email ? String(user.email).toLowerCase().trim() : null;
+}
+
 async function membershipFor(user) {
-  const emailMatch = user.email ? String(user.email).toLowerCase().trim() : null;
+  const emailMatch = ownerEmail(user);
   const ownerClauses = [{ userId: user._id }];
   if (emailMatch) ownerClauses.push({ 'customerInfo.email': emailMatch });
 
   const [paidOrders, unpaid] = await Promise.all([
-    PackageOrder.find({ $or: ownerClauses, 'payment.status': 'paid' })
+    PackageOrder.find({ $or: ownerClauses, ...PAID_ORDER })
       .sort({ 'subscription.endDate': -1, createdAt: -1 })
-      .limit(5)
+      .limit(RECENT_PAID_ORDERS)
       .lean(),
-    // The newest order still waiting for its money -- a bank transfer that
-    // has been sent (or promised) but not yet confirmed by staff, or a desk
-    // sale recorded as unpaid. Card checkouts are left out: an abandoned
-    // Stripe session is not a payment anybody is waiting on.
-    PackageOrder.findOne({
-      $or: ownerClauses,
-      'payment.status': { $in: ['pending', 'processing'] },
-      'payment.method': { $ne: 'stripe' },
-      status: 'pending'
-    })
+    // The newest order still waiting for its money (see AWAITING_PAYMENT).
+    PackageOrder.findOne({ $or: ownerClauses, ...AWAITING_PAYMENT })
       .sort({ createdAt: -1 })
       .lean()
   ]);
 
-  const now = new Date();
+  return membershipFromOrders(paidOrders, unpaid, new Date());
+}
+
+// membershipFor's answer from orders already in hand: `paidOrders` newest end
+// date first (then newest created), `unpaid` the newest order awaiting
+// payment, or null. Pure, so the desk, the office's roster (membershipsFor)
+// and the tests all reach the same verdict from the same orders.
+function membershipFromOrders(paidOrders, unpaid, now = new Date()) {
+  const recent = (paidOrders || []).slice(0, RECENT_PAID_ORDERS);
 
   // A paid membership that is in date wins over everything else: a renewal
   // sitting in the bank-transfer queue must not hide the term that is
   // running right now.
-  const live = paidOrders.find((order) => isLiveOrder(order, now));
+  const live = recent.find((order) => isLiveOrder(order, now));
   if (live) {
     const status = live.status === 'frozen' ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
     return describeOrder(live, status, now);
@@ -201,7 +281,7 @@ async function membershipFor(user) {
 
   // Nothing live. If the most recent thing that happened is an order awaiting
   // payment confirmation, that is what the desk needs to hear.
-  const latestPaid = paidOrders[0] || null;
+  const latestPaid = recent[0] || null;
   if (unpaid && (!latestPaid || new Date(unpaid.createdAt) >= new Date(latestPaid.createdAt))) {
     return describeOrder(unpaid, 'pending', now);
   }
@@ -220,10 +300,108 @@ async function membershipFor(user) {
   return describeOrder(latestPaid, 'expired', now);
 }
 
+// membershipFor's sorts, for orders fetched in bulk and sorted here instead:
+// newest end date first (an order with none last), then newest created.
+function timeOf(value) {
+  const time = value ? new Date(value).getTime() : NaN;
+  return Number.isNaN(time) ? -Infinity : time;
+}
+
+function newestEndFirst(a, b) {
+  const byEnd =
+    timeOf(b.subscription && b.subscription.endDate) - timeOf(a.subscription && a.subscription.endDate);
+  return byEnd || timeOf(b.createdAt) - timeOf(a.createdAt) || 0;
+}
+
+function newestCreatedFirst(a, b) {
+  return timeOf(b.createdAt) - timeOf(a.createdAt) || 0;
+}
+
+// Files `orders` under their owners, and answers "which of these are this
+// user's" the way membershipFor's query does: by userId, or by an email that
+// matches theirs exactly. Each order once, even when it matches on both -- a
+// guest order later claimed by the account does.
+function ordersByOwner(orders) {
+  const byUser = new Map();
+  const byEmail = new Map();
+  const file = (map, key, order) => {
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(order);
+  };
+
+  for (const order of orders || []) {
+    if (order.userId) file(byUser, String(order.userId), order);
+    if (order.customerInfo && order.customerInfo.email) file(byEmail, order.customerInfo.email, order);
+  }
+
+  return (user) => {
+    const email = ownerEmail(user);
+    const mine = new Map();
+    for (const order of byUser.get(String(user._id)) || []) mine.set(String(order._id), order);
+    for (const order of (email && byEmail.get(email)) || []) mine.set(String(order._id), order);
+    return Array.from(mine.values());
+  };
+}
+
+/**
+ * membershipFor for many members at once, from orders already fetched for
+ * all of them: each member is answered from exactly the orders membershipFor
+ * would have fetched for them alone. Pure. Keyed by String(user._id).
+ */
+function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date()) {
+  const paidOf = ordersByOwner(paidOrders);
+  const unpaidOf = ordersByOwner(unpaidOrders);
+
+  const index = new Map();
+  for (const user of users || []) {
+    const paid = paidOf(user).sort(newestEndFirst);
+    const unpaid = unpaidOf(user).sort(newestCreatedFirst)[0] || null;
+    index.set(String(user._id), membershipFromOrders(paid, unpaid, now));
+  }
+  return index;
+}
+
+/**
+ * membershipFor for a whole page of members -- two queries however many
+ * there are, where asking one by one would be two each. The admin roster
+ * uses this, so the office and the desk give the same answer for the same
+ * member: a cancelled plan still running is "cancelled", never "expired",
+ * and a suspended one is never "active".
+ */
+async function membershipsFor(users, now) {
+  if (!users || !users.length) return new Map();
+
+  const emails = users.map(ownerEmail).filter(Boolean);
+  const owners = {
+    $or: [{ userId: { $in: users.map((user) => user._id) } }, { 'customerInfo.email': { $in: emails } }]
+  };
+
+  // Only what membershipFromOrders reads, plus the two owner fields.
+  const fields = 'userId customerInfo.email packageDetails.name subscription sessions status createdAt';
+  const [paidOrders, unpaidOrders] = await Promise.all([
+    PackageOrder.find({ ...owners, ...PAID_ORDER }).select(fields).lean(),
+    PackageOrder.find({ ...owners, ...AWAITING_PAYMENT }).select(fields).lean()
+  ]);
+
+  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date());
+}
+
+// The directory's entries as they go out to the desk. `codes` -- every code
+// that answers to the person -- stays here, for findByCode.
+function shown({ person_type, id, name, code, meta }) {
+  return { person_type, id, name, code, meta };
+}
+
 // Everyone who could put a finger on the reader, for the enrolment picker and
 // the manual-lookup list. `q` filters server-side so a desk searching by
 // phone number does not have to pull the whole directory first.
-async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
+async function listPeople(options) {
+  const { members, staff } = await searchDirectory(options);
+  return { members: members.map(shown), staff: staff.map(shown) };
+}
+
+// listPeople's answer with every entry's `codes` still on it.
+async function searchDirectory({ q = '', limit = MAX_DIRECTORY } = {}) {
   const term = String(q || '').trim();
   const rx = term ? new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
 
@@ -248,6 +426,8 @@ async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
   if (rx) staffUserFilter.$or = [...userFilter.$or || [], { staffCode: rx }, { 'employment.jobTitle': rx }];
   userFilter['employment.isStaff'] = { $ne: true };
 
+  const staffUserFields = 'firstName lastName email phone staffCode employment.jobTitle';
+
   const [users, trainers, staffUsers] = await Promise.all([
     User.find(userFilter)
       .select('firstName lastName email phone memberCode')
@@ -255,45 +435,85 @@ async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
       .limit(limit)
       .lean(),
     Trainer.find(trainerFilter)
-      .select('name email phone staffCode role')
+      .select('name email phone staffCode role userId')
       .sort({ name: 1 })
       .limit(limit)
       .lean(),
     User.find(staffUserFilter)
-      .select('firstName lastName email phone staffCode employment.jobTitle')
+      .select(staffUserFields)
       .sort({ firstName: 1, lastName: 1 })
       .limit(limit)
       .lean()
   ]);
+
+  // The staff accounts behind any trainer the search found, so a trainer who
+  // is also on the staff can be listed as the account (see staffEntries).
+  const linkedIds = trainers.filter((trainer) => trainer.userId).map((trainer) => trainer.userId);
+  const accounts = linkedIds.length
+    ? await User.find({ _id: { $in: linkedIds }, ...STAFF_ACCOUNT }).select(staffUserFields).lean()
+    : [];
 
   const members = users.map((user) => ({
     person_type: 'member',
     id: String(user._id),
     name: fullName(user),
     code: user.memberCode || '',
-    meta: user.phone || user.email || ''
+    meta: user.phone || user.email || '',
+    codes: [user.memberCode]
   }));
 
-  const staff = trainers
+  return { members, staff: staffEntries(trainers, staffUsers, accounts) };
+}
+
+/**
+ * The staff half of the directory, from what its queries found: `trainers`,
+ * the staff accounts the search matched (`staffUsers`), and `accounts` -- the
+ * staff accounts some of those trainers are linked to. A trainer linked to
+ * one of `accounts` is listed once, as that account (see "Trainers who are
+ * also staff"), even when it was only the trainer profile the search matched:
+ * its TR- code, say, goes on answering to them. Pure.
+ */
+function staffEntries(trainers, staffUsers, accounts) {
+  const accountIds = new Set(accounts.map((user) => String(user._id)));
+  const staffById = new Map();
+  for (const user of staffUsers.concat(accounts)) staffById.set(String(user._id), user);
+
+  const ownTrainers = [];
+  const trainerCodes = new Map(); // User id -> the codes of their trainer profiles
+  for (const trainer of trainers) {
+    const owner = trainer.userId ? String(trainer.userId) : null;
+    if (!owner || !accountIds.has(owner)) {
+      ownTrainers.push(trainer);
+      continue;
+    }
+    if (!trainerCodes.has(owner)) trainerCodes.set(owner, []);
+    if (trainer.staffCode) trainerCodes.get(owner).push(trainer.staffCode);
+  }
+
+  return ownTrainers
     .map((trainer) => ({
       person_type: 'staff',
       id: String(trainer._id),
       name: trainer.name,
       code: trainer.staffCode || '',
-      meta: trainer.role || trainer.phone || trainer.email || ''
+      meta: trainer.role || trainer.phone || trainer.email || '',
+      codes: [trainer.staffCode]
     }))
     .concat(
-      staffUsers.map((user) => ({
-        person_type: 'staff',
-        id: String(user._id),
-        name: fullName(user),
-        code: user.staffCode || '',
-        meta: (user.employment && user.employment.jobTitle) || user.phone || user.email || ''
-      }))
+      Array.from(staffById.values()).map((user) => {
+        const aliases = trainerCodes.get(String(user._id)) || [];
+        return {
+          person_type: 'staff',
+          id: String(user._id),
+          name: fullName(user),
+          // Their own code; the trainer profile's only until they have one.
+          code: user.staffCode || aliases[0] || '',
+          meta: (user.employment && user.employment.jobTitle) || user.phone || user.email || '',
+          codes: [user.staffCode, ...aliases]
+        };
+      })
     )
     .sort((a, b) => a.name.localeCompare(b.name));
-
-  return { members, staff };
 }
 
 // Loads one person by (type, id) and normalises them, assigning a front-desk
@@ -317,6 +537,12 @@ async function resolvePerson(personType, personId) {
   if (personType === 'staff') {
     const trainer = await Trainer.findById(personId);
     if (trainer) {
+      // A trainer who is also on the staff punches as that account (see
+      // "Trainers who are also staff") -- even with the website profile
+      // switched off, since the person still works here.
+      const account = trainer.userId ? await User.findOne({ _id: trainer.userId, ...STAFF_ACCOUNT }) : null;
+      if (account) return staffAccountPerson(account);
+
       if (!trainer.isActive) return null;
       return {
         personType: 'staff',
@@ -328,38 +554,50 @@ async function resolvePerson(personType, personId) {
     }
 
     // Not a trainer, so it is one of the other people who work here -- a
-    // receptionist, a cleaner, a manager. Their roster lives on
-    // employment.schedule; it is surfaced here as `availability` so the shift
-    // verdicts in punchService read one shape and never learn there are two
-    // kinds of staff.
+    // receptionist, a cleaner, a manager.
     const user = await User.findById(personId);
     if (!user || !user.isActive || !user.employment || !user.employment.isStaff) return null;
-
-    const record = user.toObject();
-    record.availability = (user.employment.schedule || []).map((shift) => ({
-      day: shift.day,
-      startTime: shift.startTime,
-      endTime: shift.endTime
-    }));
-    record.role = user.employment.jobTitle || user.role;
-
-    return {
-      personType: 'staff',
-      id: user._id,
-      name: fullName(user),
-      code: await ensureUserStaffCode(user),
-      record
-    };
+    return staffAccountPerson(user);
   }
 
   return null;
 }
 
+// A staff account as resolvePerson answers it. Their roster lives on
+// employment.schedule; it is surfaced here as `availability` so the shift
+// verdicts in punchService read one shape and never learn there are two
+// kinds of staff. `aliasIds` are the trainer profiles linked to the account:
+// punches and fingers from before the desk treated the two as one person can
+// still be filed under those.
+async function staffAccountPerson(user) {
+  const record = user.toObject();
+  record.availability = (user.employment.schedule || []).map((shift) => ({
+    day: shift.day,
+    startTime: shift.startTime,
+    endTime: shift.endTime
+  }));
+  record.role = user.employment.jobTitle || user.role;
+
+  const [code, profiles] = await Promise.all([ensureUserStaffCode(user), trainerProfilesOf([user._id])]);
+
+  return {
+    personType: 'staff',
+    id: user._id,
+    name: fullName(user),
+    code,
+    record,
+    aliasIds: profiles.get(String(user._id)) || []
+  };
+}
+
 /**
- * resolvePerson's "still on file and active" test for a whole list at once:
- * the 'member:<id>' / 'staff:<id>' keys, out of `pairs` ({ personType,
- * personId }), that belong to someone who could still punch. Three queries
- * however long the list, where resolving one by one would be one each.
+ * resolvePerson for a whole list at once, as far as "still on file, and as
+ * whom": for each 'member:<id>' / 'staff:<id>' key, out of `pairs` ({
+ * personType, personId }), that belongs to someone who could still punch, the
+ * id the desk knows them by -- their own, except for a trainer who is also on
+ * the staff, who is known by the staff account. A Map, so `.has(key)` is the
+ * "still here" test. A handful of queries however long the list, where
+ * resolving one by one would be one each.
  */
 async function activePersonKeys(pairs) {
   const memberIds = [];
@@ -369,30 +607,35 @@ async function activePersonKeys(pairs) {
     else if (pair.personType === 'staff') staffIds.push(pair.personId);
   }
 
-  const [members, trainers, staffUsers] = await Promise.all([
+  const [members, trainers, staffUsers, accounts] = await Promise.all([
     memberIds.length ? User.find({ _id: { $in: memberIds }, isActive: true }).select('_id').lean() : [],
     staffIds.length ? Trainer.find({ _id: { $in: staffIds }, isActive: true }).select('_id').lean() : [],
-    staffIds.length
-      ? User.find({ _id: { $in: staffIds }, isActive: true, 'employment.isStaff': true }).select('_id').lean()
-      : []
+    staffIds.length ? User.find({ _id: { $in: staffIds }, ...STAFF_ACCOUNT }).select('_id').lean() : [],
+    staffAccountsFor(staffIds)
   ]);
 
-  const keys = new Set();
-  for (const row of members) keys.add('member:' + String(row._id));
-  for (const row of trainers.concat(staffUsers)) keys.add('staff:' + String(row._id));
+  const keys = new Map();
+  for (const row of members) keys.set('member:' + String(row._id), String(row._id));
+  for (const row of trainers.concat(staffUsers)) keys.set('staff:' + String(row._id), String(row._id));
+  // Last, so a linked trainer is answered as the account whatever else held.
+  for (const [trainerId, userId] of accounts) keys.set('staff:' + trainerId, userId);
   return keys;
 }
 
 /**
  * The one person whose member or staff code matches exactly. Case does not
- * matter; a search that merely contains the code does not count.
+ * matter; a search that merely contains the code does not count. A trainer
+ * who is also on the staff answers to both codes, as the staff account.
  */
 async function findByCode(code) {
   const clean = String(code || '').trim();
   if (!clean) return null;
-  const { members, staff } = await listPeople({ q: clean, limit: 25 });
+  const { members, staff } = await searchDirectory({ q: clean, limit: 25 });
   const wanted = clean.toLowerCase();
-  return [...members, ...staff].find((person) => String(person.code || '').toLowerCase() === wanted) || null;
+  const found = [...members, ...staff].find((person) =>
+    person.codes.some((candidate) => String(candidate || '').toLowerCase() === wanted)
+  );
+  return found ? shown(found) : null;
 }
 
 module.exports = {
@@ -403,6 +646,12 @@ module.exports = {
   ensureStaffCode,
   ensureUserStaffCode,
   membershipFor,
+  membershipFromOrders,
+  membershipsFor,
+  membershipsFromOrders,
   listPeople,
-  resolvePerson
+  resolvePerson,
+  staffAccountsFor,
+  staffEntries,
+  trainerProfilesOf
 };

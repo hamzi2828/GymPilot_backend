@@ -9,8 +9,11 @@
 // happens to expire. When the check fails, the account's tokens are revoked
 // outright so it cannot simply keep retrying.
 
+const crypto = require('crypto');
+
 const DesktopToken = require('../models/desktopTokenModel');
 const User = require('../../models/user');
+const { tenantKey, currentTenantId } = require('../../platform/tenantContext');
 
 // Both are read straight off the request by the endpoints too, so they live
 // here in one place.
@@ -101,4 +104,213 @@ function requireEnrollPermission(req, res, next) {
   return next();
 }
 
-module.exports = { desktopAuth, requireEnrollPermission, deviceContext };
+// ---------------------------------------------------------------------------
+// The web kiosk
+//
+// The kiosk (the website's /kiosk page) signs in with a desk account just as
+// the Windows app does, but it stands on the PUBLIC side of the counter.
+// There a member may only check themselves in -- the QR code from their
+// account page, or their member number. Finding someone by name, and checking
+// them in by hand, are staff actions, so a kiosk token needs a short-lived
+// staff unlock for them: the desk account's password typed again (POST
+// /unlock), which returns a signed grant the kiosk sends back as
+// `staff_unlock` until it locks itself again.
+//
+// Which tokens are kiosk tokens is settled by what signed in, recorded on the
+// token at login -- never by anything a later request says about itself. The
+// Windows app sits behind the counter and is never asked.
+// ---------------------------------------------------------------------------
+
+const KIOSK_CLIENT = /^GymPilotKiosk\//i;
+
+function isKioskToken(token) {
+  return Boolean(token && KIOSK_CLIENT.test(String(token.clientApp || '')));
+}
+
+const UNLOCK_VERSION = 'GPU1';
+
+// The server's ceiling on one unlock. The kiosk locks itself far sooner --
+// after a minute without a tap -- and forgets the grant when it does; this
+// only bounds how long a grant it failed to forget stays good.
+const UNLOCK_SECONDS = 10 * 60;
+
+function unlockSecret() {
+  const value = process.env.QR_TOKEN_SECRET || process.env.JWT_SECRET;
+  if (!value) throw new Error('Cannot sign staff unlocks: set QR_TOKEN_SECRET (or JWT_SECRET)');
+  return value;
+}
+
+// Tied to the gym and to the one desk token it was issued to, so a grant
+// cannot be carried to another desk or another gym.
+function unlockSignature(tenantId, tokenId, exp) {
+  return crypto
+    .createHmac('sha256', unlockSecret())
+    .update(['staff-unlock', tenantId, tokenId, exp].join('|'))
+    .digest('base64url');
+}
+
+//   GPU1.<expiry unix seconds>.<signature>
+function issueStaffUnlock(tokenId, now = Date.now()) {
+  const exp = String(Math.floor(now / 1000) + UNLOCK_SECONDS);
+  const sig = unlockSignature(currentTenantId() || '', String(tokenId), exp);
+  return { unlock: `${UNLOCK_VERSION}.${exp}.${sig}`, expiresAt: new Date(Number(exp) * 1000), ttlSeconds: UNLOCK_SECONDS };
+}
+
+function verifyStaffUnlock(grant, tokenId, now = Date.now()) {
+  try {
+    const parts = String(grant || '').trim().split('.');
+    if (parts.length !== 3 || parts[0] !== UNLOCK_VERSION || !/^\d+$/.test(parts[1])) return false;
+    if (Number(parts[1]) * 1000 <= now) return false;
+
+    const expected = Buffer.from(unlockSignature(currentTenantId() || '', String(tokenId), parts[1]));
+    const given = Buffer.from(parts[2]);
+    return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  } catch (err) {
+    // No secret configured: nothing can have been issued, so nothing verifies.
+    return false;
+  }
+}
+
+// Guards a route on a kiosk token. `selfService(body)` names the requests a
+// member may make on their own there; everything else needs the unlock.
+// 423 rather than 401/403: the session is fine, and a kiosk treats those two
+// as "sign in again".
+function kioskStaffOnly(selfService) {
+  return function kioskStaffGate(req, res, next) {
+    if (!isKioskToken(req.desktopToken)) return next();
+
+    const body = req.body || {};
+    if (selfService && selfService(body)) return next();
+    if (verifyStaffUnlock(body.staff_unlock, req.desktopToken._id)) return next();
+
+    return res.status(423).json({
+      success: false,
+      code: 'STAFF_UNLOCK_REQUIRED',
+      message: 'Staff unlock needed. Ask at the front desk.'
+    });
+  };
+}
+
+// The fingerprint side of the desk -- /templates, which hands out every
+// enrolled template decrypted, and /enroll, which writes new ones -- belongs
+// to the Windows app behind the counter, next to the reader. A kiosk has no
+// reader and stands on the public side, so it is refused outright; a staff
+// unlock does not open these. 403: this client may never do it, whatever
+// is typed. (The kiosk never calls either, so its "403 means sign in again"
+// is not reached by accident.)
+function notOnKiosk(req, res, next) {
+  if (!isKioskToken(req.desktopToken)) return next();
+
+  return res.status(403).json({
+    success: false,
+    code: 'KIOSK_NOT_ALLOWED',
+    message: 'The web kiosk cannot use fingerprints. Use the front-desk app for that.'
+  });
+}
+
+// A punch a member makes for themselves: a QR code or a typed number. Read
+// the way the punch controller reads them -- a qr wins over a code, and
+// either one wins over a person_id.
+function isSelfServicePunch(body) {
+  return Boolean(body.qr || body.code);
+}
+
+// ---------------------------------------------------------------------------
+// Typed member numbers
+//
+// Codes are sequential (GP-0001, GP-0002...), so anyone at a kiosk can type a
+// number that is not theirs, and every hit puts a name and a package on the
+// screen. Code punches are therefore capped per desk token: enough for a
+// queue at the door, far too few to walk the member list. Every one of them
+// is also a recorded visit, so a run of them shows in the attendance log.
+//
+// Held in memory, so on a serverless deployment it is per-instance -- the
+// same trade the sign-in throttle makes (see desktopAppController).
+// ---------------------------------------------------------------------------
+
+const CODE_PUNCH_LIMITS = [
+  { max: 12, windowMs: 60 * 1000 }, // a queue at the door, not a script
+  { max: 60, windowMs: 10 * 60 * 1000 } // sustained: one every ten seconds
+];
+
+// A sliding log per key. A refused attempt is not counted, so being refused
+// never lengthens the wait. `clock` is injectable for the tests.
+function createPunchLimiter(limits, clock = Date.now) {
+  const longest = Math.max(...limits.map((limit) => limit.windowMs));
+  const hits = new Map();
+
+  function take(key) {
+    const now = clock();
+    const log = (hits.get(key) || []).filter((at) => now - at < longest);
+
+    for (const { max, windowMs } of limits) {
+      const inWindow = log.filter((at) => now - at < windowMs);
+      if (inWindow.length >= max) {
+        hits.set(key, log);
+        return { allowed: false, retryAfterMs: inWindow[0] + windowMs - now };
+      }
+    }
+
+    log.push(now);
+    hits.set(key, log);
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  function sweep() {
+    const now = clock();
+    for (const [key, log] of hits) {
+      if (!log.length || now - log[log.length - 1] >= longest) hits.delete(key);
+    }
+  }
+
+  return { take, sweep, size: () => hits.size };
+}
+
+const codePunches = createPunchLimiter(CODE_PUNCH_LIMITS);
+
+// Opportunistic sweep so a long-running instance does not keep a log for
+// every desk that ever typed a number.
+setInterval(() => codePunches.sweep(), CODE_PUNCH_LIMITS[1].windowMs).unref?.();
+
+function waitLabel(seconds) {
+  if (seconds < 60) return seconds + ' second' + (seconds === 1 ? '' : 's');
+  const minutes = Math.ceil(seconds / 60);
+  return minutes + ' minute' + (minutes === 1 ? '' : 's');
+}
+
+function limitCodePunches(req, res, next) {
+  const body = req.body || {};
+  // Only a typed number: a QR code is signed and short-lived, and a
+  // fingerprint or a staff pick names the person outright.
+  if (body.qr || !body.code) return next();
+
+  const key = tenantKey() + '|' + String(req.desktopToken && req.desktopToken._id);
+  const verdict = codePunches.take(key);
+  if (verdict.allowed) return next();
+
+  const seconds = Math.max(1, Math.ceil(verdict.retryAfterMs / 1000));
+  res.set('Retry-After', String(seconds));
+  return res.status(429).json({
+    success: false,
+    code: 'CODE_ENTRY_PAUSED',
+    message:
+      `Too many member numbers typed in a short time. Try again in ${waitLabel(seconds)}, ` +
+      'or scan the QR code from your account page.',
+    retry_after: seconds
+  });
+}
+
+module.exports = {
+  desktopAuth,
+  requireEnrollPermission,
+  deviceContext,
+  isKioskToken,
+  issueStaffUnlock,
+  verifyStaffUnlock,
+  kioskStaffOnly,
+  notOnKiosk,
+  isSelfServicePunch,
+  createPunchLimiter,
+  limitCodePunches,
+  CODE_PUNCH_LIMITS
+};
