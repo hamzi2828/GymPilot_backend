@@ -37,6 +37,11 @@ router.get('/branding', mobileAuthController.branding);
 // account's session state from the gym's own database, neither of which
 // exists until the tenant is resolved.
 router.post('/push/register', resolveTenant, auth, mobileAuthController.registerPush);
-router.delete('/push/register', resolveTenant, auth, mobileAuthController.unregisterPush);
+
+// Taking a phone off the list needs no sign-in -- the push token itself is
+// the proof -- because it happens at sign-out, often after the server has
+// already ended the session. The handler finds the gym from X-Tenant-Slug
+// itself; see the controller for why not resolveTenant.
+router.delete('/push/register', mobileAuthController.unregisterPush);
 
 module.exports = router;

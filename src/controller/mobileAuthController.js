@@ -21,6 +21,7 @@ const MemberDirectory = require('../platform/models/memberDirectoryModel');
 const { runWithTenant, tenantContextFor } = require('../platform/tenantContext');
 const { branding } = require('../services/branding');
 const { isExpoPushToken } = require('../services/messaging');
+const { MEMBER_APP_CLAIM } = require('../middleware/auth');
 
 // One message for "no such username" and "wrong password" alike: a member
 // list is worth money to a competitor, and a login form that says which
@@ -85,7 +86,11 @@ async function memberAppEnabled(gym) {
   return entitlements.gymHasAddon(gym, 'member-app');
 }
 
-/** The same claims the website issues, with the app's longer lifetime. */
+/**
+ * The same claims the website issues, with the app's longer lifetime -- and
+ * `app`, which tells middleware/auth to keep checking the member-app add-on
+ * for as long as the token lives, not just at sign-in.
+ */
 function issueToken(user, gym) {
   const secret = process.env.JWT_SECRET;
   if (!secret) return null;
@@ -97,7 +102,8 @@ function issueToken(user, gym) {
       lastName: user.lastName,
       role: user.role,
       tid: String(gym._id),
-      tv: user.tokenVersion || 0
+      tv: user.tokenVersion || 0,
+      app: MEMBER_APP_CLAIM
     },
     secret,
     { expiresIn: TOKEN_TTL }
@@ -340,6 +346,10 @@ module.exports = {
         { $set: { userId: req.user.id, platform: PUSH_PLATFORMS.includes(platform) ? platform : 'unknown', deviceName } },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
+      // One phone, one member. The unique index already keeps it to one row,
+      // but a gym database whose indexes were never built could hold a copy
+      // still pointing at whoever used the phone before.
+      await MobilePushToken.deleteMany({ token, userId: { $ne: req.user.id } });
       return res.json({ success: true, message: 'This phone will receive notifications.' });
     } catch (error) {
       console.error('[mobile] push register failed:', error);
@@ -347,21 +357,45 @@ module.exports = {
     }
   },
 
-  // DELETE /api/mobile/push/register   { token }
+  // DELETE /api/mobile/push/register   { token }   + X-Tenant-Slug
   //
-  // On sign-out. Only the member's own row: a token is deleted by whoever
-  // it belongs to, never by another account naming it.
+  // On sign-out. No sign-in needed: holding the Expo push token -- a long
+  // random string only the phone and the gym's database know -- is the
+  // proof. It has to work without one, because a sign-out is often the
+  // server having already ended the session (30 days up, a password
+  // change, "sign out everywhere", a deactivated account), and a phone
+  // left registered keeps showing the last member's notifications to
+  // whoever signs in next.
+  //
+  // The gym is found here rather than by resolveTenant, which turns away a
+  // suspended or lapsed gym -- and "your gym is closed, sign out" is exactly
+  // when a member is most likely to be doing this.
   unregisterPush: async (req, res) => {
     try {
       const token = String(req.body?.token || '').trim();
       if (!token) return res.status(400).json({ success: false, message: 'A push token is required.' });
 
-      const MobilePushToken = require('../models/mobilePushTokenModel');
-      const result = await MobilePushToken.deleteOne({ token, userId: req.user.id });
-      return res.json({ success: true, message: 'Notifications are off for this phone.', removed: result.deletedCount || 0 });
+      const headers = req.headers || {};
+      const slug = String(headers['x-tenant-slug'] || req.body?.gym || '').toLowerCase().trim();
+      if (!slug || !Gym.SLUG_PATTERN.test(slug)) {
+        return res.status(400).json({ success: false, message: 'Say which gym this phone was registered with.' });
+      }
+      const gym = await Gym.findBySlug(slug);
+      if (!gym) return res.status(404).json({ success: false, code: 'TENANT_NOT_FOUND', message: 'No such gym.' });
+
+      const context = await tenantContextFor(gym);
+      const removed = await runWithTenant(context, async () => {
+        const MobilePushToken = require('../models/mobilePushTokenModel');
+        const result = await MobilePushToken.deleteMany({ token });
+        return result.deletedCount || 0;
+      });
+      return res.json({ success: true, message: 'Notifications are off for this phone.', removed });
     } catch (error) {
       console.error('[mobile] push unregister failed:', error);
       return res.status(500).json({ success: false, message: 'Could not remove this phone.' });
     }
   }
 };
+
+// For the unit tests: what a member-app token carries.
+module.exports.issueToken = issueToken;
