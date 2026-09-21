@@ -21,8 +21,9 @@ test('packageSnapshot fills in the shape older packages never had', () => {
 });
 
 test('termEnd follows the period label for one-off packages', () => {
-  assert.equal(termEnd(start, { period: 'month' }).toISOString().slice(0, 10), '2026-03-03');
-  assert.equal(termEnd(start, { period: '3 months' }).toISOString().slice(0, 10), '2026-05-01');
+  // A month from 31 Jan ends on the last day of February, not 3 March.
+  assert.equal(termEnd(start, { period: 'month' }).toISOString().slice(0, 10), '2026-02-28');
+  assert.equal(termEnd(start, { period: '3 months' }).toISOString().slice(0, 10), '2026-04-30');
   assert.equal(termEnd(start, { period: 'year' }).toISOString().slice(0, 10), '2027-01-31');
   assert.equal(termEnd(start, { period: 'week' }).toISOString().slice(0, 10), '2026-02-07');
   assert.equal(termEnd(start, { period: 'whatever' }).toISOString().slice(0, 10), '2026-03-02');

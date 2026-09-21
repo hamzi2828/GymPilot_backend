@@ -14,6 +14,7 @@ const Settings = require('../../models/settings');
 const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
+const T = require('../../attendance/services/timeUtils');
 
 const DAY_MS = 86400000;
 const MEMBERSHIP_KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt_pack'];
@@ -65,6 +66,23 @@ function packageSnapshot(pkg) {
   };
 }
 
+/**
+ * `months` calendar months after a date, on the gym's calendar and at the
+ * same wall-clock time. A day the target month does not have is clamped to
+ * its last day: a month from 31 January is 28 (or 29) February, not the 3rd
+ * of March that Date#setMonth rolls over to.
+ */
+function addMonths(date, months) {
+  const at = new Date(date);
+  const p = T.localParts(at);
+  const index = p.year * 12 + (p.month - 1) + Math.trunc(Number(months) || 0);
+  const year = Math.floor(index / 12);
+  const month = index - year * 12 + 1;
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const key = `${year}-${String(month).padStart(2, '0')}-${String(Math.min(p.day, lastDay)).padStart(2, '0')}`;
+  return T.localInstant(key, p.hour, p.minute, p.second, at.getUTCMilliseconds());
+}
+
 /** How long one term of this package lasts, from a start date. */
 function termEnd(start, snapshot) {
   const end = new Date(start);
@@ -78,16 +96,16 @@ function termEnd(start, snapshot) {
     const count = Number(billing.intervalCount) || 1;
     if (billing.interval === 'day') end.setDate(end.getDate() + count);
     else if (billing.interval === 'week') end.setDate(end.getDate() + 7 * count);
-    else if (billing.interval === 'year') end.setFullYear(end.getFullYear() + count);
-    else end.setMonth(end.getMonth() + count);
+    else if (billing.interval === 'year') return addMonths(start, 12 * count);
+    else return addMonths(start, count);
     return end;
   }
   const period = String(snapshot.period || 'month').toLowerCase();
   const n = parseInt(period, 10) || 1;
-  if (period.includes('year')) end.setFullYear(end.getFullYear() + n);
+  if (period.includes('year')) return addMonths(start, 12 * n);
   else if (period.includes('week')) end.setDate(end.getDate() + 7 * n);
   else if (period.includes('day')) end.setDate(end.getDate() + n);
-  else if (period.includes('month')) end.setMonth(end.getMonth() + n);
+  else if (period.includes('month')) return addMonths(start, n);
   else end.setDate(end.getDate() + 30);
   return end;
 }
@@ -297,8 +315,7 @@ async function createManualOrder({
   let end = termEnd(start, snapshot);
   const months = Number(durationMonths);
   if (Number.isFinite(months) && months > 0) {
-    end = new Date(start);
-    end.setMonth(end.getMonth() + months);
+    end = addMonths(start, months);
   }
   // An explicit end wins over both -- imports carry the real expiry date.
   if (endDate) end = new Date(endDate);
@@ -890,6 +907,7 @@ module.exports = {
   MembershipError,
   MEMBERSHIP_KINDS,
   packageSnapshot,
+  addMonths,
   termEnd,
   startDateFor,
   applyCoupon,
