@@ -100,6 +100,7 @@ module.exports = {
 
       const [
         revenueRows,
+        refundRows,
         shopRows,
         memberships,
         todayAttendance,
@@ -110,20 +111,16 @@ module.exports = {
         recentJoins,
         expiringSoon
       ] = await Promise.all([
-        // Money in this month, per currency -- never summed across them.
+        // Money in this month, per currency -- never summed across them. Every
+        // payment received (renewals included), less the refunds given this
+        // month, by the same rule as the accounts screen (ledger.js).
         PackageOrder.aggregate([
-          {
-            $match: {
-              'payment.status': 'paid',
-              $expr: {
-                $and: [
-                  { $gte: [{ $ifNull: ['$payment.paidAt', '$createdAt'] }, range.start] },
-                  { $lt: [{ $ifNull: ['$payment.paidAt', '$createdAt'] }, range.end] }
-                ]
-              }
-            }
-          },
-          { $group: { _id: '$payment.currency', total: { $sum: '$payment.amount' }, n: { $sum: 1 } } }
+          ...L.membershipPaymentStages(range),
+          { $group: { _id: '$currency', total: { $sum: '$amount' }, n: { $sum: 1 } } }
+        ]),
+        PackageOrder.aggregate([
+          ...L.membershipRefundStages(range),
+          { $group: { _id: '$currency', total: { $sum: '$amount' } } }
         ]),
 
         // Till sales are money in beside memberships, as the accounts
@@ -190,6 +187,11 @@ module.exports = {
         L.addTo(membershipRevenue, code, row.total || 0);
         L.addTo(revenue, code, row.total || 0);
         paidOrders += row.n;
+      }
+      for (const row of refundRows) {
+        const code = String(row._id || base).toUpperCase();
+        L.addTo(membershipRevenue, code, -(row.total || 0));
+        L.addTo(revenue, code, -(row.total || 0));
       }
       for (const row of shopRows) {
         const code = String(row._id || base).toUpperCase();

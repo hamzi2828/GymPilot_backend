@@ -17,15 +17,9 @@ const Attendance = require('../../attendance/models/attendanceModel');
 const L = require('../services/ledger');
 const T = require('../../attendance/services/timeUtils');
 
-// A paid order is filed under the day the money arrived. paidAt is the truth;
-// createdAt is the fallback for older rows written before it was recorded.
-function paidAtExpr() {
-  return { $ifNull: ['$payment.paidAt', '$createdAt'] };
-}
-
-function orderPaidDate(order) {
-  return (order.payment && order.payment.paidAt) || order.createdAt;
-}
+// The sales list shows at most this many payments; the totals above it are
+// always worked out over the whole period.
+const SALES_ROW_LIMIT = 500;
 
 // ---------------------------------------------------------------------------
 // Payroll
@@ -175,18 +169,12 @@ module.exports = {
 
       // Till sales (shop / POS) are money in beside memberships.
       const Sale = require('../../models/saleModel');
-      const [orders, expenses, assets, payroll, sales] = await Promise.all([
-        PackageOrder.find({
-          'payment.status': { $in: ['paid', 'refunded'] },
-          $expr: {
-            $and: [
-              { $gte: [paidAtExpr(), range.start] },
-              { $lt: [paidAtExpr(), range.end] }
-            ]
-          }
-        })
-          .select('orderNumber userId customerInfo packageDetails payment subscription status createdAt')
-          .lean(),
+      const [payments, refundRows, expenses, assets, payroll, sales] = await Promise.all([
+        // Every membership payment received in the period -- first payments
+        // and renewals -- including those on orders refunded since: the
+        // refund is counted on its own, below.
+        PackageOrder.aggregate(L.membershipPaymentStages(range)),
+        PackageOrder.aggregate(L.membershipRefundStages(range)),
 
         Expense.find({
           incurredOn: { $gte: range.start, $lt: range.end },
@@ -217,28 +205,28 @@ module.exports = {
       const byPackage = new Map();
       const byMethod = new Map();
 
-      for (const order of orders) {
-        const currency = String(order.payment.currency || base).toUpperCase();
-        const amount = Number(order.payment.amount) || 0;
-
-        if (order.payment.status === 'refunded') {
-          L.addTo(refunds, currency, amount);
-          continue;
-        }
+      for (const payment of payments) {
+        const currency = String(payment.currency || base).toUpperCase();
+        const amount = Number(payment.amount) || 0;
 
         L.addTo(revenue, currency, amount);
 
-        const packageName = (order.packageDetails && order.packageDetails.name) || 'Unknown';
+        const packageName = payment.packageName || 'Unknown';
         const packageEntry = byPackage.get(packageName) || { name: packageName, count: 0, totals: {} };
         packageEntry.count += 1;
         L.addTo(packageEntry.totals, currency, amount);
         byPackage.set(packageName, packageEntry);
 
-        const method = (order.payment.method || 'other');
+        const method = (payment.method || 'other');
         const methodEntry = byMethod.get(method) || { method, count: 0, totals: {} };
         methodEntry.count += 1;
         L.addTo(methodEntry.totals, currency, amount);
         byMethod.set(method, methodEntry);
+      }
+
+      // Money given back in the period, taken off once.
+      for (const row of refundRows) {
+        L.addTo(refunds, String(row.currency || base).toUpperCase(), Number(row.amount) || 0);
       }
 
       // ---- Money out ----
@@ -267,11 +255,15 @@ module.exports = {
       // ---- Trend ----
       const series = new Map(buckets.map((bucket) => [bucket.key, { ...bucket, revenue: 0, expense: 0 }]));
 
-      for (const order of orders) {
-        if (order.payment.status !== 'paid') continue;
-        if (String(order.payment.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(orderPaidDate(order), grain));
-        if (point) point.revenue += Number(order.payment.amount) || 0;
+      for (const payment of payments) {
+        if (String(payment.currency || base).toUpperCase() !== base) continue;
+        const point = series.get(L.bucketKeyFor(payment.at, grain));
+        if (point) point.revenue += Number(payment.amount) || 0;
+      }
+      for (const row of refundRows) {
+        if (String(row.currency || base).toUpperCase() !== base) continue;
+        const point = series.get(L.bucketKeyFor(row.at, grain));
+        if (point) point.revenue -= Number(row.amount) || 0;
       }
       for (const sale of sales) {
         if (String(sale.currency || base).toUpperCase() !== base) continue;
@@ -302,8 +294,7 @@ module.exports = {
 
       // Net is base-currency only and says so. Netting a GBP sale against a PKR
       // bill would be a made-up number, and this system holds no exchange rate.
-      const netBase = L.round((revenue[base] || 0) - (refunds[base] || 0) - (spendPaid[base] || 0));
-      const grossBase = L.round((revenue[base] || 0) - (refunds[base] || 0));
+      const bottomLine = L.netResult({ revenue, refunds, spent: spendPaid }, base);
 
       return res.json({
         success: true,
@@ -315,7 +306,8 @@ module.exports = {
         income: {
           ...L.presentTotals(revenue, base),
           refunds: L.presentTotals(refunds, base),
-          orders: orders.filter((order) => order.payment.status === 'paid').length,
+          // Payments received: a renewal is a sale of its own.
+          orders: payments.length,
           // Named so nobody reads this as the gym's total takings.
           source: 'Membership and package sales recorded in this system'
         },
@@ -348,10 +340,7 @@ module.exports = {
 
         result: {
           currency: base,
-          gross_income: grossBase,
-          expenses: L.round(spendPaid[base] || 0),
-          net: netBase,
-          margin: grossBase ? Math.round((netBase / grossBase) * 1000) / 10 : null,
+          ...bottomLine,
           mixed_currencies: L.presentTotals(revenue, base).mixed || L.presentTotals(spendPaid, base).mixed
         },
 
@@ -392,115 +381,156 @@ module.exports = {
       const range = L.readRange(req.query);
       const base = await L.baseCurrency();
 
-      const filter = {
-        $expr: {
-          $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }]
-        }
-      };
-
       const status = String(req.query.status || 'paid');
-      filter['payment.status'] = status === 'all' ? { $in: ['paid', 'refunded', 'pending', 'failed'] } : status;
+      const statuses = status === 'all' ? ['paid', 'refunded', 'pending', 'failed'] : [status];
 
-      if (req.query.method && req.query.method !== 'all') filter['payment.method'] = String(req.query.method);
+      const match = {};
+      if (req.query.method && req.query.method !== 'all') match['payment.method'] = String(req.query.method);
       if (req.query.package && req.query.package !== 'all') {
-        filter['packageDetails.name'] = String(req.query.package);
+        match['packageDetails.name'] = String(req.query.package);
       }
 
       const term = String(req.query.q || '').trim();
       if (term) {
         const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        filter.$or = [{ orderNumber: rx }, { 'customerInfo.fullName': rx }, { 'customerInfo.email': rx }];
+        match.$or = [{ orderNumber: rx }, { 'customerInfo.fullName': rx }, { 'customerInfo.email': rx }];
       }
 
-      const orders = await PackageOrder.find(filter)
-        .select('orderNumber userId customerInfo packageDetails payment subscription status createdAt')
-        .sort({ createdAt: -1 })
-        .limit(500)
-        .lean();
+      // One row per payment -- a renewal is a sale in the period it was paid
+      // -- and every total worked out over the whole period in the database,
+      // not from the rows the list happens to show.
+      const money = { paymentStatus: { $in: L.MONEY_STATUSES } };
+      const sumUp = { total: { $sum: '$amount' }, n: { $sum: 1 } };
 
-      // New vs renewal: was there an earlier paid order from the same buyer?
+      const [[facets], refundRows] = await Promise.all([
+        PackageOrder.aggregate([
+          ...L.membershipPaymentStages(range, match, { statuses }),
+          {
+            $facet: {
+              rows: [{ $sort: { at: -1, _id: -1 } }, { $limit: SALES_ROW_LIMIT }],
+              byCurrency: [{ $match: money }, { $group: { _id: '$currency', ...sumUp } }],
+              byPackage: [{ $match: money }, { $group: { _id: { name: '$packageName', currency: '$currency' }, ...sumUp } }],
+              byMethod: [{ $match: money }, { $group: { _id: { method: '$method', currency: '$currency' }, ...sumUp } }],
+              renewalPayments: [{ $match: { ...money, kind: 'renewal' } }, { $count: 'n' }],
+              // First payments per buyer: at most one of them can be the
+              // buyer's first purchase ever.
+              buyers: [
+                { $match: { ...money, kind: 'initial' } },
+                { $group: { _id: { userId: '$userId', email: '$email' }, first: { $min: '$at' }, n: { $sum: 1 } } }
+              ],
+              packages: [{ $group: { _id: '$packageName' } }]
+            }
+          }
+        ]),
+        // Refunds given in the period, when the filter lets refunded orders in.
+        statuses.includes('refunded')
+          ? PackageOrder.aggregate([...L.membershipRefundStages(range, match), { $group: { _id: '$currency', total: { $sum: '$amount' } } }])
+          : []
+      ]);
+
+      // New vs renewal: a renewal payment is a renewal; a first payment is new
+      // business only when there was no earlier purchase from the same buyer.
       // Answered in one query over the whole history rather than per row.
-      const buyers = [...new Set(orders.map((order) => String(order.userId || (order.customerInfo || {}).email || '')))]
-        .filter(Boolean);
+      const userIds = new Map();
+      const emails = new Set();
+      for (const who of [...facets.buyers.map((buyer) => buyer._id), ...facets.rows]) {
+        if (who.userId) userIds.set(String(who.userId), who.userId);
+        if (who.email) emails.add(who.email);
+      }
 
       const firstOrders = new Map();
-      if (buyers.length) {
-        const history = await PackageOrder.find({
-          'payment.status': 'paid',
-          $or: [
-            { userId: { $in: orders.map((order) => order.userId).filter(Boolean) } },
-            { 'customerInfo.email': { $in: orders.map((order) => (order.customerInfo || {}).email).filter(Boolean) } }
-          ]
-        })
-          .select('userId customerInfo.email payment.paidAt createdAt')
-          .lean();
+      if (userIds.size || emails.size) {
+        const history = await PackageOrder.aggregate([
+          {
+            $match: {
+              'payment.status': { $in: L.MONEY_STATUSES },
+              $or: [{ userId: { $in: [...userIds.values()] } }, { 'customerInfo.email': { $in: [...emails] } }]
+            }
+          },
+          { $group: { _id: { userId: '$userId', email: '$customerInfo.email' }, at: { $min: L.firstPaymentAtExpr() } } }
+        ]);
 
         for (const row of history) {
-          for (const key of [row.userId ? String(row.userId) : null, (row.customerInfo || {}).email || null]) {
+          const at = new Date(row.at).getTime();
+          for (const key of [row._id.userId ? String(row._id.userId) : null, row._id.email || null]) {
             if (!key) continue;
-            const at = new Date(orderPaidDate(row)).getTime();
             if (!firstOrders.has(key) || at < firstOrders.get(key)) firstOrders.set(key, at);
           }
         }
       }
 
-      const totals = {};
-      const refunds = {};
-      const byPackage = new Map();
-      const byMethod = new Map();
+      const isFirstPurchase = (userId, email, at) => {
+        const firstAt = [userId ? String(userId) : null, email || null]
+          .filter(Boolean)
+          .map((key) => firstOrders.get(key))
+          .filter(Boolean)
+          .sort((a, b) => a - b)[0];
+        return !firstAt || Math.abs(new Date(at).getTime() - firstAt) < 1000;
+      };
+
       let newBusiness = 0;
-      let renewals = 0;
+      let renewals = (facets.renewalPayments[0] && facets.renewalPayments[0].n) || 0;
+      for (const buyer of facets.buyers) {
+        const isNew = isFirstPurchase(buyer._id.userId, buyer._id.email, buyer.first);
+        if (isNew) newBusiness += 1;
+        renewals += buyer.n - (isNew ? 1 : 0);
+      }
 
-      const rows = orders.map((order) => {
-        const currency = String(order.payment.currency || base).toUpperCase();
-        const amount = Number(order.payment.amount) || 0;
-        const paidAt = orderPaidDate(order);
+      const totals = {};
+      let payments = 0;
+      let basePayments = 0;
+      for (const row of facets.byCurrency) {
+        const currency = String(row._id || base).toUpperCase();
+        L.addTo(totals, currency, row.total);
+        payments += row.n;
+        if (currency === base) basePayments += row.n;
+      }
 
-        const keys = [order.userId ? String(order.userId) : null, (order.customerInfo || {}).email || null].filter(Boolean);
-        const firstAt = keys.map((key) => firstOrders.get(key)).filter(Boolean).sort()[0];
-        const isNew = !firstAt || Math.abs(new Date(paidAt).getTime() - firstAt) < 1000;
+      const refunds = {};
+      for (const row of refundRows) L.addTo(refunds, String(row._id || base).toUpperCase(), row.total);
 
-        if (order.payment.status === 'paid') {
-          L.addTo(totals, currency, amount);
-          if (isNew) newBusiness += 1;
-          else renewals += 1;
+      const byPackage = new Map();
+      for (const row of facets.byPackage) {
+        const packageName = row._id.name || 'Unknown';
+        const packageEntry = byPackage.get(packageName) || { name: packageName, count: 0, totals: {} };
+        packageEntry.count += row.n;
+        L.addTo(packageEntry.totals, String(row._id.currency || base).toUpperCase(), row.total);
+        byPackage.set(packageName, packageEntry);
+      }
 
-          const packageName = (order.packageDetails && order.packageDetails.name) || 'Unknown';
-          const packageEntry = byPackage.get(packageName) || { name: packageName, count: 0, totals: {} };
-          packageEntry.count += 1;
-          L.addTo(packageEntry.totals, currency, amount);
-          byPackage.set(packageName, packageEntry);
+      const byMethod = new Map();
+      for (const row of facets.byMethod) {
+        const method = row._id.method || 'other';
+        const methodEntry = byMethod.get(method) || { method, count: 0, totals: {} };
+        methodEntry.count += row.n;
+        L.addTo(methodEntry.totals, String(row._id.currency || base).toUpperCase(), row.total);
+        byMethod.set(method, methodEntry);
+      }
 
-          const method = order.payment.method || 'other';
-          const methodEntry = byMethod.get(method) || { method, count: 0, totals: {} };
-          methodEntry.count += 1;
-          L.addTo(methodEntry.totals, currency, amount);
-          byMethod.set(method, methodEntry);
-        } else if (order.payment.status === 'refunded') {
-          L.addTo(refunds, currency, amount);
-        }
+      const rows = facets.rows.map((payment) => {
+        const paidAt = payment.at;
+        const isNew = payment.kind === 'initial' && isFirstPurchase(payment.userId, payment.email, paidAt);
 
         return {
-          id: String(order._id),
-          order_number: order.orderNumber,
-          customer: (order.customerInfo || {}).fullName || '',
-          email: (order.customerInfo || {}).email || '',
-          package: (order.packageDetails && order.packageDetails.name) || '',
-          amount: L.round(amount),
-          currency,
-          method: order.payment.method || '',
-          payment_status: order.payment.status,
-          order_status: order.status,
+          // A renewal shares its order with the first payment, so it needs
+          // an id of its own to be a row of its own.
+          id: payment.kind === 'renewal' ? `${payment._id}-${new Date(paidAt).getTime()}` : String(payment._id),
+          order_number: payment.orderNumber,
+          customer: payment.customer || '',
+          email: payment.email || '',
+          package: payment.packageName || '',
+          amount: L.round(payment.amount),
+          currency: String(payment.currency || base).toUpperCase(),
+          method: payment.method || '',
+          payment_status: payment.paymentStatus,
+          order_status: payment.orderStatus,
           kind: isNew ? 'new' : 'renewal',
           paid_at: paidAt,
           paid_label: paidAt ? `${T.dateLabel(paidAt)} · ${T.timeLabel(paidAt)}` : null,
-          starts_label: order.subscription && order.subscription.startDate ? T.dateLabel(order.subscription.startDate) : null,
-          ends_label: order.subscription && order.subscription.endDate ? T.dateLabel(order.subscription.endDate) : null
+          starts_label: payment.startDate ? T.dateLabel(payment.startDate) : null,
+          ends_label: payment.endDate ? T.dateLabel(payment.endDate) : null
         };
       });
-
-      const paidRows = rows.filter((row) => row.payment_status === 'paid');
-      const baseTotal = totals[base] || 0;
 
       return res.json({
         success: true,
@@ -510,10 +540,10 @@ module.exports = {
         summary: {
           ...L.presentTotals(totals, base),
           refunds: L.presentTotals(refunds, base),
-          orders: paidRows.length,
+          orders: payments,
           new_business: newBusiness,
           renewals,
-          average_sale: paidRows.length ? L.round(baseTotal / paidRows.length) : 0,
+          average_sale: basePayments ? L.round((totals[base] || 0) / basePayments) : 0,
           by_package: [...byPackage.values()]
             .map((entry) => ({ ...entry, totals: L.presentTotals(entry.totals, base) }))
             .sort((a, b) => b.totals.base_amount - a.totals.base_amount),
@@ -521,7 +551,7 @@ module.exports = {
             .map((entry) => ({ ...entry, totals: L.presentTotals(entry.totals, base) }))
             .sort((a, b) => b.totals.base_amount - a.totals.base_amount)
         },
-        packages: [...new Set(rows.map((row) => row.package).filter(Boolean))].sort(),
+        packages: facets.packages.map((row) => row._id).filter(Boolean).sort(),
         sales: rows
       });
     } catch (error) {

@@ -200,6 +200,7 @@ async function assertNoActiveSubscription({ userId, email, snapshot } = {}) {
 async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, startDate, endDate, method } = {}) {
   order.payment.status = 'paid';
   order.payment.paidAt = paidAt;
+  order.payment.lastPaidAt = paidAt;
   if (transactionId) order.payment.transactionId = transactionId;
   if (method) order.payment.method = method;
 
@@ -642,8 +643,11 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
       proration_behavior: 'create_prorations'
     });
     order.packageId = pkg._id;
+    // The new price lives in the snapshot, and Stripe charges it from here
+    // on; each of those charges is recorded as a renewal with its own amount.
+    // payment.amount is what was actually paid at the start and stays put --
+    // overwriting it rewrote revenue already reported.
     order.packageDetails = snapshot;
-    order.payment.amount = parseAmount(pkg.price);
     // periodOf reads the period from wherever the API version put it.
     order.subscription.endDate = periodOf(updated).end || order.subscription.endDate;
     order.subscription.renewalDate = order.subscription.endDate;

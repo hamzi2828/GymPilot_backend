@@ -176,6 +176,8 @@ async function resolveCurrency() {
 
   const value = {
     configured,
+    // Whether the gym has actually chosen one, as opposed to the fallback.
+    chosen: !!(settings && settings.currency),
     effective: !configuredHasMoney && dominant ? dominant : configured,
     dominant,
     mismatch: !!dominant && !configuredHasMoney && dominant !== configured
@@ -187,6 +189,16 @@ async function resolveCurrency() {
 
 async function baseCurrency() {
   return (await resolveCurrency()).effective;
+}
+
+// The currency a NEW sale, expense or asset is written in: the one set in
+// Settings. baseCurrency() may be reading history in another currency while
+// the setting disagrees -- stamping new rows with that would keep the old
+// currency alive after the owner fixed the setting. The history-based answer
+// is only the fallback for a gym that has never chosen one.
+async function recordCurrency() {
+  const resolved = await resolveCurrency();
+  return resolved.chosen ? resolved.configured : resolved.effective;
 }
 
 // Null when there is nothing to say, so a caller can spread it into a response
@@ -247,6 +259,241 @@ function round(value) {
 }
 
 // ---------------------------------------------------------------------------
+// Membership money
+//
+// An order is not one payment. A recurring membership is paid at checkout and
+// again at every renewal, and each payment belongs to the period the money
+// arrived in: payment.paidAt is the first payment and never moves, and every
+// renewal is its own entry in subscription.renewals with its amount and
+// currency. A refund is money going back out on the day it was given --
+// subtracted once, in that period -- while the payment it returned stays
+// counted where it was received. Accounts, the dashboard and the reports all
+// read membership money through the two pipelines below, so they cannot
+// disagree about that rule.
+// ---------------------------------------------------------------------------
+
+// The payment statuses that mean money came in. A refunded order was paid
+// first; its refund is counted separately.
+const MONEY_STATUSES = ['paid', 'refunded'];
+
+// Renewals used to overwrite payment.paidAt with the latest charge, so on
+// those older orders paidAt is really a renewal -- one that is also in
+// renewals[]. They are recognised by paidAt landing within a minute of one of
+// their renewals (a real first payment never does: the shortest billing
+// interval is a day) and their first payment is read from createdAt instead,
+// the moment checkout opened and the closest record left of it.
+const OVERWRITTEN_WITHIN_MS = 60000;
+
+function firstPaymentAtExpr() {
+  const paidAt = { $ifNull: ['$payment.paidAt', '$createdAt'] };
+  return {
+    $cond: [
+      {
+        $anyElementTrue: [
+          {
+            $map: {
+              input: { $ifNull: ['$subscription.renewals', []] },
+              as: 'renewal',
+              in: {
+                $and: [
+                  { $gt: ['$$renewal.at', null] },
+                  { $lt: [{ $abs: { $subtract: ['$$renewal.at', paidAt] } }, OVERWRITTEN_WITHIN_MS] }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      '$createdAt',
+      paidAt
+    ]
+  };
+}
+
+function inRangeOf(range) {
+  return { $gte: range.start, $lt: range.end };
+}
+
+/**
+ * Aggregation stages that turn orders into the payments received in a range,
+ * one document per payment: the first one and each renewal.
+ *
+ * Output: { _id (order), orderNumber, userId, customer, email, packageName,
+ * method, paymentStatus, orderStatus, startDate, endDate, kind ('initial' |
+ * 'renewal'), at, amount, currency (upper case) }
+ *
+ * `match` narrows the orders (method, package, search); `statuses` defaults
+ * to the ones where money came in. Pending and failed orders only appear when
+ * a caller asks for them -- the sales list does -- dated by when they were
+ * created and never counted as money in.
+ */
+function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES } = {}) {
+  const inRange = inRangeOf(range);
+  const renewalCurrency = {
+    $cond: [
+      { $gt: [{ $strLenCP: { $ifNull: ['$$renewal.currency', ''] } }, 0] },
+      '$$renewal.currency',
+      '$payment.currency'
+    ]
+  };
+
+  return [
+    {
+      $match: {
+        $and: [
+          { 'payment.status': { $in: statuses } },
+          ...(Object.keys(match).length ? [match] : []),
+          // Coarse, index-friendly: anything with a payment that might be in
+          // range. The exact cut is made per payment after the unwind.
+          { $or: [{ 'payment.paidAt': inRange }, { createdAt: inRange }, { 'subscription.renewals.at': inRange }] }
+        ]
+      }
+    },
+    {
+      $project: {
+        orderNumber: 1,
+        userId: 1,
+        customer: '$customerInfo.fullName',
+        email: '$customerInfo.email',
+        packageName: '$packageDetails.name',
+        method: '$payment.method',
+        paymentStatus: '$payment.status',
+        orderStatus: '$status',
+        startDate: '$subscription.startDate',
+        endDate: '$subscription.endDate',
+        entries: {
+          $concatArrays: [
+            [{ kind: 'initial', at: firstPaymentAtExpr(), amount: '$payment.amount', currency: '$payment.currency' }],
+            {
+              $map: {
+                input: { $ifNull: ['$subscription.renewals', []] },
+                as: 'renewal',
+                in: { kind: 'renewal', at: '$$renewal.at', amount: '$$renewal.amount', currency: renewalCurrency }
+              }
+            }
+          ]
+        }
+      }
+    },
+    { $unwind: '$entries' },
+    { $match: { 'entries.at': inRange } },
+    {
+      $project: {
+        orderNumber: 1,
+        userId: 1,
+        customer: 1,
+        email: 1,
+        packageName: 1,
+        method: 1,
+        paymentStatus: 1,
+        orderStatus: 1,
+        startDate: 1,
+        endDate: 1,
+        kind: '$entries.kind',
+        at: '$entries.at',
+        amount: { $ifNull: ['$entries.amount', 0] },
+        currency: { $toUpper: { $ifNull: ['$entries.currency', ''] } }
+      }
+    }
+  ];
+}
+
+/**
+ * Aggregation stages for the refunds given in a range, one document per
+ * refunded order, dated when the money went back.
+ *
+ * Output: { _id (order), orderNumber, packageName, method, at, amount,
+ * currency (upper case) }
+ */
+function membershipRefundStages(range, match = {}) {
+  const inRange = inRangeOf(range);
+  // A refund recorded before refund.at existed is filed on the day of the
+  // payment it returned, which is where the old screens showed it.
+  const refundAt = { $ifNull: ['$refund.at', { $ifNull: ['$payment.paidAt', '$createdAt'] }] };
+
+  return [
+    {
+      $match: {
+        $and: [
+          { 'payment.status': 'refunded' },
+          ...(Object.keys(match).length ? [match] : []),
+          {
+            $or: [
+              { 'refund.at': inRange },
+              { 'refund.at': null, 'payment.paidAt': inRange },
+              { 'refund.at': null, 'payment.paidAt': null, createdAt: inRange }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      $project: {
+        orderNumber: 1,
+        packageName: '$packageDetails.name',
+        method: '$payment.method',
+        at: refundAt,
+        // A partial refund returned only part of the payment.
+        amount: { $ifNull: ['$refund.amount', { $ifNull: ['$payment.amount', 0] }] },
+        currency: { $toUpper: { $ifNull: ['$payment.currency', ''] } }
+      }
+    },
+    { $match: { at: inRange } }
+  ];
+}
+
+/**
+ * The bottom line in the base currency: money in, less refunds given, less
+ * what was spent. Refunds come off exactly once -- the payment they returned
+ * is still in `revenue`, so a fully refunded 100 nets to 0, not -100.
+ */
+function netResult({ revenue = {}, refunds = {}, spent = {} }, base) {
+  const gross = round((revenue[base] || 0) - (refunds[base] || 0));
+  const net = round(gross - (spent[base] || 0));
+  return {
+    gross_income: gross,
+    expenses: round(spent[base] || 0),
+    net,
+    margin: gross ? Math.round((net / gross) * 1000) / 10 : null
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Salaries
+//
+// A salary is quoted per pay cycle. A day is worth a seventh of a weekly
+// salary, a fourteenth of a fortnightly one, and 1/28th to 1/31st of a
+// monthly one depending on the month it falls in -- so a whole calendar month
+// costs exactly the monthly salary, February included, and a part-month is
+// the share of THAT month's days. (A flat 30.44-day month paid 92% of a
+// February and 102% of a 31-day month.)
+// ---------------------------------------------------------------------------
+
+const CYCLE_DAYS = { weekly: 7, biweekly: 14 };
+
+function daysInMonthOf(dateKey) {
+  const [y, m] = dateKey.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/** What one day of a salary is worth on a given 'YYYY-MM-DD'. */
+function salaryPerDay(salary, cycle, dateKey) {
+  const amount = Number(salary) || 0;
+  return amount / (CYCLE_DAYS[cycle] || daysInMonthOf(dateKey));
+}
+
+/** A salary over the inclusive local days from..to, unrounded. */
+function salaryForDays(salary, cycle, from, to) {
+  let total = 0;
+  let cursor = from;
+  while (cursor <= to) {
+    total += salaryPerDay(salary, cycle, cursor);
+    cursor = T.shiftDateKey(cursor, 1);
+  }
+  return total;
+}
+
+// ---------------------------------------------------------------------------
 // Depreciation
 //
 // Straight line, the method a small business actually uses: cost falls evenly
@@ -298,10 +545,18 @@ module.exports = {
   buildBuckets,
   bucketKeyFor,
   baseCurrency,
+  recordCurrency,
   currencyNotice,
   addTo,
   sumOf,
   presentTotals,
   round,
+  MONEY_STATUSES,
+  firstPaymentAtExpr,
+  membershipPaymentStages,
+  membershipRefundStages,
+  netResult,
+  salaryPerDay,
+  salaryForDays,
   depreciate
 };

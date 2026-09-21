@@ -85,7 +85,11 @@ const packageOrderSchema = new mongoose.Schema(
         enum: ['pending', 'processing', 'paid', 'failed', 'refunded', 'cancelled'],
         default: 'pending'
       },
+      // The FIRST payment, set once. Renewals are payments of their own in
+      // subscription.renewals, and revenue counts each in its own period.
       paidAt: Date,
+      // The latest charge -- the first payment until a renewal arrives.
+      lastPaidAt: { type: Date, default: null },
       transactionId: String,
 
       // ---- Discounts ----
@@ -131,6 +135,8 @@ const packageOrderSchema = new mongoose.Schema(
         type: [
           new mongoose.Schema(
             {
+              // When the money arrived, what was charged and in what -- each
+              // renewal is counted as revenue in its own period.
               at: Date,
               amount: Number,
               currency: String,
@@ -306,8 +312,10 @@ packageOrderSchema.index({ status: 1, 'payment.status': 1, 'subscription.endDate
 // The webhook's lookup for one-off card payments; sparse because most orders
 // (subscriptions, bank transfers, cash) never have one.
 packageOrderSchema.index({ 'payment.stripePaymentIntentId': 1 }, { sparse: true });
-// Revenue over a period is read by when the money arrived.
+// Revenue over a period is read by when the money arrived: the first payment,
+// and each renewal (see accounts/services/ledger.js).
 packageOrderSchema.index({ 'payment.paidAt': -1 });
+packageOrderSchema.index({ 'subscription.renewals.at': -1 });
 
 // Virtual for subscription duration
 packageOrderSchema.virtual('subscriptionDuration').get(function() {

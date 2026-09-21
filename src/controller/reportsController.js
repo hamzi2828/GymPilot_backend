@@ -59,21 +59,20 @@ module.exports = {
       // either: they are counted so the report can say what it left out.
       const notBase = { $not: new RegExp(`^${base}$`, 'i') };
 
-      const [revenueRows, revenueByPackage, otherCurrencies, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts, otherExpenses, otherSales] = await Promise.all([
-        PackageOrder.aggregate([
-          { $match: { 'payment.status': 'paid', 'payment.currency': new RegExp(`^${base}$`, 'i'), $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } } },
-          { $group: { _id: dateBucketExpr(paidAtExpr(), grain, tz), total: { $sum: '$payment.amount' }, n: { $sum: 1 } } }
-        ]),
-        PackageOrder.aggregate([
-          { $match: { 'payment.status': 'paid', 'payment.currency': new RegExp(`^${base}$`, 'i'), $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } } },
-          { $group: { _id: '$packageDetails.name', total: { $sum: '$payment.amount' }, n: { $sum: 1 } } },
-          { $sort: { total: -1 } },
-          { $limit: 8 }
-        ]),
-        PackageOrder.aggregate([
-          { $match: { 'payment.status': 'paid', 'payment.currency': { $not: new RegExp(`^${base}$`, 'i') }, $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } } },
-          { $group: { _id: '$payment.currency', total: { $sum: '$payment.amount' }, n: { $sum: 1 } } }
-        ]),
+      // Membership money by the accounts rule (ledger.js): every payment in
+      // the period, renewals included, and the refunds given in it -- each
+      // grouped by currency, bucket and package, and split up below.
+      const byCurrencyBucketPackage = (field) => ({
+        $group: {
+          _id: { currency: '$currency', bucket: dateBucketExpr(field, grain, tz), package: '$packageName' },
+          total: { $sum: '$amount' },
+          n: { $sum: 1 }
+        }
+      });
+
+      const [paymentRows, refundRows, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts, otherExpenses, otherSales] = await Promise.all([
+        PackageOrder.aggregate([...L.membershipPaymentStages(range), byCurrencyBucketPackage('$at')]),
+        PackageOrder.aggregate([...L.membershipRefundStages(range), byCurrencyBucketPackage('$at')]),
         User.aggregate([
           { $match: { role: 'user', createdAt: { $gte: range.start, $lt: range.end } } },
           { $group: { _id: dateBucketExpr('$createdAt', grain, tz), n: { $sum: 1 } } }
@@ -130,6 +129,39 @@ module.exports = {
           { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
         ])
       ]);
+
+      // Base-currency money by bucket and by package, net of refunds; other
+      // currencies totalled on their own, never added in.
+      const isBase = (row) => String(row._id.currency || base).toUpperCase() === base;
+      const revenueByBucket = new Map();
+      const packageTotals = new Map();
+      const otherTotals = new Map();
+      for (const [rows, sign] of [[paymentRows, 1], [refundRows, -1]]) {
+        for (const row of rows) {
+          const paid = sign > 0 ? row.n : 0;
+          if (isBase(row)) {
+            const bucket = revenueByBucket.get(row._id.bucket) || { _id: row._id.bucket, total: 0, n: 0 };
+            bucket.total += sign * row.total;
+            bucket.n += paid;
+            revenueByBucket.set(row._id.bucket, bucket);
+
+            const name = row._id.package || null;
+            const entry = packageTotals.get(name) || { _id: name, total: 0, n: 0 };
+            entry.total += sign * row.total;
+            entry.n += paid;
+            packageTotals.set(name, entry);
+          } else {
+            const code = String(row._id.currency || '').toUpperCase();
+            const entry = otherTotals.get(code) || { _id: code, total: 0, n: 0 };
+            entry.total += sign * row.total;
+            entry.n += paid;
+            otherTotals.set(code, entry);
+          }
+        }
+      }
+      const revenueRows = [...revenueByBucket.values()];
+      const revenueByPackage = [...packageTotals.values()].sort((a, b) => b.total - a.total).slice(0, 8);
+      const otherCurrencies = [...otherTotals.values()];
 
       const otherOrderCount = otherCurrencies.reduce((s, r) => s + r.n, 0);
       const otherExpenseCount = otherExpenses.reduce((s, r) => s + r.n, 0);

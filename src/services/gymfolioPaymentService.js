@@ -40,6 +40,17 @@ function fromMinorUnits(amount, currency) {
   return ZERO_DECIMAL.has(String(currency || '').toLowerCase()) ? n : round2(n / 100);
 }
 
+// A free trial charges nothing at checkout (at most the joining fee); the
+// price is first collected by the renewal after it, which is counted as a
+// payment of its own. So the order records what was actually taken, or the
+// trial would be counted as a term paid for and then paid for again.
+function recordTrialCharge(order, amountMinor, currency) {
+  const billing = (order.packageDetails && order.packageDetails.billing) || {};
+  if (!(Number(billing.trialDays) > 0)) return;
+  if (amountMinor === undefined || amountMinor === null || !Number.isFinite(Number(amountMinor))) return;
+  order.payment.amount = fromMinorUnits(amountMinor, currency);
+}
+
 async function memberFor(order) {
   if (!order.userId) return null;
   return User.findById(order.userId).select('firstName lastName email').lean();
@@ -279,6 +290,7 @@ class GymfolioPaymentService {
           o.subscription.stripeStatus = sub.status;
           o.subscription.autoRenew = true;
           o.subscription.cancelAtPeriodEnd = !!sub.cancel_at_period_end;
+          recordTrialCharge(o, session.amount_total, session.currency);
           const transactionId = idOf(sub.latest_invoice);
           if (transactionId) o.payment.stripeInvoiceId = transactionId;
           return { transactionId, startDate: period.start || undefined, endDate: period.end || undefined };
@@ -357,6 +369,7 @@ class GymfolioPaymentService {
             o.payment.stripeInvoiceId = object.id;
             if (!o.payment.stripeCustomerId && idOf(object.customer)) o.payment.stripeCustomerId = idOf(object.customer);
             o.subscription.autoRenew = true;
+            recordTrialCharge(o, object.amount_paid, object.currency);
             return { transactionId: object.id, startDate: periodStart || undefined, endDate: periodEnd || undefined };
           });
         } else if (
@@ -364,25 +377,43 @@ class GymfolioPaymentService {
           object.billing_reason !== 'subscription_create' &&
           object.id !== order.payment.stripeInvoiceId
         ) {
+          // Each renewal is a payment of its own, filed under the day it
+          // arrived. payment.paidAt stays the FIRST payment -- overwriting it
+          // moved the original sale out of the month it was taken in, and the
+          // reports lost it. lastPaidAt is the latest charge.
+          //
+          // Written with one conditional update: Stripe delivers an event at
+          // least once, and the same invoice counted twice would be revenue
+          // that never arrived.
+          const paidAt = new Date();
+          const set = {
+            'subscription.isActive': true,
+            status: order.status === 'frozen' ? 'frozen' : 'active',
+            'payment.lastPaidAt': paidAt,
+            'payment.stripeInvoiceId': object.id,
+            'payment.lastPaymentError': ''
+          };
           if (periodEnd) {
-            order.subscription.endDate = periodEnd;
-            order.subscription.renewalDate = periodEnd;
+            set['subscription.endDate'] = periodEnd;
+            set['subscription.renewalDate'] = periodEnd;
           }
-          order.subscription.isActive = true;
-          order.status = order.status === 'frozen' ? 'frozen' : 'active';
-          order.payment.paidAt = new Date();
-          order.payment.stripeInvoiceId = object.id;
-          order.payment.lastPaymentError = '';
-          order.subscription.renewals = order.subscription.renewals || [];
-          order.subscription.renewals.push({
-            at: new Date(),
-            amount: fromMinorUnits(object.amount_paid, object.currency),
-            currency: (object.currency || '').toUpperCase(),
-            invoiceId: object.id,
-            periodEnd
-          });
-          await order.save();
-          notify.membershipRenewed(order, await memberFor(order)).catch(() => {});
+          const renewed = await PackageOrder.findOneAndUpdate(
+            { _id: order._id, 'payment.status': 'paid', 'subscription.renewals.invoiceId': { $ne: object.id } },
+            {
+              $set: set,
+              $push: {
+                'subscription.renewals': {
+                  at: paidAt,
+                  amount: fromMinorUnits(object.amount_paid, object.currency),
+                  currency: String(object.currency || order.payment.currency || '').toUpperCase(),
+                  invoiceId: object.id,
+                  periodEnd
+                }
+              }
+            },
+            { new: true }
+          );
+          if (renewed) notify.membershipRenewed(renewed, await memberFor(renewed)).catch(() => {});
         }
         break;
       }
