@@ -59,6 +59,15 @@ async function releaseAccount(user) {
     } catch (error) {
         console.error('[users] could not delete fingerprints of', String(id), '-', error.message);
     }
+    // A deleted account's phones and browsers must stop getting the gym's
+    // notifications.
+    try {
+        const MobilePushToken = require('../models/mobilePushTokenModel');
+        const PushSubscription = require('../models/pushSubscriptionModel');
+        await Promise.all([MobilePushToken.deleteMany({ userId: id }), PushSubscription.deleteMany({ userId: id })]);
+    } catch (error) {
+        console.error('[users] could not delete push registrations of', String(id), '-', error.message);
+    }
     forgetSession(id);
 }
 
