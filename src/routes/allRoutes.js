@@ -111,6 +111,10 @@ router.post('/admin/users/import', auth, requirePermission('users', 'manage'), c
 // ---------------------------------------------------------------------------
 const dashboardController = require('../controller/dashboardController');
 router.get('/admin/dashboard', auth, requirePermission('dashboard'), dashboardController.overview);
+// The admin header's search box and bell: any staff account, each answering
+// only from the tabs the caller's live role can view.
+router.get('/admin/search', auth, requirePermission.requireStaff, require('../controller/adminSearchController').search);
+router.get('/admin/notifications', auth, requirePermission.requireStaff, require('../controller/adminNotificationsController').list);
 
 // ---------------------------------------------------------------------------
 // Shop / POS, stock and lockers -- see controller/posController.js
