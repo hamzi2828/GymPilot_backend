@@ -16,6 +16,7 @@ const User = require('../models/user');
 const Package = require('../gymfolio/models/packageModel');
 const { createManualOrder } = require('../gymfolio/services/membershipService');
 const { checkLimit } = require('../platform/planLimits');
+const T = require('../attendance/services/timeUtils');
 
 const MAX_ROWS = 5000;
 
@@ -98,17 +99,41 @@ function mapHeaders(headerRow) {
   return map;
 }
 
-function parseDate(value) {
+// A calendar date as 'YYYY-MM-DD', or null when there is no such day.
+function dateKeyOf(year, month, day) {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * A date from a spreadsheet cell. A bare date names a whole day at the GYM,
+ * not midnight UTC -- read as UTC, a membership ending 30 Sep stopped working
+ * at 5am that morning in Karachi. `at` says which moment of the day is meant:
+ * 'start' (a membership starting), 'end' (the last moment of a membership
+ * ending that day) or 'noon' (a birthday, safely inside the day).
+ */
+function parseDate(value, at = 'noon') {
   const text = String(value || '').trim();
   if (!text) return null;
-  // ISO first; then dd/mm/yyyy and dd-mm-yyyy, which spreadsheets love.
-  let d = /^\d{4}-\d{2}-\d{2}/.test(text) ? new Date(text) : null;
-  if (!d || Number.isNaN(d.getTime())) {
-    const m = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
-    if (m) d = new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12));
+
+  // ISO first (a spreadsheet's "2026-09-30 00:00:00" is a date too); then
+  // dd/mm/yyyy and dd-mm-yyyy, which spreadsheets love.
+  let key = null;
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ]00:00(?::00(?:\.0+)?)?Z?)?$/);
+  const local = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
+  if (iso) key = dateKeyOf(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+  else if (local) key = dateKeyOf(Number(local[3]), Number(local[2]), Number(local[1]));
+  else if (/^\d{4}-\d{2}-\d{2}[T ]/.test(text)) {
+    // A timestamp with a real time of day names its own instant.
+    const d = new Date(text);
+    return Number.isNaN(d.getTime()) ? null : d;
   }
-  if (!d || Number.isNaN(d.getTime())) return null;
-  return d;
+  if (!key) return null;
+
+  if (at === 'start') return T.startOfLocalDay(key);
+  if (at === 'end') return T.lastMomentOfLocalDay(key);
+  return T.localInstant(key, 12, 0);
 }
 
 function truthy(value, fallback = true) {
@@ -216,8 +241,9 @@ module.exports = {
           report.created += 1;
 
           if (pkg) {
-            const start = parseDate(cell(row, 'startDate'));
-            const end = parseDate(cell(row, 'endDate'));
+            // Access from the start of the first day to the end of the last.
+            const start = parseDate(cell(row, 'startDate'), 'start');
+            const end = parseDate(cell(row, 'endDate'), 'end');
             const amount = cell(row, 'amount');
             await createManualOrder({
               user,
@@ -253,3 +279,4 @@ module.exports = {
 
 module.exports.parseCsv = parseCsv;
 module.exports.mapHeaders = mapHeaders;
+module.exports.parseDate = parseDate;

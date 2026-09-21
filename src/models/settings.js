@@ -392,6 +392,13 @@ function plainSettings(doc) {
   return doc && doc.toObject ? doc.toObject({ getters: true, virtuals: false, minimize: false }) : doc;
 }
 
+// The _id the first settings document is created under. Creating it as an
+// upsert on a fixed _id is what makes first access safe: two requests that
+// both found no settings used to create two documents, and later reads then
+// picked either one. The _id index is unique, so however many race, one
+// document is written and every caller gets it back.
+const FIRST_SETTINGS_ID = new mongoose.Types.ObjectId('000000000000000000000001');
+
 // Static method to get or create settings
 //
 // Returns a plain object, not a document. It used to be a .lean() read, but
@@ -402,7 +409,7 @@ settingsSchema.statics.getSettings = async function() {
 
   if (!settings) {
     // Create default settings if none exist
-    settings = await this.create({
+    const defaults = {
       siteName: 'GymPilot',
       siteUrl: '',
       logoUrl: '/images/logo.png',
@@ -423,7 +430,19 @@ settingsSchema.statics.getSettings = async function() {
       twitterUrl: '',
       tiktokUrl: '',
       isActive: true
-    });
+    };
+    try {
+      settings = await this.findOneAndUpdate(
+        { _id: FIRST_SETTINGS_ID },
+        { $setOnInsert: defaults },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } catch (error) {
+      // Lost the race on a server that does not retry the upsert itself:
+      // the winner's document is there now.
+      if (!error || error.code !== 11000) throw error;
+      settings = await this.findById(FIRST_SETTINGS_ID);
+    }
   }
 
   return plainSettings(settings);
