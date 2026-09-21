@@ -14,6 +14,16 @@ const crypto = require('crypto');
 
 const DEFAULT_TTL_DAYS = 30;
 
+// Sliding renewal. A desk in daily use must not be signed out mid-shift by
+// the calendar, so a token used with less than RENEW_WITHIN_DAYS left is
+// pushed back out to DEFAULT_TTL_DAYS from now. Bounded twice: never past
+// MAX_LIFETIME_DAYS from when it was issued (a copied token still dies), and
+// never for a token that is already expired or revoked -- renewal extends a
+// live session, it does not bring one back.
+const RENEW_WITHIN_DAYS = 7;
+const MAX_LIFETIME_DAYS = 180;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 const desktopTokenSchema = new mongoose.Schema(
   {
     userId: {
@@ -74,6 +84,22 @@ desktopTokenSchema.statics.issue = async function (userId, context = {}, ttlDays
 
   return { token, expiresAt };
 };
+
+// The expiry a token should move to after being used at `now`, or null to
+// leave it as it is. Pure, so the rule can be tested without a database.
+function renewedExpiry(token, now = new Date(), ttlDays = DEFAULT_TTL_DAYS) {
+  if (!token || !token.expiresAt || token.revokedAt) return null;
+
+  const expires = new Date(token.expiresAt).getTime();
+  const at = now.getTime();
+  if (expires <= at || expires - at >= RENEW_WITHIN_DAYS * DAY_MS) return null;
+
+  const issued = token.createdAt ? new Date(token.createdAt).getTime() : expires - ttlDays * DAY_MS;
+  const next = Math.min(at + ttlDays * DAY_MS, issued + MAX_LIFETIME_DAYS * DAY_MS);
+  return next > expires ? new Date(next) : null;
+}
+
+desktopTokenSchema.statics.renewedExpiry = renewedExpiry;
 
 desktopTokenSchema.statics.findUsable = function (token) {
   return this.findOne({

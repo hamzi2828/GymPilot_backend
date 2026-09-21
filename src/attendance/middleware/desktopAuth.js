@@ -5,9 +5,9 @@
 //
 // The app-access permission is re-read from the user document on EVERY
 // request, not trusted from the token: revoking `allowAttendanceApp` on the
-// website has to stop that PC on its very next punch, not in 30 days when the
-// token happens to expire. When the check fails, the account's tokens are
-// revoked outright so it cannot simply keep retrying.
+// website has to stop that PC on its very next punch, not whenever the token
+// happens to expire. When the check fails, the account's tokens are revoked
+// outright so it cannot simply keep retrying.
 
 const DesktopToken = require('../models/desktopTokenModel');
 const User = require('../../models/user');
@@ -62,13 +62,26 @@ async function desktopAuth(req, res, next) {
       });
     }
 
+    // Sliding renewal (see desktopTokenModel): a desk still in use in its
+    // last week is given another full term, so it is not signed out in the
+    // middle of a shift. Only reached once every check above has passed, so
+    // a revoked account or a withdrawn permission is never renewed.
+    const now = new Date();
+    const touch = { lastUsedAt: now };
+    const renewed = DesktopToken.renewedExpiry(stored, now);
+    if (renewed) {
+      touch.expiresAt = renewed;
+      stored.expiresAt = renewed;
+    }
+
     req.desktopUser = user;
     req.desktopToken = stored;
     req.deviceContext = deviceContext(req);
 
     // Fire-and-forget: a "when was this PC last seen" timestamp is not worth
-    // making every punch wait on a second write.
-    DesktopToken.updateOne({ _id: stored._id }, { $set: { lastUsedAt: new Date() } }).catch(() => {});
+    // making every punch wait on a second write. It never touches revokedAt,
+    // and skips a token revoked in the meantime, so a sign-out still wins.
+    DesktopToken.updateOne({ _id: stored._id, revokedAt: null }, { $set: touch }).catch(() => {});
 
     return next();
   } catch (err) {
