@@ -14,6 +14,8 @@ async function collectGymStats(gym) {
       const GymClass = require('../gymfolio/models/gymClassModel');
       const PackageOrder = require('../gymfolio/models/packageOrderModel');
       const Attendance = require('../attendance/models/attendanceModel');
+      const { membershipPaymentStages } = require('../accounts/services/ledger');
+      const { staffCountFilter } = require('./planLimits');
 
       const monthStart = new Date();
       monthStart.setUTCDate(1);
@@ -22,14 +24,18 @@ async function collectGymStats(gym) {
       const [members, staff, trainers, classes, activeMemberships, pendingOrders, revenue, lastVisit, lastLogin] =
         await Promise.all([
           User.countDocuments({ role: 'user' }),
-          User.countDocuments({ 'employment.isStaff': true }),
+          // Counted the way the plan's staff limit counts: not the owner.
+          User.countDocuments(staffCountFilter(gym)),
           Trainer.countDocuments({}),
           GymClass.countDocuments({}),
           PackageOrder.countDocuments({ 'payment.status': 'paid', status: 'active' }),
           PackageOrder.countDocuments({ 'payment.status': 'pending' }),
+          // Every payment received this month -- the first one and each
+          // renewal -- the way the gym's own accounts count it. paidAt alone
+          // is the first payment only, so renewals would be missed.
           PackageOrder.aggregate([
-            { $match: { 'payment.status': 'paid', 'payment.paidAt': { $gte: monthStart } } },
-            { $group: { _id: { $toUpper: '$payment.currency' }, total: { $sum: '$payment.amount' }, orders: { $sum: 1 } } },
+            ...membershipPaymentStages({ start: monthStart, end: new Date(Date.now() + 60000) }),
+            { $group: { _id: '$currency', total: { $sum: '$amount' }, orders: { $addToSet: '$_id' } } },
             { $sort: { total: -1 } }
           ]),
           Attendance.findOne({}, { checkInAt: 1 }).sort({ checkInAt: -1 }).lean(),
@@ -46,7 +52,7 @@ async function collectGymStats(gym) {
         revenue_this_month: revenue.map((row) => ({
           currency: row._id || '',
           total: Math.round((row.total || 0) * 100) / 100,
-          orders: row.orders
+          orders: Array.isArray(row.orders) ? row.orders.length : 0
         })),
         last_visit_at: lastVisit ? lastVisit.checkInAt : null,
         last_login_at: lastLogin ? lastLogin.lastLogin : null
