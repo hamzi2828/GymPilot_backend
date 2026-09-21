@@ -16,6 +16,23 @@ function currentPlan() {
   return planFor(currentTenant());
 }
 
+/**
+ * The staff accounts a plan's maxStaff counts. The owner is on the staff
+ * list (provisioning creates them as staff, job title Owner) but is not one
+ * of the seats the plan sells: a plan for one member of staff means one
+ * besides the owner, or the setup wizard's "Your team" step fails on the
+ * very first person. The owner is whoever the platform has on record for
+ * the gym -- gym.owner.email, written at provisioning and edited only from
+ * the platform panel -- so nothing inside the gym can move the marker onto
+ * somebody else, and roles and permissions are untouched.
+ */
+function staffCountFilter(gym) {
+  const filter = { 'employment.isStaff': true };
+  const ownerEmail = String((gym && gym.owner && gym.owner.email) || '').toLowerCase().trim();
+  if (ownerEmail) filter.email = { $ne: ownerEmail };
+  return filter;
+}
+
 // Models are required lazily: this module is used from inside the user
 // controller, and the user model must not depend on it in turn.
 const LIMIT_KINDS = {
@@ -27,7 +44,8 @@ const LIMIT_KINDS = {
   staff: {
     field: 'maxStaff',
     label: 'staff accounts',
-    count: () => require('../models/user').countDocuments({ 'employment.isStaff': true })
+    // Not the owner: see staffCountFilter.
+    count: () => require('../models/user').countDocuments(staffCountFilter(currentTenant()))
   },
   trainers: {
     field: 'maxTrainers',
@@ -65,4 +83,4 @@ async function checkLimit(kind) {
   return { ok: true, limit, used };
 }
 
-module.exports = { checkLimit, currentPlan, invalidatePlanCache, LIMIT_KINDS };
+module.exports = { checkLimit, currentPlan, invalidatePlanCache, staffCountFilter, LIMIT_KINDS };

@@ -41,6 +41,28 @@ function databaseNameFor(slug) {
   return `${tenantDatabasePrefix()}${String(slug).replace(/[^a-z0-9_-]/gi, '_')}`;
 }
 
+// MongoDB refuses a database name of 64 characters or more, and Atlas's
+// shared tiers (M0, Flex) put their own prefix in front of every name and
+// allow only 38. New gyms are held to the smaller figure, so a name that
+// works on one cluster works on all of them.
+const MAX_DATABASE_NAME_LENGTH = 38;
+
+/**
+ * A new gym's database: <prefix><slug>_<suffix>. The slug is cut short when
+ * the whole would be too long; the suffix is what keeps the name unique, so
+ * it is never the part that is cut.
+ */
+function tenantDatabaseNameFor(slug, suffix) {
+  const prefix = tenantDatabasePrefix();
+  const tail = `_${suffix}`;
+  const room = Math.max(0, MAX_DATABASE_NAME_LENGTH - prefix.length - tail.length);
+  const base = String(slug || '')
+    .replace(/[^a-z0-9_-]/gi, '_')
+    .slice(0, room)
+    .replace(/[_-]+$/, '');
+  return `${prefix}${base}${tail}`;
+}
+
 /**
  * Databases that hold more than one gym's worth of data -- or MongoDB's
  * own -- and must never go through the per-gym drop path.
@@ -55,5 +77,7 @@ module.exports = {
   platformDatabaseName,
   tenantDatabasePrefix,
   databaseNameFor,
+  tenantDatabaseNameFor,
+  MAX_DATABASE_NAME_LENGTH,
   isProtectedDatabase
 };

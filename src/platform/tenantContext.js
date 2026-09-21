@@ -27,14 +27,17 @@ const storage = new AsyncLocalStorage();
 // production sites without it.
 function isInsecureHost(host) {
   const h = String(host || '').toLowerCase();
+  // The suffixes are read without the port: ironworks.localhost:3000 is as
+  // local as ironworks.localhost.
+  const name = h.replace(/:\d+$/, '');
   return (
     h === 'localhost' ||
     h.startsWith('localhost:') ||
     h.startsWith('127.0.0.1') ||
     h.startsWith('0.0.0.0') ||
-    h.endsWith('.local') ||
-    h.endsWith('.test') ||
-    h.endsWith('.localhost')
+    name.endsWith('.local') ||
+    name.endsWith('.test') ||
+    name.endsWith('.localhost')
   );
 }
 
@@ -88,6 +91,24 @@ function siteUrlFor(gym) {
   if (subdomain) return originForHost(subdomain);
 
   return envOrigin || 'http://localhost:3000';
+}
+
+function isDefaultTenant(gym) {
+  return !!(gym && process.env.DEFAULT_TENANT_SLUG && gym.slug === process.env.DEFAULT_TENANT_SLUG);
+}
+
+/**
+ * Where an owner's set-password link should point. The platform subdomain
+ * when the gym has one: it answers the moment the gym exists, while a custom
+ * domain only does once its DNS has been pointed at the website -- and an
+ * invite that opens on a dead domain is an owner who never gets in. Anything
+ * else is siteUrlFor's answer.
+ */
+function inviteSiteUrlFor(gym) {
+  const subdomain = subdomainHostFor(gym && gym.slug);
+  const registered = subdomain && ((gym && gym.domains) || []).some((d) => d && d.host === subdomain);
+  if (registered && !(isDefaultTenant(gym) && process.env.FRONTEND_ORIGIN)) return originForHost(subdomain);
+  return siteUrlFor(gym);
 }
 
 async function toContext(store) {
@@ -215,6 +236,8 @@ module.exports = {
   currentTenantSlug,
   frontendOrigin,
   siteUrlFor,
+  inviteSiteUrlFor,
+  isDefaultTenant,
   subdomainHostFor,
   tenantTimezone,
   originForHost,

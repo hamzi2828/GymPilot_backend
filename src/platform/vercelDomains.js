@@ -32,20 +32,64 @@ async function call(method, path, body) {
   return { ok: res.ok, status: res.status, json };
 }
 
+// Public suffixes that take two labels, so "ironworks.com.pk" is a root
+// domain just as "ironworks.com" is. Not the whole public suffix list --
+// the ones gyms here actually register under.
+const TWO_LABEL_SUFFIXES = new Set([
+  'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk',
+  'com.pk', 'org.pk', 'net.pk', 'com.au', 'net.au', 'org.au', 'co.nz', 'co.za',
+  'co.in', 'net.in', 'org.in', 'com.sa', 'com.qa', 'com.bh', 'com.kw', 'com.om', 'com.eg',
+  'com.tr', 'com.ng', 'co.ke', 'com.my', 'com.sg', 'com.ph', 'com.bd', 'com.br', 'com.mx', 'co.jp'
+]);
+
+/** Where the registrable domain starts: 2 labels from the end, or 3 under a two-label suffix. */
+function rootLabels(parts) {
+  return parts.length >= 3 && TWO_LABEL_SUFFIXES.has(parts.slice(-2).join('.')) ? 3 : 2;
+}
+
+/** "ironworks.com" or "ironworks.co.uk" -- not "app.ironworks.com", not "localhost:3000". */
+function isApex(host) {
+  const clean = String(host || '').toLowerCase().trim();
+  if (!clean || clean.includes(':') || /^[\d.]+$/.test(clean)) return false;
+  const parts = clean.split('.');
+  return parts.length >= 2 && parts.length === rootLabels(parts);
+}
+
 /** What the owner has to put in DNS for this host. */
 function dnsAdvice(host) {
   const parts = String(host).split('.');
-  const apex = parts.length <= 2;
-  return apex
+  return isApex(host)
     ? { type: 'A', name: '@', value: '76.76.21.21', note: 'Point the root domain at Vercel with an A record.' }
-    : { type: 'CNAME', name: parts[0], value: 'cname.vercel-dns.com', note: 'Point the subdomain at Vercel with a CNAME.' };
+    : { type: 'CNAME', name: parts.slice(0, Math.max(1, parts.length - rootLabels(parts))).join('.'), value: 'cname.vercel-dns.com', note: 'Point the subdomain at Vercel with a CNAME.' };
 }
 
 /**
- * Adds a host to the project. Resolves to a status object; never rejects.
- * { host, added, configured, verified, verification: [...], dns, error }
+ * The www twin a root domain needs on the project too. Gyms store hosts
+ * without www (gymModel.normalizeHost strips it, and the API matches
+ * www.ironworks.com to ironworks.com by itself), but Vercel only serves the
+ * names it has been given -- so without this, whoever types the www address
+ * gets Vercel's 404.
+ */
+function wwwTwinOf(host) {
+  return isApex(host) ? `www.${String(host).toLowerCase().trim()}` : null;
+}
+
+/**
+ * Adds a host to the project -- a root domain together with its www twin
+ * (reported under `www`). Resolves to a status object; never rejects.
+ * { host, added, verified, verification: [...], dns, error, www? }
+ *
+ * `added` with `verified: false` means Vercel has the host but will not
+ * serve it until the TXT record in `verification` exists.
  */
 async function addDomain(host) {
+  const result = await addOne(host);
+  const twin = wwwTwinOf(result.host);
+  if (twin && !result.skipped) result.www = await addOne(twin);
+  return result;
+}
+
+async function addOne(host) {
   const clean = String(host || '').toLowerCase().trim();
   if (!configured()) return { host: clean, added: false, skipped: 'Vercel is not connected (VERCEL_TOKEN / VERCEL_PROJECT_ID)', dns: dnsAdvice(clean) };
   try {
@@ -72,8 +116,16 @@ async function addDomain(host) {
   }
 }
 
-/** Removes a host from the project. Best effort. */
+/** Removes a host from the project, and a root domain's www twin with it. Best effort. */
 async function removeDomain(host) {
+  const result = await removeOne(host);
+  const twin = wwwTwinOf(result.host);
+  // A twin that was never added answers 404, which counts as removed.
+  if (twin && configured()) result.www = await removeOne(twin);
+  return result;
+}
+
+async function removeOne(host) {
   const clean = String(host || '').toLowerCase().trim();
   if (!configured() || !clean) return { host: clean, removed: false };
   try {
@@ -109,4 +161,4 @@ async function domainStatus(host) {
   }
 }
 
-module.exports = { configured, addDomain, removeDomain, domainStatus, dnsAdvice };
+module.exports = { configured, addDomain, removeDomain, domainStatus, dnsAdvice, isApex, wwwTwinOf };

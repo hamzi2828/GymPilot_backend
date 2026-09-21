@@ -16,8 +16,8 @@ const mongoose = require('mongoose');
 const Gym = require('./models/gymModel');
 const PlatformPlan = require('./models/platformPlanModel');
 const { dropTenantDatabase } = require('./connections');
-const { databaseNameFor, isProtectedDatabase, tenantDatabasePrefix } = require('./dbNames');
-const { runWithTenant, siteUrlFor, subdomainHostFor } = require('./tenantContext');
+const { databaseNameFor, tenantDatabaseNameFor, MAX_DATABASE_NAME_LENGTH, isProtectedDatabase, tenantDatabasePrefix } = require('./dbNames');
+const { runWithTenant, siteUrlFor, inviteSiteUrlFor, isDefaultTenant, subdomainHostFor, isInsecureHost } = require('./tenantContext');
 const { invalidateTenantCache } = require('./middleware/resolveTenant');
 
 // Tenant-side models and services. Proxies: they bind to the new gym's
@@ -137,7 +137,9 @@ async function assertSlugAvailable(slug) {
  * guess.
  */
 async function freeSlugFrom(name) {
-  const base = slugify(name).slice(0, 44) || 'gym';
+  // Cut, then trimmed again: a cut that lands on a hyphen would leave a slug
+  // the pattern refuses.
+  const base = slugify(name).slice(0, 44).replace(/-+$/, '') || 'gym';
   if (!Gym.SLUG_PATTERN.test(base)) {
     throw new ProvisioningError('The gym name needs at least two letters or digits');
   }
@@ -160,8 +162,11 @@ async function freeSlugFrom(name) {
  * end: two gyms can never end up pointed at one database.
  */
 function uniqueDatabaseNameFor(slug) {
-  return `${databaseNameFor(slug)}_${crypto.randomBytes(3).toString('hex')}`;
+  return tenantDatabaseNameFor(slug, crypto.randomBytes(3).toString('hex'));
 }
+
+// What MongoDB will not have in a database name.
+const DATABASE_NAME_FORBIDDEN = /[/\\. "$*<>:|?\0]/;
 
 /**
  * What a caller may say about the database. Only the API applies this (the
@@ -180,6 +185,14 @@ function validateDatabaseInput(database, { allowDedicatedUri = process.env.ALLOW
   if (name) {
     if (isProtectedDatabase(name)) {
       throw new ProvisioningError(`"${name}" is the platform's own database; a gym cannot be created in it`);
+    }
+    // Refused here with a reason rather than by MongoDB halfway through
+    // provisioning with a 500.
+    if (name.length > MAX_DATABASE_NAME_LENGTH) {
+      throw new ProvisioningError(`Database names can be at most ${MAX_DATABASE_NAME_LENGTH} characters ("${name}" is ${name.length}). Leave it empty and one is chosen for you.`);
+    }
+    if (DATABASE_NAME_FORBIDDEN.test(name)) {
+      throw new ProvisioningError(`"${name}" is not a valid database name: use letters, digits, underscores and hyphens only`);
     }
     const prefix = tenantDatabasePrefix();
     if (!uri && !name.startsWith(prefix)) {
@@ -322,6 +335,8 @@ async function seedTenantDefaults({ gym, owner, adoptExisting = false }) {
     const email = String(owner.email).toLowerCase().trim();
     ownerUser = await User.findOne({ email });
     if (!ownerUser) {
+      // On the staff list like anyone who works there, but not one of the
+      // plan's staff seats: planLimits knows the owner by gym.owner.email.
       const hashed = await bcrypt.hash(owner.password, await bcrypt.genSalt(10));
       ownerUser = await User.create({
         firstName: owner.firstName || 'Gym',
@@ -402,10 +417,12 @@ async function sharedDatabaseExists(name) {
  * @param {object} [options]
  * @param {*}      [options.createdBy]             super admin id
  * @param {boolean}[options.enforceDatabasePolicy] true from the API: see validateDatabaseInput
+ * @param {boolean}[options.requireSite]           true from the API: refuse a gym the website
+ *                                                 could not be reached on (see below)
  *
- * @returns {Promise<{gym, seeded, siteUrl, warnings: string[], ownerInvite: {sent: boolean, error?: string}}>}
+ * @returns {Promise<{gym, seeded, siteUrl, inviteSiteUrl, warnings: string[], ownerInvite: {sent: boolean, error?: string}}>}
  */
-async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = false } = {}) {
+async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = false, requireSite = false } = {}) {
   const name = String(input.name || '').trim();
   if (!name) throw new ProvisioningError('Gym name is required');
   const warnings = [];
@@ -423,18 +440,30 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
   // Under the platform's root domain every gym has an address from the
   // start: <slug>.<root>. Primary only when nothing else was registered.
   const subdomain = subdomainHostFor(slug);
-  let subdomainAdded = false;
   if (subdomain && !domains.some((d) => d.host === subdomain)) {
     const holder = await Gym.findOne({ 'domains.host': subdomain }).select('slug').lean();
     if (holder) {
       warnings.push(`${subdomain} is already registered to ${holder.slug}, so it was not added to this gym`);
     } else {
       domains.push({ host: subdomain, isPrimary: domains.length === 0, addedAt: new Date() });
-      subdomainAdded = true;
     }
   }
 
   const adoptExisting = !!input.adoptExisting;
+
+  // The website picks its gym by the host it is visited on, and nothing
+  // else. A gym with no domain and no platform subdomain has no host: its
+  // links fall back to FRONTEND_ORIGIN, which is the default gym's site, so
+  // the owner's set-password link would look for their token in the wrong
+  // gym and call it invalid. Better said now than after the gym exists.
+  const servedByDefault = !!process.env.FRONTEND_ORIGIN && isDefaultTenant({ slug });
+  if (requireSite && !adoptExisting && !domains.length && !servedByDefault) {
+    throw new ProvisioningError(
+      'This gym would have no web address, so nobody could open its site or the owner\'s set-password link. ' +
+        'Add a domain for it (for local testing, a host such as ironworks.localhost:3000 works), or set PLATFORM_ROOT_DOMAIN on the API so every gym gets <slug>.<root domain>.'
+    );
+  }
+
   const owner = validateOwner(input.owner, { required: !adoptExisting });
 
   let plan = null;
@@ -505,36 +534,85 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
     throw new ProvisioningError(`Could not set up the gym's database: ${error.message}`, 500);
   }
 
-  // Put the platform subdomain on the website host, when it is connected.
-  // Best effort: the gym is live either way, and a wildcard on the project
-  // may already cover it.
-  if (subdomainAdded) {
-    try {
-      const vercel = require('./vercelDomains');
-      if (vercel.configured()) {
-        const added = await vercel.addDomain(subdomain);
-        if (!added.added) warnings.push(`${subdomain} could not be added to the website host: ${added.error || added.skipped || 'unknown reason'}`);
-      }
-    } catch (error) {
-      warnings.push(`${subdomain} could not be added to the website host: ${error.message}`);
-    }
-  }
+  // Put every domain on the website host -- the ones typed in as well as the
+  // platform subdomain, the same way editing them later does. Best effort:
+  // the gym exists either way, and the warnings say what is left to do.
+  warnings.push(...(await connectDomainsToWebsite(domains.map((d) => d.host), { platformHost: subdomain })));
 
   // Tell the owner. The password never travels: the email carries a link to
   // set one. A gym adopted from an existing deployment already has its owner
   // signed in, so it is not written to.
+  const inviteSiteUrl = inviteSiteUrlFor(gymForSeed);
   let ownerInvite = { sent: false, skipped: adoptExisting ? 'existing gym' : 'no owner' };
   if (!adoptExisting && owner && owner.email) {
     try {
       const { sendOwnerInvite } = require('./ownerInvite');
-      ownerInvite = await runWithTenant(gymForSeed, () => sendOwnerInvite({ gym: gymForSeed, email: owner.email, siteUrl: seeded.siteUrl }));
+      ownerInvite = await runWithTenant(gymForSeed, () => sendOwnerInvite({ gym: gymForSeed, email: owner.email, siteUrl: inviteSiteUrl }));
     } catch (error) {
       ownerInvite = { sent: false, error: error.message };
     }
     if (!ownerInvite.sent) warnings.push('Owner email could not be sent');
   }
 
-  return { gym, seeded, siteUrl: seeded.siteUrl, warnings, ownerInvite };
+  return { gym, seeded, siteUrl: seeded.siteUrl, inviteSiteUrl, warnings, ownerInvite };
+}
+
+/**
+ * Adds hosts to the website's Vercel project and says, in words for the
+ * panel, whatever still stands between each one and a working site: Vercel
+ * not connected, a host it refused, a TXT record it wants first, the DNS
+ * record a custom domain needs. Never throws.
+ *
+ * @param {string[]} hosts
+ * @param {object} [options]
+ * @param {string|null} [options.platformHost] the gym's <slug>.<root>: DNS for it is ours, not the owner's
+ * @param {object} [options.vercel]            the vercelDomains module (tests pass a stand-in)
+ * @returns {Promise<string[]>} warnings
+ */
+async function connectDomainsToWebsite(hosts, { platformHost = null, vercel = require('./vercelDomains') } = {}) {
+  const warnings = [];
+  // Local development hosts are never on Vercel.
+  const remote = (hosts || []).filter((host) => host && !isInsecureHost(host));
+  if (!remote.length) return warnings;
+
+  if (!vercel.configured()) {
+    const custom = remote.filter((host) => host !== platformHost);
+    if (custom.length) {
+      warnings.push(`The website host is not connected on the API (VERCEL_TOKEN / VERCEL_PROJECT_ID), so ${custom.join(', ')} ${custom.length === 1 ? 'was' : 'were'} not added to it. Add ${custom.length === 1 ? 'it' : 'them'} to the website's Vercel project by hand.`);
+    }
+    if (remote.includes(platformHost)) {
+      warnings.push(`The website host is not connected on the API, so ${platformHost} was not added to it. It works only if the Vercel project has a wildcard domain for *.${platformHost.split('.').slice(1).join('.')}.`);
+    }
+    return warnings;
+  }
+
+  const describe = (result) => {
+    if (!result) return;
+    if (!result.added) {
+      warnings.push(`${result.host} could not be added to the website host: ${result.error || result.skipped || 'unknown reason'}`);
+    } else if (result.verified === false) {
+      const records = (result.verification || []).map((v) => `${v.type} record ${v.domain} = ${v.value}`).join('; ');
+      warnings.push(`${result.host} is on the website host but is not served until its ownership is verified${records ? ` -- add a ${records}` : ''}.`);
+    }
+  };
+
+  for (const host of remote) {
+    let result;
+    try {
+      result = await vercel.addDomain(host);
+    } catch (error) {
+      result = { host, added: false, error: error.message };
+    }
+    describe(result);
+    describe(result.www);
+    // A domain of the owner's own only works once its DNS points here, which
+    // nobody has done yet on the day the gym is created.
+    if (result.added && host !== platformHost && result.dns) {
+      const twin = result.www && result.www.added ? ' (and a CNAME record for www pointing to cname.vercel-dns.com)' : '';
+      warnings.push(`Point ${host} at the website: create a DNS ${result.dns.type} record for ${result.dns.name} pointing to ${result.dns.value}${twin}. Until then the site is not reachable there.`);
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -583,6 +661,7 @@ module.exports = {
   replaceDomains,
   deleteGym,
   seedTenantDefaults,
+  connectDomainsToWebsite,
   normalizeDomains,
   assertDomainsAvailable,
   subscriptionFor,
