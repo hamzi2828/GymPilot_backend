@@ -110,7 +110,7 @@ async function readBody(body, existing = {}) {
     category,
     quantity: Math.max(1, Number(body.quantity) || 1),
     unitCost: Math.max(0, Number(body.unitCost) || 0),
-    currency: String(body.currency || existing.currency || (await L.baseCurrency())).toUpperCase(),
+    currency: String(body.currency || existing.currency || (await L.recordCurrency())).toUpperCase(),
     purchasedOn,
     // Partial-update semantics for the optional details: a body that does
     // not mention a field keeps what is stored, and '' or null clears it --
@@ -203,6 +203,8 @@ module.exports = {
       return res.json({
         success: true,
         base_currency: base,
+        // What a new asset is recorded in: the Settings currency.
+        record_currency: await L.recordCurrency(),
         currency_notice: await L.currencyNotice(),
         categories: Asset.CATEGORIES.map((key) => ({
           key,

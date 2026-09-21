@@ -88,7 +88,7 @@ async function readBody(body, existing = {}) {
     title: String(body.title).trim(),
     category,
     amount,
-    currency: String(body.currency || existing.currency || (await L.baseCurrency())).toUpperCase(),
+    currency: String(body.currency || existing.currency || (await L.recordCurrency())).toUpperCase(),
     incurredOn,
     status,
     // A paid expense always has a payment date: defaulting it to the date it
@@ -178,6 +178,8 @@ module.exports = {
       return res.json({
         success: true,
         base_currency: base,
+        // What a new expense is recorded in: the Settings currency.
+        record_currency: await L.recordCurrency(),
         currency_notice: await L.currencyNotice(),
         range: { from: range.from, to: range.to, label: range.label, today: range.today },
         categories: Expense.CATEGORIES.map((key) => ({ key, label: Expense.CATEGORY_LABELS[key] })),

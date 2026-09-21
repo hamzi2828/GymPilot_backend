@@ -29,9 +29,11 @@ async function actorName(req) {
   return me ? [me.firstName, me.lastName].filter(Boolean).join(' ') || me.email : '';
 }
 
+// The currency sales and lockers are written in: the one set in Settings,
+// not whatever past takings happened to be recorded in.
 async function gymCurrency() {
   try {
-    return await L.baseCurrency();
+    return await L.recordCurrency();
   } catch {
     return 'USD';
   }
