@@ -100,7 +100,7 @@ Nothing may serialise such a document to a client: the panel goes through
 
 ## The platform panel
 
-App: `GymPilot_frontendAdmin` -- the marketing site at `/` and the panel at `/super-admin` (sign in at `/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `/api/platform/public/addons`, `/api/platform/public/config` → `{ root_domain }`, `POST /api/platform/public/demo-requests`)
+App: `GymPilot_frontendAdmin` -- the marketing site at `/` and the panel at `/super-admin` (sign in at `/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `/api/platform/public/addons`, `/api/platform/public/config` → `{ root_domain, self_serve_signup }`, `POST /api/platform/public/demo-requests`, and the self-serve sign-up's `POST /api/platform/public/signup` and `GET /api/platform/public/signup/:id/status` — see BILLING.md → *Self-serve sign-up*)
 (`src/platform/routes/platformRoutes.js`). Its accounts (`super_admins`) and
 session token are separate from every gym's.
 
@@ -217,7 +217,9 @@ The daily cron (`/api/jobs/reminders`) rolls platform subscriptions
 (`active → past_due → expired` after `SUBSCRIPTION_GRACE_DAYS`), emails gym
 owners whose trial is ending or whose payment is late
 (`sendOwnerBillingNotices`, see BILLING.md → *Platform billing*), and then
-runs the reminders for every active gym.
+runs the reminders for every active gym it can fit in its time budget, a few
+side by side; any left over go first on the next run (FEATURES.md → *Daily
+job*).
 
 ### The front-desk app
 

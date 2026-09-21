@@ -1,7 +1,8 @@
-// Every module touched by the payments / attendance / uploads work loads
-// without a database and exports what its callers import. `node --check`
-// catches syntax; this catches a renamed export or a bad require path, which
-// would otherwise only surface on the first request in production.
+// Every module touched by the payments / attendance / uploads / sign-up /
+// daily-job work loads without a database and exports what its callers
+// import. `node --check` catches syntax; this catches a renamed export or a
+// bad require path, which would otherwise only surface on the first request
+// in production.
 process.env.MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/gympilot_unit_tests';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'unit-test-secret';
 
@@ -40,6 +41,10 @@ test('services and helpers load and export their public functions', () => {
   const upload = loads('../../src/helper/upload', ['uploadSingle', 'uploadFields', 'ensureUploadsDir']);
   assert.match(upload.NOT_WRITABLE_MESSAGE, /BLOB_READ_WRITE_TOKEN/);
   assert.equal(upload.MAX_HERO_FILE_BYTES, 20 * 1024 * 1024);
+  loads('../../src/helper/blobUpload', ['folderFor', 'ownBlobUrl']);
+  loads('../../src/platform/services/signupProvisioning', ['completeSignupCheckout', 'signupDecision', 'localeFor', 'provisionInput']);
+  loads('../../src/platform/services/platformBilling', ['createSignupCheckoutSession', 'closeSignupCheckoutSession']);
+  loads('../../src/platform/jobs', ['scheduleActiveGyms', 'dailyJobPace', 'runWithinBudget', 'orderByLastRun']);
 });
 
 test('controllers load with their handlers in place', () => {
@@ -58,6 +63,25 @@ test('controllers load with their handlers in place', () => {
   loads('../../src/controller/messagingController', ['sendCampaign', 'createAnnouncement', 'updateAnnouncement']);
   loads('../../src/accounts/controller/expenseController', ['create', 'update']);
   loads('../../src/accounts/controller/assetController', ['create', 'update']);
+  const uploads = loads('../../src/controller/uploadController', ['authorizeBlobUpload', 'handleBlobUpload', 'capabilities', 'planDirectUpload', 'tokenOptionsFor']);
+  assert.deepEqual(Object.keys(uploads.KINDS).sort(), ['hero-slide', 'homepage-image', 'homepage-video', 'testimonial']);
+  loads('../../src/controller/memberOptionsController', ['options', 'buildFilter', 'readLimit', 'optionView']);
+  loads('../../src/controller/adminSearchController', ['search', 'readTerms', 'searchableGroups']);
+  loads('../../src/controller/adminNotificationsController', ['list', 'visibleChecks', 'presentItems']);
+  loads('../../src/controller/leadController', ['publicEnquiry', 'validatePublicLead', 'leadFromEnquiry']);
+  loads('../../src/platform/controllers/billingController', ['subscription', 'planUsage']);
+  loads('../../src/platform/controllers/signupController', ['start', 'status', 'selfServeAvailable', 'validateSignup']);
+});
+
+test('the platform job-run record is a platform model with one row per job and gym', () => {
+  const PlatformJobRun = require('../../src/platform/models/platformJobRunModel');
+  assert.equal(PlatformJobRun.modelName, 'PlatformJobRun');
+  assert.equal(PlatformJobRun.collection.collectionName, 'platform_job_runs');
+  for (const field of ['job', 'gymId', 'gymSlug', 'lastStartedAt', 'lastRunAt', 'lastOutcome', 'lastError', 'lastDurationMs']) {
+    assert.ok(PlatformJobRun.schema.path(field), `PlatformJobRun has ${field}`);
+  }
+  const unique = PlatformJobRun.schema.indexes().find(([fields]) => JSON.stringify(fields) === JSON.stringify({ job: 1, gymId: 1 }));
+  assert.ok(unique && unique[1].unique === true, 'one run record per job and gym');
 });
 
 test('the gymfolio router mounts, with or without the shared rate limiters', () => {
