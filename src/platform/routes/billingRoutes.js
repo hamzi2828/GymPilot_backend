@@ -15,5 +15,8 @@ const billingController = require('../controllers/billingController');
 router.get('/subscription', auth, requirePermission('settings', 'view'), billingController.subscription);
 router.post('/checkout', auth, requirePermission('settings', 'manage'), billingController.checkout);
 router.post('/portal', auth, requirePermission('settings', 'manage'), billingController.portal);
+// The plan picker: what the gym can move to, and moving it.
+router.get('/plans', auth, requirePermission('settings', 'view'), billingController.plans);
+router.post('/change-plan', auth, requirePermission('settings', 'manage'), billingController.changePlan);
 
 module.exports = router;

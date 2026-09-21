@@ -419,10 +419,13 @@ async function sharedDatabaseExists(name) {
  * @param {boolean}[options.enforceDatabasePolicy] true from the API: see validateDatabaseInput
  * @param {boolean}[options.requireSite]           true from the API: refuse a gym the website
  *                                                 could not be reached on (see below)
+ * @param {object} [options.stripe]                { customerId, subscriptionId } of a payment that
+ *                                                 already happened (a signup from the marketing site),
+ *                                                 written with the gym so a retried webhook finds it
  *
  * @returns {Promise<{gym, seeded, siteUrl, inviteSiteUrl, warnings: string[], ownerInvite: {sent: boolean, error?: string}}>}
  */
-async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = false, requireSite = false } = {}) {
+async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = false, requireSite = false, stripe = null } = {}) {
   const name = String(input.name || '').trim();
   if (!name) throw new ProvisioningError('Gym name is required');
   const warnings = [];
@@ -493,6 +496,15 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
   // created from one that was already there.
   const databaseExistedBefore = adoptExisting || database.uri ? true : await sharedDatabaseExists(database.name);
 
+  const subscription = subscriptionFor(plan, input.subscription || {}, addons);
+  // Set in the same write that creates the gym, not after: a paid signup
+  // whose webhook is retried looks for its gym by these, and must find it
+  // even if the process died a moment after this line.
+  if (stripe) {
+    subscription.stripeCustomerId = String(stripe.customerId || '');
+    subscription.stripeSubscriptionId = String(stripe.subscriptionId || '');
+  }
+
   const gym = await Gym.create({
     name,
     slug,
@@ -501,7 +513,7 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
     database,
     owner: owner ? { firstName: owner.firstName, lastName: owner.lastName, email: owner.email, phone: owner.phone } : {},
     plan: plan ? plan._id : null,
-    subscription: subscriptionFor(plan, input.subscription || {}, addons),
+    subscription,
     locale: {
       timezone: (input.locale && input.locale.timezone) || 'UTC',
       currency: String((input.locale && input.locale.currency) || 'USD').toUpperCase(),

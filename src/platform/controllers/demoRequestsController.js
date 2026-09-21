@@ -1,7 +1,9 @@
 // src/platform/controllers/demoRequestsController.js
 //
 // Demo requests from the marketing site. `submit` is public (rate limited,
-// honeypot-checked); `list` and `update` are the panel's view of them.
+// honeypot-checked); `list` and `update` are the panel's view of them --
+// including the signups that paid online (controllers/signupController.js),
+// which are kept as the same record with kind 'signup'.
 
 const DemoRequest = require('../models/demoRequestModel');
 const PlatformPlan = require('../models/platformPlanModel');
@@ -9,6 +11,7 @@ const PlatformAddon = require('../models/platformAddonModel');
 const SuperAdmin = require('../models/superAdminModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
 const { sendEmail } = require('../../services/emailService');
+const { afterResponse } = require('../../services/afterResponse');
 const { shell, paragraph, detailTable, escapeHtml } = require('../../templates/gymEmails');
 
 const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
@@ -131,11 +134,19 @@ function panelUrl() {
   return `${origin}/super-admin/demo-requests`;
 }
 
+/**
+ * Emails every active platform admin. Failures are logged by sendEmail and
+ * never surfaced: whatever the email is about has already happened.
+ */
+async function emailAdmins(subject, heading, body) {
+  const admins = await SuperAdmin.find({ isActive: true }).select('email').lean();
+  if (!admins.length) return;
+  await Promise.all(admins.map((a) => sendEmail(a.email, subject, shell(PLATFORM_NAME, heading, body))));
+}
+
 // Tells every active platform admin. Email failures are logged, never
 // surfaced: the request is already saved.
 async function notifyAdmins(request) {
-  const admins = await SuperAdmin.find({ isActive: true }).select('email').lean();
-  if (!admins.length) return;
   const body = [
     paragraph(
       request.kind === 'trial'
@@ -164,7 +175,7 @@ async function notifyAdmins(request) {
     paragraph(`Record where it goes in the panel: <a href="${panelUrl()}">${panelUrl()}</a>`)
   ].join('');
   const subject = `${request.kind === 'trial' ? 'New trial signup' : 'New demo request'}: ${request.gymName || request.name}`;
-  await Promise.all(admins.map((a) => sendEmail(a.email, subject, shell(PLATFORM_NAME, 'New demo request', body))));
+  await emailAdmins(subject, 'New demo request', body);
 }
 
 /**
@@ -230,6 +241,23 @@ function publicRow(doc) {
     notes: doc.notes || '',
     gymId: doc.gymId ? String(doc.gymId) : null,
     convertedAt: doc.convertedAt || null,
+    // How far a paid signup has got (see services/signupProvisioning.js);
+    // null on a demo or trial request.
+    signup:
+      doc.kind === 'signup' && doc.signup
+        ? {
+            state: doc.signup.state,
+            // Whether the buyer ever got as far as Stripe's payment page.
+            paymentStarted: !!doc.signup.stripeSessionId,
+            error: doc.signup.error || '',
+            attempts: doc.signup.attempts || 0,
+            siteUrl: doc.signup.siteUrl || '',
+            trialEndsAt: doc.signup.trialEndsAt || null,
+            inviteSent: !!doc.signup.inviteSent,
+            stripeCustomerId: doc.signup.stripeCustomerId || '',
+            stripeSubscriptionId: doc.signup.stripeSubscriptionId || ''
+          }
+        : null,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt
   };
@@ -237,6 +265,10 @@ function publicRow(doc) {
 
 module.exports = {
   validateDemoRequest,
+  // for controllers/signupController.js and services/signupProvisioning.js
+  priceSelection,
+  emailAdmins,
+  panelUrl,
 
   // POST /api/platform/public/demo-requests
   submit: async (req, res) => {
@@ -275,8 +307,9 @@ module.exports = {
         ip: clientIp(req),
         userAgent: text(req.headers['user-agent'], 500)
       });
-      notifyAdmins(doc).catch((err) => console.error('[platform] demo request email failed:', err.message));
-      confirmToRequester(doc).catch((err) => console.error('[platform] demo request confirmation failed:', err.message));
+      // Not waited for, but kept alive on Vercel until they have gone.
+      afterResponse(() => notifyAdmins(doc), 'demo request email to admins');
+      afterResponse(() => confirmToRequester(doc), 'demo request confirmation');
       return res.status(201).json({ success: true, message: THANKS, id: String(doc._id) });
     } catch (error) {
       console.error('[platform] demo request failed:', error);

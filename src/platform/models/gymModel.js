@@ -99,6 +99,10 @@ const gymSchema = new mongoose.Schema(
       startedAt: { type: Date, default: null },
       currentPeriodEnd: { type: Date, default: null },
       cancelledAt: { type: Date, default: null },
+      // When the gym went past due; null whenever it is not. Stripe moves
+      // currentPeriodEnd on at a renewal whether or not the card was charged,
+      // so the grace period is counted from here too (jobs.js rollFilters).
+      pastDueSince: { type: Date, default: null },
       notes: { type: String, default: '', trim: true },
 
       // Self-serve billing through the PLATFORM's Stripe account (see
@@ -112,6 +116,10 @@ const gymSchema = new mongoose.Schema(
       // does not deliver in order, so an event older than this is stale news
       // (a late "active" after a cancellation) and is not applied.
       stripeEventAt: { type: Date, default: null },
+      // The newest Stripe Checkout page opened from the gym's Billing tab.
+      // It is closed before another is opened, so two tabs cannot start two
+      // subscriptions, and cleared once its payment has landed.
+      checkoutSessionId: { type: String, default: '', trim: true },
 
       // When each lifecycle email went to the owner, so every one of them is
       // sent once per period (see jobs.js sendOwnerBillingNotices). Reset
@@ -121,7 +129,8 @@ const gymSchema = new mongoose.Schema(
         trial3: { type: Date, default: null },
         trial1: { type: Date, default: null },
         pastDue: { type: Date, default: null },
-        expired: { type: Date, default: null }
+        expired: { type: Date, default: null },
+        cancelled: { type: Date, default: null }
       }
     },
 

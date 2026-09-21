@@ -9,6 +9,11 @@
 //   trialing, ends in <= 1 day   -> trial1      (once)
 //   past_due                     -> pastDue     (once)
 //   expired                      -> expired     (once)
+//   cancelled, in the last week  -> cancelled   (once)
+//
+// A cancellation older than that is marked without an email: the notice is
+// news of the subscription ending, not a reminder for every gym that ever
+// left -- and not something to send to all of them the day it first ships.
 //
 // "Once" is kept in subscription.notices, which the webhook and the panel
 // clear whenever a new period starts. When the cron has missed a few days
@@ -17,6 +22,8 @@
 // would say the opposite of "we thought about this".
 
 const DAY_MS = 86400000;
+// How recent a cancellation is still news.
+const CANCELLED_NOTICE_DAYS = 7;
 
 const TRIAL_STEPS = [
   { key: 'trial1', within: 1 },
@@ -59,7 +66,13 @@ function noticesDue(subscription, now = new Date()) {
   if (sub.status === 'expired') {
     return done.expired ? nothing : { send: 'expired', mark: ['expired'], daysLeft: left };
   }
+  if (sub.status === 'cancelled') {
+    if (done.cancelled) return nothing;
+    const at = sub.cancelledAt ? new Date(sub.cancelledAt).getTime() : NaN;
+    const recent = !Number.isNaN(at) && now.getTime() - at <= CANCELLED_NOTICE_DAYS * DAY_MS;
+    return { send: recent ? 'cancelled' : null, mark: ['cancelled'], daysLeft: left };
+  }
   return nothing;
 }
 
-module.exports = { noticesDue, daysLeft, TRIAL_STEPS };
+module.exports = { noticesDue, daysLeft, TRIAL_STEPS, CANCELLED_NOTICE_DAYS };

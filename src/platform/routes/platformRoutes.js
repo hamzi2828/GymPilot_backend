@@ -8,7 +8,7 @@ const express = require('express');
 const router = express.Router();
 
 const { platformAuth } = require('../middleware/platformAuth');
-const { loginLimiter, passwordResetLimiter, passwordResetConfirmLimiter, demoRequestLimiter } = require('../../middleware/rateLimit');
+const { loginLimiter, passwordResetLimiter, passwordResetConfirmLimiter, demoRequestLimiter, paymentLimiter } = require('../../middleware/rateLimit');
 const { warmPlatformModels } = require('../models');
 const { platformDatabaseName, tenantDatabasePrefix } = require('../dbNames');
 
@@ -18,6 +18,7 @@ const plansController = require('../controllers/plansController');
 const addonsController = require('../controllers/addonsController');
 const platformSettingsController = require('../controllers/platformSettingsController');
 const demoRequestsController = require('../controllers/demoRequestsController');
+const signupController = require('../controllers/signupController');
 
 router.use((req, res, next) => {
   warmPlatformModels();
@@ -38,15 +39,25 @@ router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
 router.get('/public/plans', plansController.publicPlans);
 router.get('/public/addons', addonsController.publicAddons);
 // The domain gyms get their web address under (`<slug>.<root>`), so checkout
-// can show it -- or say there is none yet. Nothing secret.
-router.get('/public/config', (req, res) => {
-  res.json({ success: true, data: { root_domain: process.env.PLATFORM_ROOT_DOMAIN || '' } });
+// can show it -- or say there is none yet -- and whether checkout can take
+// payment and build the gym itself (self_serve_signup) or sends a request
+// for the panel to act on. Nothing secret: a yes or no, never why.
+router.get('/public/config', async (req, res) => {
+  const selfServe = await signupController
+    .selfServeAvailable()
+    .then((result) => result.available)
+    .catch(() => false);
+  res.json({ success: true, data: { root_domain: process.env.PLATFORM_ROOT_DOMAIN || '', self_serve_signup: selfServe } });
 });
 
 // Stripe's callback. Public by necessity -- the signature is the proof --
 // and raw, because a parsed body no longer matches what was signed.
 router.post('/stripe/webhook', express.raw({ type: 'application/json' }), platformSettingsController.webhook);
 router.post('/public/demo-requests', demoRequestLimiter, demoRequestsController.submit);
+// Sign up and pay in one go. Limited like the other payment starts: each
+// one opens a Stripe page. The status is polled by the success page.
+router.post('/public/signup', paymentLimiter, signupController.start);
+router.get('/public/signup/:id/status', signupController.status);
 
 router.use(platformAuth);
 

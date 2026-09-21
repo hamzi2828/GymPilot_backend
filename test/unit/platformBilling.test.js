@@ -15,8 +15,9 @@ const assert = require('node:assert/strict');
 const { noticesDue } = require('../../src/platform/billingNotices');
 const { hasAddon } = require('../../src/platform/entitlements');
 const { subscriptionFor } = require('../../src/platform/provisioning');
-const { periodEndOf, subscriptionIdOfInvoice, amountOf, STATUS_MAP } = require('../../src/platform/services/platformWebhook');
+const { periodEndOf, subscriptionIdOfInvoice, amountOf, STATUS_MAP, withStatusEffects } = require('../../src/platform/services/platformWebhook');
 const { fromMinorUnits, intervalFor } = require('../../src/platform/services/platformBilling');
+const { rollFilters, ownerNoticeEmail } = require('../../src/platform/jobs');
 
 const DAY = 86400000;
 const now = new Date('2026-09-12T09:00:00Z');
@@ -52,6 +53,77 @@ test('past due and expired are told once each; active gyms hear nothing', () => 
   assert.equal(noticesDue({ status: 'active', currentPeriodEnd: inDays(1) }, now).send, null);
   assert.equal(noticesDue({ status: 'trialing', currentPeriodEnd: null }, now).send, null);
   assert.equal(noticesDue(null, now).send, null);
+});
+
+test('a cancellation is told once, while it is news; an old one is marked without an email', () => {
+  const recent = noticesDue({ status: 'cancelled', cancelledAt: inDays(-1) }, now);
+  assert.equal(recent.send, 'cancelled');
+  assert.deepEqual(recent.mark, ['cancelled']);
+  assert.equal(noticesDue({ status: 'cancelled', cancelledAt: inDays(-1), notices: { cancelled: now } }, now).send, null);
+  // Cancelled long ago (or by hand with no date): the day this ships is not the day to tell them.
+  const old = noticesDue({ status: 'cancelled', cancelledAt: inDays(-40) }, now);
+  assert.equal(old.send, null);
+  assert.deepEqual(old.mark, ['cancelled']);
+  assert.deepEqual(noticesDue({ status: 'cancelled', cancelledAt: null }, now).mark, ['cancelled']);
+  assert.equal(noticesDue({ status: 'cancelled', cancelledAt: null }, now).send, null);
+});
+
+test('the past-due clock starts when a gym goes past due, keeps running, and stops when it is paid', () => {
+  const since = new Date('2026-09-01T00:00:00Z');
+  const eventAt = new Date('2026-09-10T00:00:00Z');
+  const gym = (status, pastDueSince = null) => ({ subscription: { status, pastDueSince } });
+
+  assert.equal(withStatusEffects(gym('active'), { status: 'past_due' }, eventAt).pastDueSince, eventAt);
+  assert.equal(withStatusEffects(gym('past_due', since), { status: 'past_due' }, eventAt).pastDueSince, since, 'a retry does not restart it');
+  assert.ok(withStatusEffects(gym('active'), { status: 'past_due' }, null).pastDueSince instanceof Date);
+  assert.equal(withStatusEffects(gym('past_due', since), { status: 'active' }, eventAt).pastDueSince, null);
+  assert.equal(withStatusEffects(gym('past_due', since), { status: 'cancelled' }, eventAt).pastDueSince, null);
+  // A status Stripe did not say (an incomplete checkout) leaves it alone.
+  assert.equal('pastDueSince' in withStatusEffects(gym('past_due', since), { status: undefined }, eventAt), false);
+  // Out of grace already: Stripe still retrying the card is not a payment.
+  const expired = withStatusEffects(gym('expired', since), { status: 'past_due', currentPeriodEnd: eventAt }, eventAt);
+  assert.equal(expired.status, undefined);
+  assert.equal(expired.currentPeriodEnd, eventAt, 'the rest still lands');
+  assert.equal(withStatusEffects(gym('expired', since), { status: 'active' }, eventAt).status, 'active', 'paying brings it back');
+});
+
+test('a past-due gym expires GRACE days after it went past due, whatever its period end says', () => {
+  const at = new Date('2026-09-21T06:00:00Z');
+  const { toExpired, toExpiredPastDue, pastDueClock } = rollFilters(at, 7);
+  // The old rule stays: the period end.
+  assert.equal(toExpired['subscription.currentPeriodEnd'].$lt.getTime(), at.getTime() - 7 * DAY);
+  // And the new one: Stripe keeps moving the period on while it retries the card.
+  assert.equal(toExpiredPastDue['subscription.status'], 'past_due');
+  assert.equal(toExpiredPastDue['subscription.pastDueSince'].$lt.getTime(), at.getTime() - 7 * DAY);
+  assert.equal(toExpiredPastDue['subscription.pastDueSince'].$ne, null);
+  assert.deepEqual(pastDueClock, { 'subscription.status': 'past_due', 'subscription.pastDueSince': null });
+});
+
+test('the owner is told when the subscription is cancelled, with the way back', () => {
+  const gym = { name: 'Iron Den', owner: { firstName: 'Sam' }, subscription: { status: 'cancelled', cancelledAt: new Date('2026-09-20T10:00:00Z') } };
+  const email = ownerNoticeEmail({ notice: 'cancelled', gym, siteUrl: 'https://irondengym.com', daysLeft: null });
+  assert.match(email.subject, /has been cancelled/);
+  assert.match(email.html, /Sign in to renew/);
+  assert.match(email.html, /irondengym\.com\/admin\/settings\?tab=billing/);
+  const { dateLabel } = require('../../src/templates/gymEmails');
+  assert.ok(email.html.includes(dateLabel(gym.subscription.cancelledAt)), 'says when');
+});
+
+test('a gym cut off for not paying is told when the payment stopped, not a period end still ahead', () => {
+  const pastDueSince = new Date(Date.now() - 9 * DAY);
+  const gym = {
+    name: 'Iron Den',
+    owner: { firstName: 'Sam' },
+    subscription: { status: 'expired', stripeSubscriptionId: 'sub_1', pastDueSince, currentPeriodEnd: new Date(Date.now() + 20 * DAY) }
+  };
+  const expired = ownerNoticeEmail({ notice: 'expired', gym, siteUrl: 'https://irondengym.com', daysLeft: 20 });
+  const { dateLabel } = require('../../src/templates/gymEmails');
+  assert.ok(expired.html.includes(dateLabel(pastDueSince)), 'ended when it went past due');
+  assert.ok(!expired.html.includes(dateLabel(gym.subscription.currentPeriodEnd)));
+
+  // A failed card: the day it is cut off if the card still cannot be charged.
+  const failed = ownerNoticeEmail({ notice: 'pastDue', gym: { ...gym, subscription: { ...gym.subscription, status: 'past_due', pastDueSince: new Date() } }, siteUrl: 'https://irondengym.com', daysLeft: 20 });
+  assert.match(failed.html, /cannot be charged by /);
 });
 
 test('a gym has an add-on when it has no plan, when the plan includes it, or when it bought it', () => {

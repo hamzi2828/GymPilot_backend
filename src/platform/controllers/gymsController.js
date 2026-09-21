@@ -34,7 +34,7 @@ const AUDIT_LIMIT = 200;
 
 // What the panel keeps beside a subscription it re-writes: what Stripe
 // knows about the gym, and which lifecycle emails already went.
-const STRIPE_FIELDS = ['stripeCustomerId', 'stripeSubscriptionId', 'stripePriceSummary'];
+const STRIPE_FIELDS = ['stripeCustomerId', 'stripeSubscriptionId', 'stripePriceSummary', 'checkoutSessionId'];
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
@@ -485,6 +485,11 @@ module.exports = {
       // When the last Stripe event landed is what keeps a late, older event
       // from undoing a newer one (see platformWebhook) -- Stripe's to move.
       next.stripeEventAt = current.stripeEventAt || null;
+      // How long it has been past due is what expires it (jobs.js): kept
+      // while it stays past due, started now if the panel just set it there,
+      // cleared otherwise.
+      next.pastDueSince =
+        next.status === 'past_due' ? current.pastDueSince || (current.status === 'past_due' ? null : new Date()) : null;
       const periodBefore = current.currentPeriodEnd ? new Date(current.currentPeriodEnd).getTime() : 0;
       const periodAfter = next.currentPeriodEnd ? new Date(next.currentPeriodEnd).getTime() : 0;
       next.notices = periodBefore === periodAfter && current.notices ? { ...current.notices } : {};

@@ -2,7 +2,9 @@
 //
 // A gym paying the PLATFORM for its plan, by card, through Stripe Checkout
 // on the platform's own account (services/platformStripe.js) -- never
-// through the gym's keys, which are for its members' money.
+// through the gym's keys, which are for its members' money. The same goes
+// for a buyer signing up on the marketing site, before their gym exists
+// (createSignupCheckoutSession).
 //
 // Prices are built inline (line_items[].price_data) from what the panel
 // agreed with the gym: its plan price, plus a line for every paid add-on on
@@ -94,6 +96,19 @@ async function priceLinesFor(gym, billingCycle) {
   return { plan, currency, billingCycle: cycle, lines, total: lines.reduce((sum, l) => sum + l.amount, 0) };
 }
 
+/** priceLinesFor's lines as Stripe Checkout line items, priced inline. */
+function lineItemsFor(priced) {
+  return priced.lines.map((line) => ({
+    quantity: 1,
+    price_data: {
+      currency: priced.currency.toLowerCase(),
+      unit_amount: toMinorUnits(line.amount, priced.currency),
+      recurring: { interval: intervalFor(priced.billingCycle) },
+      product_data: { name: line.name }
+    }
+  }));
+}
+
 /**
  * A Stripe Checkout Session in subscription mode for the gym's plan.
  *
@@ -128,15 +143,7 @@ async function createCheckoutSession({ gym, billingCycle, successUrl, cancelUrl 
 
   const params = {
     mode: 'subscription',
-    line_items: priced.lines.map((line) => ({
-      quantity: 1,
-      price_data: {
-        currency: priced.currency.toLowerCase(),
-        unit_amount: toMinorUnits(line.amount, priced.currency),
-        recurring: { interval: intervalFor(priced.billingCycle) },
-        product_data: { name: line.name }
-      }
-    })),
+    line_items: lineItemsFor(priced),
     client_reference_id: String(gym._id),
     metadata,
     subscription_data: subscriptionData,
@@ -148,6 +155,156 @@ async function createCheckoutSession({ gym, billingCycle, successUrl, cancelUrl 
 
   const session = await stripe.checkout.sessions.create(params);
   return { url: session.url, id: session.id };
+}
+
+/**
+ * A Stripe Checkout Session for a gym that does not exist yet: somebody on
+ * the marketing site signing up and paying in one go
+ * (controllers/signupController.js). The webhook builds the gym once Stripe
+ * says it is paid (services/signupProvisioning.js); `metadata.kind` is how it
+ * tells this from a gym's own checkout.
+ *
+ * Priced by priceLinesFor from the very subscription provisioning will write
+ * for the gym, so what Stripe charges and what the gym's record says are the
+ * same number. The plan's trial is Stripe's trial: the card is taken now and
+ * first charged when the trial ends.
+ *
+ * @param {object} args
+ * @param {string} args.signupId            the DemoRequest this pays for
+ * @param {string} args.email               the buyer, filled in on Stripe's page
+ * @param {object} args.plan                the plan document
+ * @param {Array}  args.addons              add-on documents (addonsController.resolveAddons)
+ * @param {string} args.billingCycle        'monthly' | 'yearly'
+ * @param {string} args.successUrl
+ * @param {string} args.cancelUrl
+ * @returns {Promise<{url: string, id: string}>}
+ */
+async function createSignupCheckoutSession({ signupId, email, plan, addons, billingCycle, successUrl, cancelUrl }) {
+  await assertAvailable();
+  const stripe = await getPlatformStripe();
+  // Required here rather than at the top: provisioning pulls in the tenant
+  // models, which nothing else in this file needs.
+  const { subscriptionFor } = require('../provisioning');
+  const cycle = cycleOf(billingCycle);
+  const priced = await priceLinesFor({ plan, subscription: subscriptionFor(plan, { billingCycle: cycle }, addons) }, cycle);
+  if (!(priced.total > 0)) throw new PlatformBillingError('This plan is free; there is nothing to charge.', 400, 'FREE_PLAN');
+
+  const metadata = { signupId: String(signupId), kind: 'signup', planSlug: plan.slug, billingCycle: priced.billingCycle };
+  const subscriptionData = { metadata };
+  const trialDays = Math.floor(Number(plan.trialDays) || 0);
+  // Stripe takes up to two years.
+  if (trialDays > 0) subscriptionData.trial_period_days = Math.min(trialDays, 730);
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    // A card, taken up front even on a trial: the gym is made the moment this
+    // completes, which a bank debit still clearing days later cannot promise.
+    payment_method_types: ['card'],
+    line_items: lineItemsFor(priced),
+    client_reference_id: String(signupId),
+    customer_email: email,
+    metadata,
+    subscription_data: subscriptionData,
+    success_url: successUrl,
+    cancel_url: cancelUrl
+  });
+  return { url: session.url, id: session.id };
+}
+
+/**
+ * Closes an earlier payment page -- a signup's, or one a gym's Billing tab
+ * opened -- so whoever came back cannot pay on the old tab as well as the
+ * new one and end up with two subscriptions. Resolves the page's status
+ * afterwards: 'expired' (closed, or it already was), 'complete' (it was
+ * paid -- do not open another), 'open' (Stripe would not close it), or
+ * 'unknown' (Stripe could not say, for a page made with keys since
+ * replaced, say).
+ */
+async function closeCheckoutSession(sessionId) {
+  const stripe = await getPlatformStripe();
+  try {
+    const closed = await stripe.checkout.sessions.expire(sessionId);
+    return closed.status || 'expired';
+  } catch {
+    // Expiring a page that is no longer open is refused; ask what it is.
+    const current = await stripe.checkout.sessions.retrieve(sessionId).catch(() => null);
+    return current ? current.status : 'unknown';
+  }
+}
+
+// Stripe subscriptions that are over: nothing charges any more.
+const ENDED_STATUSES = new Set(['canceled', 'incomplete_expired']);
+
+/**
+ * Whether Stripe has finished with a subscription: over, or unknown to it.
+ * False while it can still charge -- past due or unpaid included, which is
+ * how a gym the roll-over expired can still be holding one. Throws when
+ * Stripe cannot be asked.
+ */
+async function stripeSubscriptionEnded(subscriptionId) {
+  const stripe = await getPlatformStripe();
+  try {
+    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    return ENDED_STATUSES.has(subscription.status);
+  } catch (error) {
+    if (error && error.code === 'resource_missing') return true;
+    throw error;
+  }
+}
+
+/**
+ * Ends a subscription at once with nothing more charged -- no final invoice,
+ * no proration -- for a paid signup whose gym could never be made
+ * (services/signupProvisioning.js). One already over is left as it is.
+ * Resolves what its latest invoice took, so whoever is told knows whether
+ * there is anything to refund.
+ *
+ * @returns {Promise<{status: string, amountPaid: number, currency: string}>}
+ */
+async function cancelSubscriptionNow(subscriptionId, stripe = null) {
+  const client = stripe || (await getPlatformStripe());
+  let subscription;
+  try {
+    subscription = await client.subscriptions.cancel(subscriptionId, { invoice_now: false, prorate: false });
+  } catch (error) {
+    // Cancelling one that is already over is refused; ask what it is.
+    subscription = await client.subscriptions.retrieve(subscriptionId).catch(() => null);
+    if (!subscription || !ENDED_STATUSES.has(subscription.status)) throw error;
+  }
+  const invoiceId = subscription.latest_invoice && (typeof subscription.latest_invoice === 'string' ? subscription.latest_invoice : subscription.latest_invoice.id);
+  const invoice = invoiceId ? await client.invoices.retrieve(invoiceId).catch(() => null) : null;
+  const currency = String((invoice && invoice.currency) || subscription.currency || '').toUpperCase();
+  return { status: subscription.status, amountPaid: invoice ? fromMinorUnits(invoice.amount_paid, currency) : 0, currency };
+}
+
+/**
+ * The subscription a gym moving to `plan` on `billingCycle` would have: the
+ * add-ons it pays for kept, the new plan's included ones added, all at the
+ * list price -- a price agreed for the old plan does not carry over. Both
+ * the owner's plan picker (billingController) and the webhook applying a
+ * checkout for another plan (platformWebhook) work it out here, so what is
+ * charged and what is recorded agree. Rejects (status 400) when an add-on
+ * the gym pays for is not sold with the new plan.
+ */
+async function subscriptionForPlanChange(gym, plan, billingCycle) {
+  // Required here rather than at the top: both pull in provisioning, which
+  // nothing else in this file needs.
+  const { resolveAddons } = require('../controllers/addonsController');
+  const { subscriptionFor } = require('../provisioning');
+  const sub = (gym && gym.subscription) || {};
+  const paid = (sub.addons || []).filter((addon) => Number(addon.amount) > 0).map((addon) => addon.slug);
+  const addons = await resolveAddons(paid, plan);
+  return subscriptionFor(
+    plan,
+    {
+      status: sub.status,
+      billingCycle: cycleOf(billingCycle, cycleOf(sub.billingCycle)),
+      startedAt: sub.startedAt,
+      currentPeriodEnd: sub.currentPeriodEnd,
+      notes: sub.notes
+    },
+    addons
+  );
 }
 
 /**
@@ -165,6 +322,13 @@ async function createPortalSession({ gym, returnUrl }) {
 
 module.exports = {
   createCheckoutSession,
+  createSignupCheckoutSession,
+  closeCheckoutSession,
+  // The name signupController has always called it by.
+  closeSignupCheckoutSession: closeCheckoutSession,
+  stripeSubscriptionEnded,
+  cancelSubscriptionNow,
+  subscriptionForPlanChange,
   createPortalSession,
   priceLinesFor,
   fromMinorUnits,

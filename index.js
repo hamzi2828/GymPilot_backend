@@ -429,6 +429,9 @@ app.get('/', (req, res) => {
 // that merely follows links.
 // ---------------------------------------------------------------------------
 async function runRemindersRoute(req, res) {
+  // The time budget counts from here: connecting and the platform steps
+  // below use the same function time limit the gyms do.
+  const startedAt = Date.now();
   const secret = process.env.CRON_SECRET;
 
   if (!secret) {
@@ -452,32 +455,51 @@ async function runRemindersRoute(req, res) {
   try {
     await ensureConnection();
     const { runDaily } = require('./src/services/reminderJobs');
-    const { forEachActiveGym, rollSubscriptionStatuses, sendOwnerBillingNotices } = require('./src/platform/jobs');
+    const { scheduleActiveGyms, dailyJobPace, rollSubscriptionStatuses, sendOwnerBillingNotices } = require('./src/platform/jobs');
     const { closeStaleVisits } = require('./src/attendance/services/staleVisits');
     // ?dryRun=1 to check what it would do without sending anything.
     const dryRun = req.query.dryRun === '1';
+    // ?gym=<slug> runs that one gym only -- a catch-up for a gym the budget
+    // left over, or one whose run failed. The platform-wide steps are not
+    // repeated for it: they have already run today and are not that gym's.
+    const gymSlug = typeof req.query.gym === 'string' ? req.query.gym.toLowerCase().trim() : '';
 
     // Platform first: a gym whose subscription lapsed today is skipped by the
     // per-gym loop below rather than emailed one last time.
-    const subscriptions = await rollSubscriptionStatuses({ dryRun });
+    const subscriptions = gymSlug ? { skipped: 'single gym run' } : await rollSubscriptionStatuses({ dryRun });
     // Then the owners: trial ending, payment overdue, access ended -- each
     // notice once, after the statuses above have settled.
-    const notices = await sendOwnerBillingNotices({ dryRun });
-    // Then every gym, each inside its own database. Visits nobody checked out
-    // of are closed first, on their own: a failure there must not cost the
-    // gym its reminders, and a failed email run must not leave members
-    // "inside" for ever.
-    const gyms = await forEachActiveGym(async () => {
-      let staleVisits;
-      try {
-        staleVisits = await closeStaleVisits({ dryRun });
-      } catch (error) {
-        staleVisits = { error: error.message };
-      }
-      return { staleVisits, ...(await runDaily({ dryRun })) };
-    });
+    const notices = gymSlug ? { skipped: 'single gym run' } : await sendOwnerBillingNotices({ dryRun });
+    const signups = gymSlug ? { skipped: 'single gym run' } : await require('./src/platform/jobs').recoverStuckSignups({ dryRun });
+    // Then every gym, each inside its own database, a few side by side (see
+    // dailyJobPace). New gyms stop being started once the time budget is
+    // used, so the function answers instead of being cut off; the gyms left
+    // over are listed under schedule.deferred and go first tomorrow. Visits
+    // nobody checked out of are closed first, on their own: a failure there
+    // must not cost the gym its reminders, and a failed email run must not
+    // leave members "inside" for ever.
+    const { concurrency, budgetMs } = dailyJobPace();
+    const { gyms, schedule } = await scheduleActiveGyms(
+      async () => {
+        let staleVisits;
+        try {
+          staleVisits = await closeStaleVisits({ dryRun });
+        } catch (error) {
+          staleVisits = { error: error.message };
+        }
+        return { staleVisits, ...(await runDaily({ dryRun })) };
+      },
+      { job: 'daily', record: !dryRun, slug: gymSlug || null, concurrency, budgetMs, startedAt }
+    );
 
-    return res.json({ success: true, dryRun, subscriptions, notices, gyms });
+    if (gymSlug && !Object.keys(gyms).length) {
+      return res.status(404).json({ success: false, message: `No active gym "${gymSlug}".` });
+    }
+    if (schedule.deferred.length) {
+      console.warn(`[jobs] time budget used; ${schedule.deferred.length} gym(s) left for the next run: ${schedule.deferred.join(', ')}`);
+    }
+
+    return res.json({ success: true, dryRun, subscriptions, notices, signups, gyms, schedule });
   } catch (error) {
     console.error('[jobs] reminders failed:', error);
     return res.status(500).json({ success: false, message: error.message });

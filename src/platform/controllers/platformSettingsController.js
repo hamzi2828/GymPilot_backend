@@ -211,7 +211,17 @@ module.exports = {
       }
 
       const first = (await PlatformStripeEvent.claim(event)) || (await reclaimStale(event));
-      if (!first) return res.json({ received: true, duplicate: true });
+      if (!first) {
+        // Already applied: acknowledged, and Stripe stops. Still being
+        // applied by another delivery: a non-2xx, so Stripe comes back later
+        // -- if that delivery dies mid-event, the retry after STALE_CLAIM_MS
+        // takes the claim over instead of the event being lost as "duplicate".
+        const claim = await PlatformStripeEvent.findOne({ eventId: event.id }).select('handledAt').lean();
+        if (claim && !claim.handledAt) {
+          return res.status(409).json({ received: false, duplicate: true, inProgress: true, message: 'This event is still being handled; retry later.' });
+        }
+        return res.json({ received: true, duplicate: true });
+      }
 
       let outcome;
       try {
