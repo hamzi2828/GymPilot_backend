@@ -8,6 +8,8 @@
 //   node Seeder/createAttendance.js --days 60  a longer history
 //   node Seeder/createAttendance.js --reset    delete only what this seeded
 //
+// Refuses to seed when NODE_ENV=production unless --force is passed.
+//
 // Two rules this file follows deliberately:
 //
 //   1. Verdicts are NOT recomputed here. It imports the same membership and
@@ -694,6 +696,16 @@ async function reset() {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // This seeds sign-in accounts with a password printed in this file, and
+  // staff with front-desk access. Never against a live gym by accident;
+  // --reset (which only removes what this seeded) is always allowed.
+  if (process.env.NODE_ENV === 'production' && !args.includes('--reset') && !args.includes('--force')) {
+    console.error('Refusing to seed: NODE_ENV is production, and this creates accounts with a known password.');
+    console.error('Point it at a development database, or pass --force if you really mean to.');
+    process.exit(1);
+  }
+
   await connect();
   // Every gym has its own database: --gym <slug> picks which one.
   enterContext(await resolveGymContextFromArgs());

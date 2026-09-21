@@ -6,3 +6,12 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 *.log
+
+# Secrets and runtime data never ship with a deploy: production reads its
+# settings from Vercel's Environment Variables, not from a file uploaded
+# with the code.
+.env
+.env.production
+.env.backup-*
+backups/
+uploads/
