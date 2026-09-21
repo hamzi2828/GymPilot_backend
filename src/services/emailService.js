@@ -67,6 +67,13 @@ async function initTransporter() {
     port: cfg.port,
     secure: cfg.secure,
     auth: { user: cfg.user, pass: cfg.pass },
+    // nodemailer's own defaults are two minutes to connect and ten of
+    // silence: one gym's dead SMTP host would hold the daily reminder run
+    // (every gym, one after another) and any request waiting on a send.
+    // A mail server that is working answers in a second or two.
+    connectionTimeout: 15 * 1000,
+    greetingTimeout: 10 * 1000,
+    socketTimeout: 20 * 1000,
   });
 
   // Bounded: drop the oldest entry rather than grow with every config ever
