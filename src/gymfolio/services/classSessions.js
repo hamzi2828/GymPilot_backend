@@ -285,7 +285,9 @@ async function timetable(query = {}, forUserId = null) {
   const range = readRange(query, policy);
 
   const filter = { isActive: true };
-  if (query.classId) filter._id = query.classId;
+  // A malformed id (a hand-edited ?class= link) filters to nothing rather
+  // than failing the cast and answering 500.
+  if (query.classId) filter._id = mongoose.Types.ObjectId.isValid(String(query.classId)) ? query.classId : null;
   if (query.category) filter.category = query.category;
 
   const [classes, exceptions] = await Promise.all([
