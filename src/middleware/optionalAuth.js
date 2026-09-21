@@ -1,6 +1,6 @@
 // src/middleware/optionalAuth.js
 const jwt = require('jsonwebtoken');
-const { tenantMismatch, sessionProblem } = require('./auth');
+const { tenantMismatch, sessionProblem, memberAppRefusal } = require('./auth');
 
 /**
  * Optional authentication middleware
@@ -33,6 +33,12 @@ module.exports = async function optionalAuth(req, res, next) {
       req.user = null;
       return next();
     }
+
+    // A member-app token at a gym that has lost the app is refused here too,
+    // not quietly treated as a visitor: the phone would otherwise show the
+    // public timetable as if nothing were wrong.
+    const refusal = await memberAppRefusal(decoded, req);
+    if (refusal) return res.status(403).json(refusal);
 
     req.user = decoded;
     return next();

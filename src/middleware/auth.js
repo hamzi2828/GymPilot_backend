@@ -54,6 +54,50 @@ function tenantMismatch(decoded, req) {
   return String(decoded.tid) !== String(req.tenant._id);
 }
 
+// Tokens the member app is issued carry `app: 'member'` (see
+// controller/mobileAuthController.js). Sign-in checks that the gym has the
+// member-app add-on, but a phone keeps its token for 30 days, so the check
+// is repeated here -- at most once a minute per gym -- and a gym that has
+// lost the add-on gets the same 403 the sign-in gives. Website and desktop
+// tokens carry no `app` claim and never reach this.
+const MEMBER_APP_CLAIM = 'member';
+const MEMBER_APP_TTL_MS = 60 * 1000;
+const memberApp = new Map(); // gym id -> { at, enabled }
+const MEMBER_APP_NOT_INCLUDED = {
+  success: false,
+  code: 'MEMBER_APP_NOT_INCLUDED',
+  message: 'Your gym has not enabled the member app yet.'
+};
+
+async function memberAppEnabled(gym) {
+  const key = String(gym._id);
+  const hit = memberApp.get(key);
+  if (hit && Date.now() - hit.at < MEMBER_APP_TTL_MS) return hit.enabled;
+
+  let enabled = true;
+  try {
+    const { gymHasAddon } = require('../platform/entitlements');
+    if (typeof gymHasAddon === 'function') enabled = !!(await gymHasAddon(gym, 'member-app'));
+  } catch (error) {
+    // Not knowing is no reason to lock a gym's members out -- and an error
+    // thrown from here would reach the catch below and sign them out.
+    console.warn('[auth] member-app check failed; allowing it for now:', error.message);
+  }
+
+  if (memberApp.size >= MAX_SESSIONS) memberApp.delete(memberApp.keys().next().value);
+  memberApp.set(key, { at: Date.now(), enabled });
+  return enabled;
+}
+
+/**
+ * The refusal for a member-app token at a gym without the add-on, or null
+ * when the request may go on. Any other token is always null. Never throws.
+ */
+async function memberAppRefusal(decoded, req) {
+  if (!decoded || decoded.app !== MEMBER_APP_CLAIM || !req || !req.tenant) return null;
+  return (await memberAppEnabled(req.tenant)) ? null : MEMBER_APP_NOT_INCLUDED;
+}
+
 // Every refusal carries a machine-readable `code` beside the message. The
 // phone app signs the member out on these four and on nothing else -- a 401
 // from a wrong current password, or from a wrong 2FA code, must not end the
@@ -64,6 +108,9 @@ function tenantMismatch(decoded, req) {
 //   TOKEN_WRONG_GYM   issued by a different gym than the one asked for
 //   SESSION_ENDED     the account was deactivated, deleted, or signed out
 //                     everywhere (tokenVersion bumped)
+//
+// And one 403 that keeps the session: MEMBER_APP_NOT_INCLUDED, for a member
+// app token at a gym that no longer has the app (see memberAppRefusal).
 module.exports = async function auth(req, res, next) {
   try {
     const authHeader = req.headers['authorization'] || '';
@@ -94,6 +141,9 @@ module.exports = async function auth(req, res, next) {
     const problem = await sessionProblem(decoded);
     if (problem) return res.status(401).json({ message: problem, code: 'SESSION_ENDED' });
 
+    const refusal = await memberAppRefusal(decoded, req);
+    if (refusal) return res.status(403).json(refusal);
+
     req.user = decoded;
     return next();
   } catch (err) {
@@ -104,3 +154,5 @@ module.exports = async function auth(req, res, next) {
 module.exports.tenantMismatch = tenantMismatch;
 module.exports.sessionProblem = sessionProblem;
 module.exports.forgetSession = forgetSession;
+module.exports.memberAppRefusal = memberAppRefusal;
+module.exports.MEMBER_APP_CLAIM = MEMBER_APP_CLAIM;
