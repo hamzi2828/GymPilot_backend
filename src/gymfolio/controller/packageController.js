@@ -1,5 +1,6 @@
 const Package = require('../models/packageModel');
 const { currencyOr } = require('../../services/currency');
+const { parseAmount } = require('../../helper/money');
 
 const KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt_pack'];
 const INTERVALS = ['day', 'week', 'month', 'year'];
@@ -211,6 +212,9 @@ const updatePackage = async (req, res) => {
     const updateData = {
       name: name || package.name,
       price: price || package.price,
+      // findByIdAndUpdate skips the model's pre-save hook, which is what
+      // normally keeps the numeric price in step with the display string.
+      priceAmount: parseAmount(price || package.price),
       currency: currency || package.currency,
       period: period || package.period,
       features: parsedFeatures || package.features,
