@@ -20,9 +20,9 @@
 // The key mirrors the fingerprint store (attendance/models/fingerprintModel.js):
 // SETTINGS_ENCRYPTION_KEY, falling back to JWT_SECRET, run through scrypt with
 // a salt that carries the gym id, so a value lifted from one gym's database
-// cannot be opened with another's. The gym a single-gym deployment defaults
-// to (DEFAULT_TENANT_SLUG) keeps the un-suffixed salt, exactly as the
-// fingerprint store does.
+// cannot be opened with another's. The gym whose secrets were sealed before
+// keys carried a gym id keeps the un-suffixed salt, exactly as the
+// fingerprint store does -- see usesLegacyKey() below.
 
 const crypto = require('crypto');
 const { currentTenant } = require('../platform/tenantContext');
@@ -35,6 +35,22 @@ const KEY_SALT = 'gympilot.settings.v1';
 
 const keys = new Map(); // scope -> Buffer
 
+// Whether `gym` still uses the original, un-scoped key: true outside any gym,
+// and for the one gym whose secrets and fingerprints were written before keys
+// carried a gym id.
+//
+// That gym is named by LEGACY_KEY_TENANT_SLUG rather than DEFAULT_TENANT_SLUG.
+// A multi-gym deployment is told to unset the default, and doing so must not
+// quietly re-key the gym -- every Stripe key, SMTP password and fingerprint
+// it holds would then open as nothing. It falls back to DEFAULT_TENANT_SLUG
+// so a deployment that has not set it behaves exactly as before. Read per
+// call, like the other tenant settings.
+function usesLegacyKey(gym) {
+  if (!gym) return true;
+  const slug = process.env.LEGACY_KEY_TENANT_SLUG || process.env.DEFAULT_TENANT_SLUG;
+  return Boolean(slug) && gym.slug === slug;
+}
+
 function encryptionKey() {
   const secret = process.env.SETTINGS_ENCRYPTION_KEY || process.env.JWT_SECRET;
   if (!secret) {
@@ -42,7 +58,7 @@ function encryptionKey() {
   }
 
   const gym = currentTenant();
-  const legacy = !gym || (process.env.DEFAULT_TENANT_SLUG && gym.slug === process.env.DEFAULT_TENANT_SLUG);
+  const legacy = usesLegacyKey(gym);
   const scope = legacy ? '__legacy__' : String(gym._id);
 
   let key = keys.get(scope);
@@ -106,4 +122,4 @@ function secretString({ trim = true } = {}) {
   return { type: String, default: '', set: seal, ...(trim ? { trim: true } : {}), get: open };
 }
 
-module.exports = { seal, open, isSealed, secretString, PREFIX };
+module.exports = { seal, open, isSealed, secretString, usesLegacyKey, PREFIX };

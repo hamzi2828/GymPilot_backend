@@ -21,12 +21,14 @@ const ALGORITHM = 'aes-256-gcm';
 const KEY_SALT = 'gympilot.fingerprint.v1';
 
 const { currentTenant } = require('../../platform/tenantContext');
+const { usesLegacyKey } = require('../../services/secretBox');
 
 // One derived key per gym, so a template lifted from one gym's database
-// cannot be decrypted with another's. The gym a single-gym deployment
-// defaults to keeps the original derivation: its templates were written
-// with it, and re-keying biometric data in place is not something to do
-// silently in a migration.
+// cannot be decrypted with another's. The gym whose templates predate that
+// (LEGACY_KEY_TENANT_SLUG, falling back to DEFAULT_TENANT_SLUG) keeps the
+// original derivation: its templates were written with it, and re-keying
+// biometric data in place is not something to do silently in a migration.
+// The rule is shared with the settings store so the two cannot drift apart.
 const keys = new Map(); // scope -> Buffer
 
 // Prefers a purpose-made secret, and falls back to JWT_SECRET so a fresh
@@ -42,7 +44,7 @@ function encryptionKey() {
   }
 
   const gym = currentTenant();
-  const legacy = !gym || (process.env.DEFAULT_TENANT_SLUG && gym.slug === process.env.DEFAULT_TENANT_SLUG);
+  const legacy = usesLegacyKey(gym);
   const scope = legacy ? '__legacy__' : String(gym._id);
 
   let key = keys.get(scope);

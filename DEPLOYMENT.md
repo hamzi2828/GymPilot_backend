@@ -8,14 +8,17 @@ it is code.
 
 | Variable | Value | Why |
 |---|---|---|
-| `DEFAULT_TENANT_SLUG` | `thejymor` **for now** | The pre-platform gym keeps using the env `STRIPE_*` keys and `FRONTEND_ORIGIN` only while it is the default gym. Unset it once The Jymor has its own Stripe keys in Settings → Stripe and you run more than one gym. |
+| `DEFAULT_TENANT_SLUG` | `thejymor` **for now** | The pre-platform gym keeps using the env `STRIPE_*` keys and `FRONTEND_ORIGIN` only while it is the default gym. Unset it once The Jymor has its own Stripe keys in Settings → Stripe and you run more than one gym — **but only after** `LEGACY_KEY_TENANT_SLUG` below is set. |
+| `LEGACY_KEY_TENANT_SLUG` | `thejymor`, **permanently** | Names the gym whose stored secrets (Stripe, SMTP, SMS/WhatsApp tokens, push VAPID key under Settings) and fingerprint templates were encrypted before keys carried a gym id. While unset it falls back to `DEFAULT_TENANT_SLUG`, so today nothing changes — but unsetting `DEFAULT_TENANT_SLUG` without it re-keys The Jymor: every one of those secrets silently reads back empty (card payments and email stop) and no desk can match a single finger. Set it before touching `DEFAULT_TENANT_SLUG`, and never change or remove it. |
+| `SETTINGS_ENCRYPTION_KEY` | the **current** `JWT_SECRET` value, copied | Seals each gym's Settings secrets at rest. While unset it falls back to `JWT_SECRET`, so rotating `JWT_SECRET` would turn every stored Stripe key, SMTP password and messaging token into an empty value. Copying today's `JWT_SECRET` here keeps them readable and frees `JWT_SECRET` to be rotated later. Never change it once set. |
 | `PLATFORM_DB_NAME` | leave unset (= `GymPilot`, the `MONGO_URI` database) | Gyms, plans and super admins live in the main database beside the first gym's data. |
 | `TENANT_DB_PREFIX` | leave unset (= `GymPilot_`) | New gyms get `GymPilot_<slug>` on the same cluster. |
 | `PLATFORM_JWT_SECRET` | a fresh random 64-char string | Signs super-admin sessions separately from gym sessions. |
 | `QR_TOKEN_SECRET` | a fresh random 64-char string | Signs members' check-in QR codes. |
 | `PLATFORM_ADMIN_ORIGIN` | e.g. `https://gympilot.app` | Where the marketing site + platform panel (`GymPilot_frontendAdmin`) is served; used for CORS, password-reset links and demo-request emails. |
 | `SUBSCRIPTION_GRACE_DAYS` | `7` | Days a gym is served after its platform subscription lapses. |
-| `FINGERPRINT_ENCRYPTION_KEY` | **leave as it is** | Existing templates were encrypted with the current secret (JWT_SECRET fallback). Changing it makes them unreadable. |
+| `FINGERPRINT_ENCRYPTION_KEY` | if already set: **leave as it is**; if unset: the **current** `JWT_SECRET` value, copied | Encrypts fingerprint templates at rest, falling back to `JWT_SECRET` while unset. Existing templates were encrypted with whichever secret was in effect when they were enrolled; changing it makes them all unreadable (`/api/desktop/templates` then counts them as `unreadable`, and every enrolled person must be enrolled again). Copying today's `JWT_SECRET` in keeps them readable and decouples them from it. |
+| `JWT_SECRET` | **do not rotate** until the two keys above are set | Rotating it signs everyone out — and, while `SETTINGS_ENCRYPTION_KEY` or `FINGERPRINT_ENCRYPTION_KEY` is unset, also makes the data that key protects unreadable. |
 | `SMTP_*` | working credentials | The current ones are rejected (`535`). Nothing emails until this is fixed — including 2FA codes and password resets. |
 | `CRON_SECRET` | already set | The daily job now also rolls platform subscriptions and resumes freezes. |
 
@@ -32,6 +35,10 @@ Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).t
   "Manage card" in the member portal fails.
 * For The Jymor, while `DEFAULT_TENANT_SLUG=thejymor`, the env keys apply and
   the existing `/api/gymfolio/payment/webhook` endpoint keeps working.
+* Before unsetting `DEFAULT_TENANT_SLUG`: set `LEGACY_KEY_TENANT_SLUG=thejymor`
+  and redeploy, then check The Jymor's Settings → Stripe / Email still show
+  their keys and a front desk still matches fingers. Only then unset
+  `DEFAULT_TENANT_SLUG`.
 
 ## 3. Frontend (Vercel)
 
