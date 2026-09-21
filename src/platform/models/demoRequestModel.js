@@ -55,6 +55,11 @@ const demoRequestSchema = new mongoose.Schema(
     status: { type: String, enum: DEMO_REQUEST_STATUSES, default: 'new', index: true },
     notes: { type: String, default: '', trim: true, maxlength: 4000 },
     handledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'SuperAdmin', default: null },
+    // The gym it became, set when the panel creates a gym from it (see
+    // gymsController.create), so the request links to the gym and a second
+    // "Set this gym up" can be warned about.
+    gymId: { type: mongoose.Schema.Types.ObjectId, ref: 'Gym', default: null },
+    convertedAt: { type: Date, default: null },
 
     ip: { type: String, default: '' },
     userAgent: { type: String, default: '', maxlength: 500 }

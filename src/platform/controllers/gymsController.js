@@ -19,10 +19,11 @@ const {
   subscriptionFor
 } = require('../provisioning');
 const { collectGymStats } = require('../tenantStats');
-const { runWithTenant, siteUrlFor } = require('../tenantContext');
+const { runWithTenant, siteUrlFor, inviteSiteUrlFor } = require('../tenantContext');
 const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { invalidatePlanCache } = require('../planLimits');
 const { sendOwnerInvite } = require('../ownerInvite');
+const { syncStripeSubscription, changesPrice, SubscriptionSyncError } = require('../services/subscriptionSync');
 
 const User = require('../../models/user');
 const { ADMIN_SLUG } = require('../../services/roleService');
@@ -84,6 +85,30 @@ function publicGym(doc) {
 async function loadGym(id) {
   if (!mongoose.Types.ObjectId.isValid(id)) return null;
   return Gym.findById(id).select('+database.uri');
+}
+
+/**
+ * Marks the demo request a gym was set up from as converted and links it to
+ * the gym, so the Demo requests page shows where it went. The gym already
+ * exists by now, so a problem here is a warning, never a failure.
+ *
+ * @returns {Promise<{request: {id, status, gymId}|null, warning: string|null}>}
+ */
+async function markRequestConverted(requestId, gym, superAdmin) {
+  if (!requestId) return { request: null, warning: null };
+  const lost = 'The request this gym was set up from no longer exists, so it was not marked converted';
+  if (!mongoose.Types.ObjectId.isValid(String(requestId))) return { request: null, warning: lost };
+  try {
+    const doc = await DemoRequest.findByIdAndUpdate(
+      requestId,
+      { $set: { status: 'converted', gymId: gym._id, convertedAt: new Date(), handledBy: superAdmin._id } },
+      { new: true }
+    );
+    if (!doc) return { request: null, warning: lost };
+    return { request: { id: String(doc._id), status: doc.status, gymId: String(gym._id) }, warning: null };
+  } catch (error) {
+    return { request: null, warning: `The request this gym was set up from could not be marked converted: ${error.message}` };
+  }
 }
 
 module.exports = {
@@ -204,24 +229,37 @@ module.exports = {
     }
   },
 
-  // POST /api/platform/gyms
+  // POST /api/platform/gyms   { ...provisionGym input, demoRequestId? }
   //
   // Answers 201 with the gym, `ownerInviteSent` (did the owner get their
-  // set-password email) and `warnings` for anything that did not go to plan
-  // but did not stop the gym being created.
+  // set-password email), `inviteSiteUrl` (the site that link opens on) and
+  // `warnings` for anything that did not go to plan but did not stop the gym
+  // being created. `demoRequestId` names the checkout or demo request it was
+  // set up from; that request is marked converted and linked to the gym.
   create: async (req, res) => {
     try {
-      const { gym, seeded, warnings, ownerInvite } = await provisionGym(req.body || {}, {
+      const body = req.body || {};
+      const { gym, seeded, warnings, ownerInvite, inviteSiteUrl } = await provisionGym(body, {
         createdBy: req.superAdmin._id,
-        enforceDatabasePolicy: true
+        enforceDatabasePolicy: true,
+        requireSite: true
       });
-      audit(req, 'gym_created', gym, { slug: gym.slug, domains: gym.domains.map((d) => d.host), ownerInviteSent: !!ownerInvite.sent });
+      const converted = await markRequestConverted(body.demoRequestId, gym, req.superAdmin);
+      if (converted.warning) warnings.push(converted.warning);
+      audit(req, 'gym_created', gym, {
+        slug: gym.slug,
+        domains: gym.domains.map((d) => d.host),
+        ownerInviteSent: !!ownerInvite.sent,
+        demoRequestId: converted.request ? converted.request.id : null
+      });
       return res.status(201).json({
         success: true,
         message: `${gym.name} is ready.`,
         data: publicGym(gym),
         owner: seeded.owner,
         ownerInviteSent: !!ownerInvite.sent,
+        inviteSiteUrl,
+        demoRequest: converted.request,
         warnings
       });
     } catch (error) {
@@ -370,6 +408,7 @@ module.exports = {
       if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
 
       const body = req.body || {};
+      const planBefore = gym.plan ? String(gym.plan) : '';
       let plan = null;
       if (body.planId !== undefined) {
         if (body.planId) {
@@ -426,14 +465,47 @@ module.exports = {
       }, addons);
       next.cancelledAt = next.status === 'cancelled' ? current.cancelledAt || new Date() : null;
 
+      // An add-on already on the bill keeps the price it was sold at while
+      // the cycle stays the same -- snapshots, not references (see gymModel)
+      // -- so saving a note never re-prices a gym, here or on Stripe. One
+      // that was free (included) and no longer is gets its list price.
+      if (next.billingCycle === (current.billingCycle || 'monthly')) {
+        const agreed = new Map((current.addons || []).map((a) => [a.slug, Number(a.amount) || 0]));
+        for (const addon of next.addons) {
+          if (addon.amount > 0 && agreed.get(addon.slug) > 0) addon.amount = agreed.get(addon.slug);
+        }
+        next.amount = next.addons.reduce((total, addon) => total + (Number(addon.amount) || 0), Number(next.planAmount) || 0);
+      }
+
       // subscriptionFor builds the subscription from scratch; what Stripe
       // knows about the gym is not its business and is carried over. The
       // notices start again when the period end moves, so a renewed gym gets
       // its next round of reminders.
       for (const key of STRIPE_FIELDS) next[key] = current[key] || '';
+      // When the last Stripe event landed is what keeps a late, older event
+      // from undoing a newer one (see platformWebhook) -- Stripe's to move.
+      next.stripeEventAt = current.stripeEventAt || null;
       const periodBefore = current.currentPeriodEnd ? new Date(current.currentPeriodEnd).getTime() : 0;
       const periodAfter = next.currentPeriodEnd ? new Date(next.currentPeriodEnd).getTime() : 0;
       next.notices = periodBefore === periodAfter && current.notices ? { ...current.notices } : {};
+
+      // A gym that pays by card is charged whatever Stripe says, so a change
+      // to its price goes to Stripe first -- prorated -- and is written here
+      // only once Stripe has taken it. Otherwise Stripe keeps charging the
+      // old price and its next webhook writes the old amount back.
+      let stripeSynced = false;
+      if (current.stripeSubscriptionId && changesPrice(current, next, planBefore, gym.plan ? String(gym.plan) : '')) {
+        try {
+          const synced = await syncStripeSubscription({ gym: gym.toObject(), plan, next });
+          stripeSynced = synced.synced;
+          if (synced.summary) next.stripePriceSummary = synced.summary;
+        } catch (error) {
+          if (error instanceof SubscriptionSyncError) {
+            return res.status(error.status).json({ success: false, code: error.code, message: error.message });
+          }
+          throw error;
+        }
+      }
 
       gym.subscription = next;
       await gym.save();
@@ -442,10 +514,11 @@ module.exports = {
       audit(req, 'gym_subscription_updated', gym, {
         plan: plan ? plan.slug : null,
         status: next.status,
-        currentPeriodEnd: next.currentPeriodEnd
+        currentPeriodEnd: next.currentPeriodEnd,
+        stripeSynced
       });
 
-      return res.json({ success: true, data: publicGym(gym) });
+      return res.json({ success: true, data: publicGym(gym), stripeSynced });
     } catch (error) {
       return fail(res, error);
     }
@@ -531,7 +604,7 @@ module.exports = {
 
         let invite;
         try {
-          invite = await sendOwnerInvite({ gym: target, email: user.email, siteUrl: siteUrlFor(target), resend: true });
+          invite = await sendOwnerInvite({ gym: target, email: user.email, siteUrl: inviteSiteUrlFor(target), resend: true });
         } catch (error) {
           invite = { sent: false, error: error.message };
         }
