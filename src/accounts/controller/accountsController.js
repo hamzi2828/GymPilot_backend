@@ -101,11 +101,6 @@ async function payrollFor(range) {
     minutesById.set(owner, (minutesById.get(owner) || 0) + row.minutes);
   }
 
-  // Salaries are quoted per cycle, so a range that is not exactly one cycle has
-  // to be pro-rated or the figure is meaningless.
-  const days = Math.max(1, Math.round((range.end - range.start) / L.DAY_MS));
-  const cycleDays = { weekly: 7, biweekly: 14, monthly: 30.44 };
-
   const totals = {};
   let salaried = 0;
   let hourly = 0;
@@ -124,8 +119,10 @@ async function payrollFor(range) {
       cost = ((minutes / 60) * (Number(payroll.hourlyRate) || 0));
       hourly += cost;
     } else {
-      const perDay = (Number(payroll.salary) || 0) / (cycleDays[payroll.cycle] || 30.44);
-      cost = perDay * days;
+      // Salaries are quoted per cycle, so a range that is not exactly one
+      // cycle is pro-rated by its actual days (ledger.salaryForDays) -- the
+      // same arithmetic a payslip uses.
+      cost = L.salaryForDays(payroll.salary, payroll.cycle, range.from, range.to);
       salaried += cost;
     }
 

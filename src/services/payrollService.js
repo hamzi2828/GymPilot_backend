@@ -22,38 +22,56 @@ const Settings = require('../models/settings');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 
-const CYCLE_DAYS = { weekly: 7, biweekly: 14, monthly: 30.44 };
-
 function round(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-/** Inclusive days between two date keys, clipped to a period. */
-function daysInside(from, to, periodFrom, periodTo) {
+/** The overlap of two inclusive date-key ranges, or null when they do not meet. */
+function overlapOf(from, to, periodFrom, periodTo) {
   const start = from > periodFrom ? from : periodFrom;
   const end = to < periodTo ? to : periodTo;
-  if (start > end) return 0;
+  return start > end ? null : { start, end };
+}
+
+/** Inclusive days between two date keys, clipped to a period. */
+function daysInside(from, to, periodFrom, periodTo) {
+  const overlap = overlapOf(from, to, periodFrom, periodTo);
+  if (!overlap) return 0;
   let n = 0;
-  let cursor = start;
-  while (cursor <= end) {
+  let cursor = overlap.start;
+  while (cursor <= overlap.end) {
     n += 1;
     cursor = T.shiftDateKey(cursor, 1);
   }
   return n;
 }
 
+function samePeriod(payslip, range) {
+  return !!payslip && payslip.period.from === range.from && payslip.period.to === range.to;
+}
+
 /**
- * Drafts one person's payslip for a range. Returns the unsaved document
- * (or the existing one when it is past draft).
+ * Drafts one person's payslip for a range. Returns the unsaved document, or
+ * the existing one when it is past draft -- or when a live payslip for a
+ * different but overlapping period already pays for some of these days,
+ * which is returned untouched rather than paying those days twice.
  */
 async function draftFor(person, range, { createdBy = null } = {}) {
   const existing = await Payslip.findOne({ staffId: person._id, 'period.from': range.from, 'period.to': range.to, status: { $ne: 'void' } });
   if (existing && existing.status !== 'draft') return existing;
+  if (!existing) {
+    const overlapping = await Payslip.findOne({
+      staffId: person._id,
+      status: { $ne: 'void' },
+      'period.from': { $lte: range.to },
+      'period.to': { $gte: range.from }
+    });
+    if (overlapping) return overlapping;
+  }
 
   const payroll = (person.employment && person.employment.payroll) || {};
   const basis = payroll.basis || 'salaried';
   const currency = String(payroll.currency || 'PKR').toUpperCase();
-  const days = Math.max(1, Math.round((range.end - range.start) / L.DAY_MS));
 
   // Hours: punches filed against the staff account and against a trainer
   // profile linked to it.
@@ -71,17 +89,26 @@ async function draftFor(person, range, { createdBy = null } = {}) {
     rate = Number(payroll.hourlyRate) || 0;
     base = round(hours * rate);
   } else {
+    // A whole calendar month is exactly the monthly salary; anything else is
+    // pro-rated by the actual days (see ledger.salaryForDays).
     rate = Number(payroll.salary) || 0;
-    base = round((rate / (CYCLE_DAYS[payroll.cycle] || 30.44)) * days);
+    base = round(L.salaryForDays(rate, payroll.cycle, range.from, range.to));
   }
 
   // Unpaid leave comes off a salary; hourly people simply have no hours.
+  // Each day off is worth what that day of salary is worth.
   let unpaidLeaveDays = 0;
   let unpaidLeaveDeduction = 0;
   if (basis === 'salaried') {
     const leaves = await LeaveRequest.find({ staffId: person._id, status: 'approved', unpaid: true, from: { $lte: range.to }, to: { $gte: range.from } }).lean();
-    for (const leave of leaves) unpaidLeaveDays += daysInside(leave.from, leave.to, range.from, range.to);
-    unpaidLeaveDeduction = round((rate / (CYCLE_DAYS[payroll.cycle] || 30.44)) * unpaidLeaveDays);
+    let deduction = 0;
+    for (const leave of leaves) {
+      const overlap = overlapOf(leave.from, leave.to, range.from, range.to);
+      if (!overlap) continue;
+      unpaidLeaveDays += daysInside(leave.from, leave.to, range.from, range.to);
+      deduction += L.salaryForDays(rate, payroll.cycle, overlap.start, overlap.end);
+    }
+    unpaidLeaveDeduction = round(deduction);
   }
 
   // PT commission from the sessions marked completed in the period.
@@ -131,7 +158,9 @@ async function generate(range, { createdBy = null } = {}) {
   const kept = [];
   for (const person of staff) {
     const doc = await draftFor(person, range, { createdBy });
-    if (doc.status !== 'draft') {
+    // Already issued or paid, or covered by a payslip for another period:
+    // left exactly as it is.
+    if (doc.status !== 'draft' || !samePeriod(doc, range)) {
       kept.push(doc);
       continue;
     }
@@ -140,7 +169,16 @@ async function generate(range, { createdBy = null } = {}) {
       const seq = await Counter.next(`payslip-${year}`);
       doc.number = `PAY-${year}-${String(seq).padStart(4, '0')}`;
     }
-    await doc.save();
+    try {
+      await doc.save();
+    } catch (error) {
+      // "Generate" pressed twice: the other run drafted this person's
+      // payslip first, and the unique index refused a second one.
+      if (!(isNew && error && error.code === 11000)) throw error;
+      const current = await Payslip.findOne({ staffId: person._id, 'period.from': range.from, 'period.to': range.to, status: { $ne: 'void' } });
+      if (current) kept.push(current);
+      continue;
+    }
     (isNew ? created : refreshed).push(doc);
   }
   return { created, refreshed, kept };

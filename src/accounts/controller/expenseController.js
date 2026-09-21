@@ -295,11 +295,18 @@ module.exports = {
         });
         if (already) continue;
 
+        // The salary is quoted per pay cycle: a weekly wage over a month is
+        // four-and-a-bit of them, not one, and a part-month is its share of
+        // that month's days -- the same figure the overview and the payslip
+        // work out.
+        const amount = L.round(L.salaryForDays(payroll.salary, payroll.cycle, range.from, range.to));
+        if (!amount) continue;
+
         const expense = await Expense.create({
           reference: await nextReference(range.end),
           title: `Salary — ${name} (${monthLabel})`,
           category: 'salaries',
-          amount: Number(payroll.salary) || 0,
+          amount,
           currency: String(payroll.currency || 'PKR').toUpperCase(),
           incurredOn: new Date(range.end.getTime() - 1),
           status: 'pending',

@@ -51,7 +51,10 @@ const payslipSchema = new mongoose.Schema(
     notes: { type: String, default: '', trim: true },
     // The salary expense filed when it was paid.
     expenseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Expense', default: null },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    // True for every payslip that is not void; kept in step with status on
+    // save. It exists for the unique index below.
+    live: { type: Boolean, default: true }
   },
   {
     timestamps: true,
@@ -59,8 +62,25 @@ const payslipSchema = new mongoose.Schema(
   }
 );
 
-// One payslip per person per period.
-payslipSchema.index({ staffId: 1, 'period.from': 1, 'period.to': 1 }, { unique: true, partialFilterExpression: { status: { $ne: 'void' } } });
+payslipSchema.pre('save', function () {
+  this.live = this.status !== 'void';
+});
+
+// Status changes made as conditional updates skip save(), so they keep the
+// flag in step here.
+payslipSchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], function () {
+  const update = this.getUpdate() || {};
+  const status = update.$set && update.$set.status !== undefined ? update.$set.status : update.status;
+  if (status !== undefined) this.set('live', status !== 'void');
+});
+
+// One live payslip per person per period.
+//
+// Partial on `live: true` rather than on `status: { $ne: 'void' }`: MongoDB
+// does not accept $ne in a partial index, so that index was never built and
+// pressing "Generate" twice could draft the same payslip twice. Equality on a
+// boolean is supported by every version.
+payslipSchema.index({ staffId: 1, 'period.from': 1, 'period.to': 1 }, { unique: true, partialFilterExpression: { live: true } });
 
 /** Gross and net from the parts. */
 payslipSchema.methods.recalculate = function () {
