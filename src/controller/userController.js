@@ -141,6 +141,114 @@ function passwordProblem(password) {
   return null;
 }
 
+// Stores a fresh reset token on the account and emails the link. Run after
+// the response has gone (see forgotPassword), so it reports trouble in the
+// log, never to the caller.
+async function sendResetLink(user, email) {
+  // Raw token goes in the email; only its hash is stored.
+  const token = crypto.randomBytes(32).toString('hex');
+  user.passwordResetTokenHash = hashResetToken(token);
+  user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
+  await user.save();
+
+  const siteName = await gymSiteName();
+  const frontend = tenantOrigin();
+  const resetUrl =
+    `${frontend}/authentication?mode=reset&token=${encodeURIComponent(token)}` +
+    `&email=${encodeURIComponent(email)}`;
+
+  const result = await sendEmail(
+    email,
+    `Reset your ${siteName} password`,
+    passwordResetEmailHtml({
+      firstName: user.firstName || 'there',
+      siteName,
+      resetUrl,
+      validMinutes: RESET_TOKEN_TTL_MINUTES
+    })
+  );
+
+  if (!result.success) {
+    // The token is live but unreachable. Clearing it stops a link
+    // nobody received from sitting valid for an hour, and the
+    // logged error is how an admin finds out SMTP is misconfigured.
+    console.error('[auth] reset email failed for', email, '-', result.error);
+    user.passwordResetTokenHash = null;
+    user.passwordResetExpiresAt = null;
+    await user.save();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public sign-up and Google sign-in
+// ---------------------------------------------------------------------------
+
+// What a visitor sees when the gym's plan has no room for another member.
+// The plan and its limits are between the gym and GymPilot, not something to
+// tell somebody trying to join; staff adding an account from the admin panel
+// still get the plan wording and the PLAN_LIMIT_REACHED code their screens
+// act on.
+const SIGNUPS_CLOSED = {
+  message: "This gym isn't taking new online sign-ups right now — please contact the gym.",
+  code: 'SIGNUPS_CLOSED'
+};
+
+// Google has verified the address it hands over; nothing ever checked that
+// whoever registered that address here with a password owns it. So the
+// first time Google sign-in links into a password account that was not made
+// through Google, the password is thrown away and every session it opened is
+// ended: somebody who pre-registered the address loses their way in, and the
+// real owner can set a password of their own with "forgot password".
+async function linkGoogleAccount(user, { googleId, picture }) {
+  const updates = {};
+  if (!user.googleId && googleId) updates.googleId = googleId;
+  if (user.provider !== 'google') updates.provider = 'google';
+  if (picture && user.avatarUrl !== picture) updates.avatarUrl = picture;
+  const takeover = user.provider !== 'google' && !!user.password;
+  if (takeover) updates.password = null;
+  if (!Object.keys(updates).length) return user;
+
+  await User.updateOne(
+    { _id: user._id },
+    takeover ? { $set: updates, $inc: { tokenVersion: 1 } } : { $set: updates }
+  );
+  if (takeover) {
+    forgetSession(user._id);
+    console.log('[auth] Google sign-in linked', user.email, '- its password was cleared and its sessions ended');
+  }
+  return User.findById(user._id);
+}
+
+// The emailed-code step password sign-in already has (twoFactorService;
+// securityController.verifyTwoFactor finishes it). A Google sign-in must not
+// be the way round it. Null when the account signs straight in.
+async function twoFactorStep(user) {
+  const twoFactor = require('../services/twoFactorService');
+  if (!(await twoFactor.required(user))) return null;
+  const challenge = await twoFactor.startChallenge(user);
+  if (!challenge.emailed) {
+    return {
+      status: 503,
+      body: { message: 'We could not email your sign-in code. Please contact the gym.', error: challenge.error }
+    };
+  }
+  return {
+    status: 200,
+    body: {
+      requires2fa: true,
+      challengeId: challenge.challengeId,
+      message: `We emailed a 6-digit code to ${twoFactor.maskEmail(user.email)}.`
+    }
+  };
+}
+
+// Only Google's own error codes ("access_denied") are echoed back; anything
+// else in the query string is somebody else's text on our page.
+function googleErrorCode(error) {
+  const code = String(error || '');
+  return /^[a-z_]{1,64}$/i.test(code) ? code : 'unknown_error';
+}
+
 const userController = {
 
 
@@ -277,8 +385,10 @@ const userController = {
             }
 
             // The gym's platform plan may cap how many members it can hold.
+            // This is the public sign-up form, so the visitor is told the
+            // gym is not taking sign-ups, not about the gym's plan.
             const limit = await checkLimit('members');
-            if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+            if (!limit.ok) return res.status(403).json({ ...SIGNUPS_CLOSED });
 
             // Hash password
             const salt = await bcrypt.genSalt(10);
@@ -334,7 +444,7 @@ const userController = {
         try {
             const { code, state, error } = req.query;
             if (error) {
-                return res.status(400).send(`Google OAuth error: ${error}`);
+                return res.status(400).type('text/plain').send(`Google OAuth error: ${googleErrorCode(error)}`);
             }
             if (!code) {
                 return res.status(400).send('Missing authorization code');
@@ -392,9 +502,10 @@ const userController = {
             if (!user) {
                 // A first Google sign-in creates a member, and the gym's plan
                 // may cap how many members it can hold -- the same check the
-                // sign-up form and the admin form make.
+                // sign-up form and the admin form make, with the sign-up
+                // form's wording.
                 const limit = await checkLimit('members');
-                if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+                if (!limit.ok) return res.status(403).type('text/plain').send(SIGNUPS_CLOSED.message);
 
                 user = await User.create({
                     firstName: givenName || 'Google',
@@ -406,14 +517,30 @@ const userController = {
                     avatarUrl: picture || null,
                 });
             } else {
-                const updates = {};
-                if (!user.googleId && googleId) updates.googleId = googleId;
-                if (user.provider !== 'google') updates.provider = 'google';
-                if (picture && user.avatarUrl !== picture) updates.avatarUrl = picture;
-                if (Object.keys(updates).length > 0) {
-                    await User.updateOne({ _id: user._id }, { $set: updates });
-                    user = await User.findById(user._id);
-                }
+                user = await linkGoogleAccount(user, { googleId, picture });
+            }
+
+            if (user.isActive === false) {
+                return res.status(403).type('text/plain').send('This account has been deactivated.');
+            }
+
+            // The token lands on the sign-in page, which stores it and then
+            // sends the person on to `redirect` -- the same param the
+            // password form honours -- rather than being sprayed onto
+            // whichever page they started from. Only a same-site path is
+            // carried; anything else falls back to the homepage.
+            const safeReturn = typeof returnUrl === 'string' && returnUrl.startsWith('/') && !returnUrl.startsWith('//') && returnUrl !== '/'
+                ? returnUrl
+                : '';
+
+            // Staff with two-factor on finish on the sign-in page with the
+            // emailed code, exactly as after a password.
+            const step = await twoFactorStep(user);
+            if (step) {
+                if (step.status !== 200) return res.status(step.status).type('text/plain').send(step.body.message);
+                const params = new URLSearchParams({ requires2fa: '1', challengeId: step.body.challengeId });
+                if (safeReturn) params.set('redirect', safeReturn);
+                return res.redirect(`${frontendOrigin}/authentication?${params.toString()}`);
             }
 
             const secret = process.env.JWT_SECRET;
@@ -433,15 +560,7 @@ const userController = {
             user.lastLogin = new Date();
             await user.save();
 
-            // The token lands on the sign-in page, which stores it and then
-            // sends the person on to `redirect` -- the same param the
-            // password form honours -- rather than being sprayed onto
-            // whichever page they started from. Only a same-site path is
-            // carried; anything else falls back to the homepage.
             const params = new URLSearchParams({ googleToken: token });
-            const safeReturn = typeof returnUrl === 'string' && returnUrl.startsWith('/') && !returnUrl.startsWith('//') && returnUrl !== '/'
-                ? returnUrl
-                : '';
             if (safeReturn) params.set('redirect', safeReturn);
             return res.redirect(`${frontendOrigin}/authentication?${params.toString()}`);
         } catch (error) {
@@ -559,44 +678,20 @@ const userController = {
             const normalisedEmail = String(email).toLowerCase().trim();
             const user = await User.findOne({ email: normalisedEmail });
 
-            // No account, a deactivated one, or a Google account with no
-            // password to reset: all stop here, all look identical from
-            // outside.
-            if (!user || user.isActive === false || !user.password) {
-                return res.status(200).json(genericResponse);
-            }
-
-            // Raw token goes in the email; only its hash is stored.
-            const token = crypto.randomBytes(32).toString('hex');
-            user.passwordResetTokenHash = hashResetToken(token);
-            user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
-            await user.save();
-
-            const siteName = await gymSiteName();
-            const frontend = tenantOrigin();
-            const resetUrl =
-                `${frontend}/authentication?mode=reset&token=${encodeURIComponent(token)}` +
-                `&email=${encodeURIComponent(normalisedEmail)}`;
-
-            const result = await sendEmail(
-                normalisedEmail,
-                `Reset your ${siteName} password`,
-                passwordResetEmailHtml({
-                    firstName: user.firstName || 'there',
-                    siteName,
-                    resetUrl,
-                    validMinutes: RESET_TOKEN_TTL_MINUTES
-                })
-            );
-
-            if (!result.success) {
-                // The token is live but unreachable. Clearing it stops a link
-                // nobody received from sitting valid for an hour, and the
-                // logged error is how an admin finds out SMTP is misconfigured.
-                console.error('[auth] reset email failed for', normalisedEmail, '-', result.error);
-                user.passwordResetTokenHash = null;
-                user.passwordResetExpiresAt = null;
-                await user.save();
+            // No account or a deactivated one stops here, and looks
+            // identical from outside. An account with no password -- a
+            // member who joined with Google -- goes on: this is how they set
+            // one, and the phone app signs in with a password only.
+            //
+            // The link is sent without being waited for (the way the gym's
+            // other emails go out), so the answer comes back just as fast
+            // whether or not the address has an account. Waiting on the mail
+            // server only when it does would tell anyone with a stopwatch
+            // who is a member.
+            if (user && user.isActive !== false) {
+                sendResetLink(user, normalisedEmail).catch((error) => {
+                    console.error('forgotPassword error:', error);
+                });
             }
 
             return res.status(200).json(genericResponse);
@@ -753,9 +848,9 @@ const userController = {
             let user = await User.findOne({ email: normalizedEmail });
             if (!user) {
                 // A first Google sign-in creates a member; the gym's plan may
-                // cap how many it can hold.
+                // cap how many it can hold (worded as the sign-up form words it).
                 const limit = await checkLimit('members');
-                if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+                if (!limit.ok) return res.status(403).json({ ...SIGNUPS_CLOSED });
 
                 user = await User.create({
                     firstName: givenName || 'Google',
@@ -767,16 +862,17 @@ const userController = {
                     avatarUrl: picture || null,
                 });
             } else {
-                // Update linkage if necessary
-                const updates = {};
-                if (!user.googleId && googleId) updates.googleId = googleId;
-                if (user.provider !== 'google') updates.provider = 'google';
-                if (picture && user.avatarUrl !== picture) updates.avatarUrl = picture;
-                if (Object.keys(updates).length > 0) {
-                    await User.updateOne({ _id: user._id }, { $set: updates });
-                    user = await User.findById(user._id);
-                }
+                user = await linkGoogleAccount(user, { googleId, picture });
             }
+
+            if (user.isActive === false) {
+                return res.status(403).json({ message: 'This account has been deactivated.' });
+            }
+
+            // The same { requires2fa, challengeId } answer POST /user/login
+            // gives; the code goes to POST /user/login/2fa.
+            const step = await twoFactorStep(user);
+            if (step) return res.status(step.status).json(step.body);
 
             // Issue JWT
             const payloadJwt = {
