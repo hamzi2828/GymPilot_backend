@@ -115,8 +115,26 @@ const gymfolioPaymentController = {
     try {
       const { sessionId } = req.params;
       if (!sessionId) return res.status(400).json({ success: false, message: 'Session ID is required' });
-      const result = await gymfolioPaymentService.verifyPackagePayment(sessionId);
-      return res.status(200).json(result);
+      const { success, paid, order } = await gymfolioPaymentService.verifyPackagePayment(sessionId);
+      // Only what the checkout success page shows. Anyone holding the
+      // session id can call this -- it sits in the success page's URL, and
+      // so in browser history and analytics -- so the Stripe session (the
+      // payer's name, email and address) and the order's customer details
+      // stay on the server.
+      return res.status(200).json({
+        success,
+        paid,
+        order: order
+          ? {
+              orderNumber: order.orderNumber,
+              packageId: order.packageId,
+              packageName: (order.packageDetails && order.packageDetails.name) || '',
+              amount: order.payment ? order.payment.amount : undefined,
+              currency: order.payment ? order.payment.currency : undefined,
+              status: order.status
+            }
+          : null
+      });
     } catch (error) {
       return fail(res, error, 'Failed to verify payment');
     }
