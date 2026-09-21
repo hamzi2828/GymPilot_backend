@@ -12,8 +12,9 @@ const User = require('../../models/user');
 const Settings = require('../../models/settings');
 const { sweepIfDue } = require('../services/membershipExpiry');
 const notify = require('../../services/gymNotifications');
+const { afterResponse } = require('../../services/afterResponse');
 const membership = require('../services/membershipService');
-const { getStripe, stripeConfig, cardPaymentsAvailable, StripeNotConfiguredError } = require('../../services/stripeClient');
+const { getStripe, stripeConfig, cardPaymentsStatus, StripeNotConfiguredError } = require('../../services/stripeClient');
 const { activeBanks } = require('./membershipController');
 
 function userIdOf(req) {
@@ -62,7 +63,7 @@ const gymfolioPaymentController = {
         by: req.user && req.user.email
       });
 
-      if (order.payment.status === 'paid') notify.membershipConfirmed(order, user).catch(() => {});
+      if (order.payment.status === 'paid') afterResponse(notify.membershipConfirmed(order, user), 'membershipConfirmed');
 
       return res.status(201).json({ success: true, message: `${pkg.name} assigned to ${user.email}`, data: order });
     } catch (error) {
@@ -70,18 +71,23 @@ const gymfolioPaymentController = {
     }
   },
 
-  /** GET /api/gymfolio/payment/methods -- how this gym can be paid right now. */
+  /**
+   * GET /api/gymfolio/payment/methods -- how this gym can be paid right now.
+   * When card is off, `cardUnavailable` says why ({ code, reason }), so the
+   * website can tell the member rather than just leave the option out.
+   */
   async paymentMethods(req, res) {
     try {
-      const [card, banks, settings] = await Promise.all([
-        cardPaymentsAvailable().catch(() => false),
+      const [cardStatus, banks, settings] = await Promise.all([
+        cardPaymentsStatus().catch(() => ({ available: false, code: null, reason: '' })),
         activeBanks().catch(() => []),
         Settings.getSettings().catch(() => null)
       ]);
       return res.json({
         success: true,
         data: {
-          card,
+          card: cardStatus.available,
+          cardUnavailable: cardStatus.available ? null : { code: cardStatus.code, reason: cardStatus.reason },
           bankTransfer: banks.length > 0,
           banks,
           currency: (settings && settings.currency) || 'USD'
@@ -283,7 +289,7 @@ const gymfolioPaymentController = {
       if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
       const order = await gymfolioPaymentService.cancelSubscription(orderId || id, userId, (req.body && req.body.reason) || '');
-      notify.membershipCancelled(order, await User.findById(userId).select('firstName lastName email').lean()).catch(() => {});
+      afterResponse(notify.membershipCancelled(order, await User.findById(userId).select('firstName lastName email').lean()), 'membershipCancelled');
       return res.status(200).json({
         success: true,
         message: order.status === 'cancelled' ? 'Subscription cancelled successfully' : 'Your membership will not renew.',

@@ -22,9 +22,10 @@ const Settings = require('../models/settings');
 const User = require('../models/user');
 const { parseAmount, resolveCurrency, toMinorUnits } = require('../helper/money');
 const { frontendOrigin, currentTenantSlug } = require('../platform/tenantContext');
-const { getStripe } = require('./stripeClient');
+const { getStripe, assertCardPaymentsAvailable } = require('./stripeClient');
 const membership = require('../gymfolio/services/membershipService');
 const notify = require('./gymNotifications');
+const { afterResponse } = require('./afterResponse');
 const { idOf, subscriptionIdOf, periodOf, invoicePeriodOf } = require('../gymfolio/services/stripeShapes');
 const claim = require('../gymfolio/services/activationClaim');
 
@@ -67,6 +68,67 @@ function orderNumberOf(object) {
   return meta.orderNumber || subMeta.orderNumber || null;
 }
 
+// A Checkout session that ended unpaid -- the member walked away and Stripe
+// expired it (24 hours by default). Its order is closed, the same end state
+// as a checkout that failed to open, so it neither sits "awaiting payment"
+// in the member's account forever nor counts anywhere as a sale.
+// Conditional on the payment still being pending, so it can never undo an
+// activation that got there first; and a late payment can still activate it
+// (activationClaim lets Stripe overrule a closed order).
+const CHECKOUT_EXPIRED = 'The checkout expired before payment was completed';
+
+async function closeUnpaidCheckout(order) {
+  return PackageOrder.findOneAndUpdate(
+    { _id: order._id, 'payment.status': 'pending' },
+    { $set: { 'payment.status': 'failed', status: 'cancelled', 'payment.lastPaymentError': CHECKOUT_EXPIRED } },
+    { new: true }
+  );
+}
+
+// Stripe answers this when asked to cancel a subscription that is already
+// gone, which is the outcome wanted anyway.
+function alreadyCancelled(error) {
+  return !!error && (error.code === 'resource_missing' || /No such subscription|already been canceled|canceled subscription/i.test(error.message || ''));
+}
+
+// A payment Stripe reports on an order whose sale was undone -- refunded, or
+// called off -- is news of money since returned and changes nothing (see
+// activationClaim). It is said in the log, so "Stripe shows a payment but the
+// membership is cancelled" has an answer there.
+function noteIgnoredPayment(order, what) {
+  const status = order && order.payment && order.payment.status;
+  if (!claim.UNDONE_STATUSES.includes(status)) return;
+  console.warn(`[payments] ${what} ignored: order ${order._id} (${order.orderNumber}) is ${status}`);
+}
+
+// An invoice that took no money. Moving a subscription's billing date -- a
+// freeze here pushes the next charge back with trial_end
+// (membershipService.pushStripeCharge), or staff move it in the Stripe
+// dashboard -- makes Stripe issue, and settle, a 0 invoice (billing_reason
+// 'subscription_update'); a renewal that a coupon or the customer's credit
+// covered in full charges nothing too. None of it is a payment: no renewal
+// entry, no revenue, no "membership renewed" to the member.
+function chargedNothing(invoice) {
+  return Number(invoice && invoice.amount_paid) === 0;
+}
+
+// Its period still ends when Stripe next charges, so the end date follows
+// it -- but only ever later. Stripe does not promise the order of events, and
+// a 0 invoice delivered late must not take back time a real renewal has
+// paid for since; an end date left later than Stripe's next charge is put
+// right by that charge's own invoice.paid.
+async function followZeroInvoice(order, periodEnd) {
+  if (!periodEnd) return;
+  await PackageOrder.updateOne(
+    {
+      _id: order._id,
+      'payment.status': 'paid',
+      $or: [{ 'subscription.endDate': null }, { 'subscription.endDate': { $lt: periodEnd } }]
+    },
+    { $set: { 'subscription.endDate': periodEnd, 'subscription.renewalDate': periodEnd } }
+  );
+}
+
 async function orderForSubscription(subId, object) {
   const clauses = [];
   if (subId) clauses.push({ 'payment.stripeSubscriptionId': subId });
@@ -81,14 +143,27 @@ class GymfolioPaymentService {
    * Records a pending order, then opens a Stripe Checkout session for it.
    */
   async createPackageCheckoutSession(userId, packageId, customerInfo, options = {}) {
+    // A sale needs the webhook as well as the keys (see stripeClient).
+    await assertCardPaymentsAvailable();
     const stripe = await getStripe();
 
     const packageData = await Package.findById(packageId);
-    if (!packageData) throw new Error(`Package not found: ${packageId}`);
-    if (!packageData.isActive) throw new Error(`Package is not active: ${packageData.name}`);
+    if (!packageData || !packageData.isActive) throw new membership.MembershipError('This package is not available', 404, 'PACKAGE_NOT_FOUND');
 
+    // A free package has nothing to charge -- Stripe refuses a zero-price
+    // line -- and a price that cannot be read is not one to guess at. Both
+    // are joined at the desk, and the member is told so rather than shown a
+    // server error.
     const listPrice = parseAmount(packageData.price);
-    if (listPrice === null || listPrice <= 0) throw new Error(`Invalid package price: ${packageData.price}`);
+    if (listPrice === null || listPrice <= 0) {
+      throw new membership.MembershipError(
+        listPrice === 0
+          ? `${packageData.name} is free, so there is nothing to pay online. Ask at the front desk to join.`
+          : `${packageData.name} cannot be bought online. Ask at the front desk to join.`,
+        400,
+        'PACKAGE_NOT_PURCHASABLE'
+      );
+    }
 
     const settings = await Settings.getSettings().catch(() => null);
     const currency = resolveCurrency(packageData.currency, settings && settings.currency).toLowerCase();
@@ -255,7 +330,7 @@ class GymfolioPaymentService {
     try {
       const activation = (await prepare(order)) || {};
       await membership.markPaidAndActivate(order, { paidAt: new Date(), ...activation });
-      notify.membershipConfirmed(order, await memberFor(order)).catch(() => {});
+      afterResponse(notify.membershipConfirmed(order, await memberFor(order)), 'membershipConfirmed');
       return { activated: true, order };
     } catch (error) {
       // Give the claim back so a retry (the webhook, or the member refreshing
@@ -302,10 +377,10 @@ class GymfolioPaymentService {
         return { transactionId: intentId };
       });
       order = result.order;
-    } else if (!paid && session.payment_status === 'unpaid' && session.status === 'expired' && order.payment.status === 'pending') {
-      order.payment.status = 'failed';
-      order.status = 'cancelled';
-      await order.save();
+    } else if (paid) {
+      noteIgnoredPayment(order, `checkout session ${sessionId}`);
+    } else if (session.payment_status === 'unpaid' && session.status === 'expired' && order.payment.status === 'pending') {
+      order = (await closeUnpaidCheckout(order)) || order;
     }
 
     return { success: paid, paid, order, session };
@@ -320,6 +395,21 @@ class GymfolioPaymentService {
     switch (event.type) {
       case 'checkout.session.completed': {
         if (object.metadata && object.metadata.type === SESSION_TYPE) await this.verifyPackagePayment(object.id);
+        break;
+      }
+
+      // The member never paid: closed the tab, or left it open past the
+      // session's expiry. Matched by the session id once it was stored, or
+      // by the order number the session was created with.
+      case 'checkout.session.expired': {
+        if (!object.metadata || object.metadata.type !== SESSION_TYPE) break;
+        const orderNumber = object.metadata.orderNumber || object.client_reference_id || null;
+        const order = await PackageOrder.findOne(
+          orderNumber
+            ? { $or: [{ 'payment.stripeSessionId': object.id }, { orderNumber, 'payment.method': 'stripe' }] }
+            : { 'payment.stripeSessionId': object.id }
+        );
+        if (order && order.payment.status === 'pending') await closeUnpaidCheckout(order);
         break;
       }
 
@@ -338,6 +428,8 @@ class GymfolioPaymentService {
             if (!o.payment.stripeCustomerId && idOf(object.customer)) o.payment.stripeCustomerId = idOf(object.customer);
             return { transactionId: object.id };
           });
+        } else if (order) {
+          noteIgnoredPayment(order, `payment_intent.succeeded ${object.id}`);
         }
         break;
       }
@@ -372,11 +464,13 @@ class GymfolioPaymentService {
             recordTrialCharge(o, object.amount_paid, object.currency);
             return { transactionId: object.id, startDate: periodStart || undefined, endDate: periodEnd || undefined };
           });
-        } else if (
-          order.payment.status === 'paid' &&
-          object.billing_reason !== 'subscription_create' &&
-          object.id !== order.payment.stripeInvoiceId
-        ) {
+        } else if (order.payment.status !== 'paid') {
+          noteIgnoredPayment(order, `invoice.paid ${object.id}`);
+        } else if (object.billing_reason === 'subscription_create' || object.id === order.payment.stripeInvoiceId) {
+          // The first invoice, or one already recorded: nothing new.
+        } else if (chargedNothing(object)) {
+          await followZeroInvoice(order, periodEnd);
+        } else {
           // Each renewal is a payment of its own, filed under the day it
           // arrived. payment.paidAt stays the FIRST payment -- overwriting it
           // moved the original sale out of the month it was taken in, and the
@@ -413,7 +507,7 @@ class GymfolioPaymentService {
             },
             { new: true }
           );
-          if (renewed) notify.membershipRenewed(renewed, await memberFor(renewed)).catch(() => {});
+          if (renewed) afterResponse(notify.membershipRenewed(renewed, await memberFor(renewed)), 'membershipRenewed');
         }
         break;
       }
@@ -429,7 +523,7 @@ class GymfolioPaymentService {
         order.payment.lastPaymentError =
           (object.last_finalization_error && object.last_finalization_error.message) || 'Your card could not be charged';
         await order.save();
-        notify.paymentFailed(order, await memberFor(order)).catch(() => {});
+        afterResponse(notify.paymentFailed(order, await memberFor(order)), 'paymentFailed');
         break;
       }
 
@@ -515,6 +609,83 @@ class GymfolioPaymentService {
     const order = await this.getOrderById(orderId, userId);
     if (!order) throw new Error('Order not found');
     return membership.cancel(order, { reason, source: 'member', immediate: false, by: userId });
+  }
+
+  /**
+   * Stops, now, every card subscription a member has at this gym -- for an
+   * account about to be deleted. Deleting the account does not reach
+   * Stripe, which would otherwise go on charging somebody who no longer
+   * exists here, with every renewal landing on an order nobody can see.
+   *
+   * Call it BEFORE deleting the account, and do not delete when it throws.
+   * Orders that were still live are closed (cancelled, access ending now);
+   * one already expired keeps its status and only records that Stripe has
+   * stopped. Stripe is not contacted at all when there is nothing to stop.
+   *
+   * @param {string|ObjectId} userId
+   * @param {{ source?: 'member'|'staff', by?: ObjectId|null, reason?: string }} [options]
+   * @returns {Promise<{ cancelled: string[] }>} the order numbers whose subscription was stopped
+   * @throws {MembershipError} 502 STRIPE_CANCEL_FAILED when Stripe could not stop one of them;
+   *         the others are stopped and recorded all the same, and the message names what is left
+   */
+  async cancelMemberSubscriptions(userId, { source = 'staff', by = null, reason = 'Account deleted' } = {}) {
+    if (!userId) return { cancelled: [] };
+    const orders = await PackageOrder.find({
+      userId,
+      'payment.stripeSubscriptionId': { $nin: [null, ''] },
+      'subscription.stripeStatus': { $nin: ['canceled', 'incomplete_expired'] }
+    });
+    if (!orders.length) return { cancelled: [] };
+
+    let stripe;
+    try {
+      stripe = await getStripe();
+    } catch (error) {
+      throw new membership.MembershipError(
+        `This member still has a card subscription at Stripe (${orders.map((o) => o.orderNumber).join(', ')}) and it could not be stopped: ${error.message} Cancel it in the Stripe dashboard first.`,
+        502,
+        'STRIPE_CANCEL_FAILED'
+      );
+    }
+
+    const cancelled = [];
+    const failed = [];
+    for (const order of orders) {
+      try {
+        await stripe.subscriptions.cancel(order.payment.stripeSubscriptionId);
+      } catch (error) {
+        if (!alreadyCancelled(error)) {
+          failed.push(`${order.orderNumber} (${error.message})`);
+          continue;
+        }
+      }
+
+      const now = new Date();
+      order.subscription.stripeStatus = 'canceled';
+      order.subscription.autoRenew = false;
+      order.subscription.cancelAtPeriodEnd = false;
+      if (['pending', 'active', 'frozen', 'past_due'].includes(order.status)) {
+        order.status = 'cancelled';
+        order.subscription.isActive = false;
+        if (order.payment.status === 'paid' && order.subscription.endDate && new Date(order.subscription.endDate) > now) {
+          order.subscription.endDate = now;
+        }
+      }
+      if (!order.cancellation || !order.cancellation.cancelledAt) {
+        order.cancellation = { cancelledAt: now, reason, by, source, immediate: true };
+      }
+      await order.save();
+      cancelled.push(order.orderNumber);
+    }
+
+    if (failed.length) {
+      throw new membership.MembershipError(
+        `Stripe could not stop this member's card subscription: ${failed.join('; ')}. Try again, or cancel it in the Stripe dashboard first.`,
+        502,
+        'STRIPE_CANCEL_FAILED'
+      );
+    }
+    return { cancelled };
   }
 }
 

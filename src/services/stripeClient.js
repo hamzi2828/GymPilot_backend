@@ -18,6 +18,12 @@ const Stripe = require('stripe');
 const Settings = require('../models/settings');
 const { currentTenant } = require('../platform/tenantContext');
 
+// Before raising this to 2025-09-30.clover or later: from that version new
+// subscriptions default to Stripe's flexible billing mode, where a trial does
+// not move the billing date, and freezes (membershipService.pushStripeCharge,
+// which moves the next charge with trial_end) are refused on them. Checkout
+// subscriptions must then set `billing_mode: { type: 'classic' }` (in
+// gymfolioPaymentService's subscription_data) to keep freezing possible.
 const API_VERSION = '2023-10-16';
 
 // One client per secret key. Keys change rarely; clients are cheap but not
@@ -69,9 +75,9 @@ async function stripeConfig() {
 }
 
 class StripeNotConfiguredError extends Error {
-  constructor() {
-    super('Card payments are not set up for this gym yet. Add the Stripe keys under Settings → Stripe.');
-    this.code = 'STRIPE_NOT_CONFIGURED';
+  constructor(message, code = 'STRIPE_NOT_CONFIGURED') {
+    super(message || 'Card payments are not set up for this gym yet. Add the Stripe keys under Settings → Stripe.');
+    this.code = code;
     this.status = 409;
   }
 }
@@ -90,10 +96,66 @@ async function getStripe() {
   return client;
 }
 
-/** Whether card payments can be offered to this gym's members right now. */
-async function cardPaymentsAvailable() {
+// Why a gym cannot sell by card, in words its members can read. What the
+// gym's staff must do about it is on Settings → Stripe.
+const CARD_UNAVAILABLE = {
+  STRIPE_NOT_CONFIGURED: 'Card payments are not set up at this gym yet.',
+  STRIPE_WEBHOOK_NOT_CONFIGURED: 'Card payments are paused while this gym finishes connecting its Stripe account.'
+};
+
+/**
+ * Whether card payments can be offered to this gym's members right now, and
+ * if not, why.
+ *
+ * Keys alone are not enough: without the webhook signing secret Stripe
+ * cannot tell us about anything that happens after the checkout page. A
+ * subscription would then be recorded for its first term only (invoice.paid
+ * never lands, so the member expires while Stripe keeps charging them), and
+ * a buyer who closes the tab before the success page stays pending for
+ * good. For the default gym the environment's STRIPE_WEBHOOK_SECRET counts,
+ * exactly as stripeConfig() resolves it.
+ *
+ * @returns {Promise<{ available: boolean, code: string|null, reason: string }>}
+ */
+async function cardPaymentsStatus() {
   const cfg = await stripeConfig();
-  return !!(cfg.secretKey && cfg.enabled);
+  if (!(cfg.secretKey && cfg.enabled)) {
+    return { available: false, code: 'STRIPE_NOT_CONFIGURED', reason: CARD_UNAVAILABLE.STRIPE_NOT_CONFIGURED };
+  }
+  if (!cfg.webhookSecret) {
+    return { available: false, code: 'STRIPE_WEBHOOK_NOT_CONFIGURED', reason: CARD_UNAVAILABLE.STRIPE_WEBHOOK_NOT_CONFIGURED };
+  }
+  return { available: true, code: null, reason: '' };
 }
 
-module.exports = { getStripe, stripeConfig, cardPaymentsAvailable, StripeNotConfiguredError, API_VERSION };
+/** Whether card payments can be offered to this gym's members right now. */
+async function cardPaymentsAvailable() {
+  return (await cardPaymentsStatus()).available;
+}
+
+/**
+ * Throws StripeNotConfiguredError unless a new card sale may start. Only
+ * new sales are gated: verifying, refunding and cancelling what was already
+ * sold keep working on the keys alone.
+ */
+async function assertCardPaymentsAvailable() {
+  const { available, code } = await cardPaymentsStatus();
+  if (available) return;
+  if (code === 'STRIPE_WEBHOOK_NOT_CONFIGURED') {
+    throw new StripeNotConfiguredError(
+      'Card payments are not available yet: this gym has not finished connecting Stripe (the webhook signing secret is missing under Settings → Stripe).',
+      code
+    );
+  }
+  throw new StripeNotConfiguredError();
+}
+
+module.exports = {
+  getStripe,
+  stripeConfig,
+  cardPaymentsAvailable,
+  cardPaymentsStatus,
+  assertCardPaymentsAvailable,
+  StripeNotConfiguredError,
+  API_VERSION
+};

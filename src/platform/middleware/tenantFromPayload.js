@@ -15,7 +15,24 @@ const { findGymBySlug } = require('./resolveTenant');
 const { getTenantConnection } = require('../connections');
 const { storage, originForHost, primaryHost } = require('../tenantContext');
 
-async function contextForSlug(req, slug, { allowDefault = true } = {}) {
+// A gym's Stripe webhook records money its members have ALREADY paid, into
+// the gym's own Stripe account: a renewal, a failed card, a cancellation.
+// None of that stops because the gym's own GymPilot subscription lapsed --
+// Stripe goes on charging its members either way -- and an event
+// acknowledged but not applied is lost for good. So a lapsed gym
+// (SUBSCRIPTION_INACTIVE, the block its owner lifts by paying) still has its
+// webhooks applied; nothing else about the gym is served. A suspended gym is
+// a platform decision, so its events are refused with a 503 instead: Stripe
+// retries them for up to three days, and they land if it is reinstated
+// within that time.
+const WEBHOOK_SERVED_WHILE_LAPSED = new Set(['SUBSCRIPTION_INACTIVE']);
+
+function refuseWebhookForNow(res, gym, blocked) {
+  console.warn(`[stripe] webhook for ${gym.slug} refused (${blocked.code}); Stripe will retry`);
+  return res.status(503).json({ received: false, code: blocked.code, message: 'This gym is not being served right now; retry later.' });
+}
+
+async function contextForSlug(req, slug, { allowDefault = true, allowLapsed = false } = {}) {
   let gym = slug ? await findGymBySlug(slug) : null;
   if (!gym && allowDefault && process.env.DEFAULT_TENANT_SLUG) {
     gym = await findGymBySlug(process.env.DEFAULT_TENANT_SLUG);
@@ -23,7 +40,7 @@ async function contextForSlug(req, slug, { allowDefault = true } = {}) {
   if (!gym) return { gym: null };
 
   const blocked = Gym.accessBlock(gym);
-  if (blocked) return { gym, blocked };
+  if (blocked && !(allowLapsed && WEBHOOK_SERVED_WHILE_LAPSED.has(blocked.code))) return { gym, blocked };
 
   const connection = await getTenantConnection(gym);
   req.tenant = gym;
@@ -82,17 +99,14 @@ async function tenantFromStripeWebhook(req, res, next) {
   }
 
   try {
-    const { gym, blocked, store } = await contextForSlug(req, slug);
+    const { gym, blocked, store } = await contextForSlug(req, slug, { allowLapsed: true });
     if (!gym) {
       // Acknowledged, not processed: a 4xx would make Stripe retry an event
       // that can never be routed.
       console.warn('[stripe] webhook event carries no known gym; ignored');
       return res.json({ received: true, ignored: 'no gym in event metadata' });
     }
-    if (blocked) {
-      console.warn(`[stripe] webhook for ${gym.slug} ignored: ${blocked.code}`);
-      return res.json({ received: true, ignored: blocked.code });
-    }
+    if (blocked) return refuseWebhookForNow(res, gym, blocked);
     return storage.run(store, () => next());
   } catch (error) {
     console.error('[tenant] webhook resolution failed:', error);
@@ -108,12 +122,9 @@ async function tenantFromStripeWebhook(req, res, next) {
  */
 async function tenantFromSlugParam(req, res, next) {
   try {
-    const { gym, blocked, store } = await contextForSlug(req, req.params.slug, { allowDefault: false });
+    const { gym, blocked, store } = await contextForSlug(req, req.params.slug, { allowDefault: false, allowLapsed: true });
     if (!gym) return res.status(404).json({ received: false, message: 'Unknown gym' });
-    if (blocked) {
-      console.warn(`[stripe] webhook for ${gym.slug} ignored: ${blocked.code}`);
-      return res.json({ received: true, ignored: blocked.code });
-    }
+    if (blocked) return refuseWebhookForNow(res, gym, blocked);
     return storage.run(store, () => next());
   } catch (error) {
     console.error('[tenant] webhook slug resolution failed:', error);

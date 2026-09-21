@@ -18,7 +18,36 @@
 // as scripts/expireMemberships.js for a real cron once one exists.
 
 const PackageOrder = require('../models/packageOrderModel');
+const User = require('../../models/user');
+const notify = require('../../services/gymNotifications');
+const { afterResponse } = require('../../services/afterResponse');
 const { tenantKey } = require('../../platform/tenantContext');
+
+const DAY_MS = 86400000;
+
+// A Stripe subscription renews on Stripe's clock, not ours. The next term's
+// invoice is paid around the moment the current one ends, and the
+// invoice.paid that moves endDate on can land an hour or more later (days,
+// if Stripe is retrying a card). Expiring on the dot marked renewing
+// members expired in between. They get the same allowance the platform
+// gives the gyms it bills through Stripe (platform/jobs.js).
+const STRIPE_SETTLE_DAYS = 2;
+
+// A subscription Stripe will still try to renew: it has an id, and nobody
+// -- the member, the desk or Stripe -- has said stop. One that has been
+// told to stop ends on its end date like any other membership. The same
+// rule as reminderJobs.willAutoRenew, written as a query.
+const RENEWING = {
+  'payment.stripeSubscriptionId': { $nin: [null, ''] },
+  'subscription.autoRenew': true,
+  'subscription.cancelAtPeriodEnd': { $ne: true },
+  'subscription.stripeStatus': { $nin: ['canceled', 'incomplete', 'incomplete_expired', 'unpaid', 'paused'] }
+};
+
+// "Your membership has ended" goes to members whose membership lapsed within
+// this many days. Older lapses -- the backlog the first sweep after a deploy
+// corrects -- are closed quietly: a notice months late is noise.
+const EXPIRED_NOTICE_DAYS = 7;
 
 // How long a sweep's result is trusted before another is allowed. The screens
 // that call this are opened many times a minute in a busy gym, and running a
@@ -50,13 +79,23 @@ function sweepState() {
  *                               of which are decisions a human made and must
  *                               not be overwritten by the passage of time
  *  - endDate set and past    -- an open-ended membership (no end date) never
- *                               expires on its own
+ *                               expires on its own; a Stripe subscription
+ *                               still renewing gets STRIPE_SETTLE_DAYS more
+ *
+ * 'past_due' (a renewal Stripe could not collect and is retrying) and
+ * 'frozen' are never swept: past-due ends when Stripe says so -- paid
+ * (active again) or given up on (customer.subscription.deleted, cancelled)
+ * -- and is not the same thing as a membership that ran out.
  */
 function lapsedFilter(now) {
+  const settled = new Date(now.getTime() - STRIPE_SETTLE_DAYS * DAY_MS);
   return {
     'payment.status': 'paid',
     status: 'active',
-    'subscription.endDate': { $ne: null, $lt: now }
+    $or: [
+      { 'subscription.endDate': { $ne: null, $lt: settled } },
+      { 'subscription.endDate': { $ne: null, $lt: now }, $nor: [RENEWING] }
+    ]
   };
 }
 
@@ -91,30 +130,95 @@ async function countLiveMembers(now = new Date(), extra = {}) {
   return rows.length ? rows[0].n : 0;
 }
 
+const EXPIRE = { $set: { status: 'expired', 'subscription.isActive': false } };
+
 /**
- * Flips every lapsed membership to 'expired'.
+ * Who, if anyone, to tell that this membership has ended: only a membership
+ * (a pack or a pass running out is not "your membership has ended"), only
+ * an account still open, and only when nothing else live follows it -- a
+ * member who renewed early has their next term starting right now.
+ *
+ * @returns {Promise<{ tell: boolean, member?: object|null }>}
+ */
+async function expiredNoticeFor(order, now) {
+  const kind = (order.packageDetails && order.packageDetails.kind) || 'membership';
+  if (kind !== 'membership') return { tell: false };
+
+  const member = order.userId ? await User.findById(order.userId).select('firstName lastName email isActive').lean() : null;
+  if (order.userId && (!member || member.isActive === false)) return { tell: false };
+
+  const owner = [];
+  if (order.userId) owner.push({ userId: order.userId });
+  const email = order.customerInfo && order.customerInfo.email;
+  if (email) owner.push({ 'customerInfo.email': String(email).toLowerCase().trim() });
+  if (owner.length) {
+    const next = await PackageOrder.exists({
+      ...liveFilter(now),
+      _id: { $ne: order._id },
+      $and: [{ $or: owner }, { $or: [{ 'packageDetails.kind': 'membership' }, { 'packageDetails.kind': { $exists: false } }] }]
+    });
+    if (next) return { tell: false };
+  }
+  return { tell: true, member };
+}
+
+/** Sends the "membership ended" notice if it is due. Never throws. */
+async function tellExpired(order, now) {
+  try {
+    const { tell, member } = await expiredNoticeFor(order, now);
+    if (!tell) return false;
+    await notify.membershipExpired(order, member);
+    return true;
+  } catch (error) {
+    console.error(`[membership] expiry notice for ${order.orderNumber} failed:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Flips every lapsed membership to 'expired', and tells the members whose
+ * membership has just ended.
  *
  * Idempotent -- running it twice changes nothing the second time, because the
  * filter no longer matches what it just updated. Safe to call concurrently:
- * two instances racing produce the same write.
+ * recent lapses are flipped one conditional update at a time, and only the
+ * sweep whose update matched sends that order's notice, so two sweeps
+ * racing (two serverless instances, the cron and a page load) tell the
+ * member once. The older backlog is flipped in one write, silently.
  *
  * @param {Date} [now] the moment to judge against; injectable for tests
- * @returns {Promise<{ expired: number }>}
+ * @param {{ waitForNotices?: boolean }} [options] false: send the notices in
+ *   the background (the request path), rather than before returning
+ * @returns {Promise<{ expired: number, notified: number }>} notified: notices
+ *   sent -- or, when not waiting, orders queued to be considered for one
  */
-async function expireLapsedOrders(now = new Date()) {
-  const result = await PackageOrder.updateMany(lapsedFilter(now), {
-    $set: {
-      status: 'expired',
-      'subscription.isActive': false
-    }
-  });
+async function expireLapsedOrders(now = new Date(), { waitForNotices = true } = {}) {
+  const lapsed = lapsedFilter(now);
+  const noticeFrom = new Date(now.getTime() - EXPIRED_NOTICE_DAYS * DAY_MS);
 
-  const expired = result.modifiedCount || 0;
+  let expired = 0;
+  const notices = [];
+  const recent = await PackageOrder.find({ $and: [lapsed, { 'subscription.endDate': { $gte: noticeFrom } }] }).select('_id').lean();
+  for (const { _id } of recent) {
+    const order = await PackageOrder.findOneAndUpdate({ $and: [{ _id }, lapsed] }, EXPIRE, { new: true }).lean();
+    if (!order) continue; // another sweep flipped it first, and tells the member
+    expired += 1;
+    notices.push(tellExpired(order, now));
+  }
+
+  const result = await PackageOrder.updateMany(lapsed, EXPIRE);
+  expired += result.modifiedCount || 0;
+
   if (expired > 0) {
     console.log(`[membership] marked ${expired} lapsed membership(s) expired`);
   }
 
-  return { expired };
+  if (!waitForNotices) {
+    if (notices.length) afterResponse(Promise.all(notices), 'membershipExpired');
+    return { expired, notified: notices.length };
+  }
+  const notified = (await Promise.all(notices)).filter(Boolean).length;
+  return { expired, notified };
 }
 
 /**
@@ -140,7 +244,9 @@ async function sweepIfDue() {
   if (state.inFlight) return state.inFlight;
 
   state.lastSweepAt = now;
-  state.inFlight = expireLapsedOrders()
+  // The notices go out in the background: a page load waits for the
+  // statuses it shows, not for a mail server.
+  state.inFlight = expireLapsedOrders(new Date(), { waitForNotices: false })
     .catch((error) => {
       // Housekeeping must never be the reason a page fails to load. Reset the
       // clock so the next request retries rather than waiting out the window.
@@ -170,8 +276,11 @@ module.exports = {
   expireLapsedOrders,
   sweepIfDue,
   countLapsed,
+  lapsedFilter,
   liveFilter,
   countLiveMembers,
   LIVE_STATUSES,
-  THROTTLE_MS
+  THROTTLE_MS,
+  STRIPE_SETTLE_DAYS,
+  EXPIRED_NOTICE_DAYS
 };

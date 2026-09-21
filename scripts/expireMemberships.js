@@ -16,7 +16,7 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const { enterContext, resolveGymContextFromArgs } = require('./lib/tenantScript');
-const { expireLapsedOrders, countLapsed } = require('../src/gymfolio/services/membershipExpiry');
+const { expireLapsedOrders, countLapsed, lapsedFilter } = require('../src/gymfolio/services/membershipExpiry');
 const PackageOrder = require('../src/gymfolio/models/packageOrderModel');
 
 const APPLY = process.argv.includes('--apply');
@@ -46,11 +46,9 @@ async function main() {
 
   // Show what would change before changing it, so the operator can spot a
   // wrong date or a package whose period was mis-typed.
-  const sample = await PackageOrder.find({
-    'payment.status': 'paid',
-    status: 'active',
-    'subscription.endDate': { $ne: null, $lt: now }
-  })
+  // The same rule the sweep applies (a card subscription Stripe will still
+  // renew gets a few days' grace), so the preview matches what --apply does.
+  const sample = await PackageOrder.find(lapsedFilter(now))
     .select('orderNumber customerInfo.email packageDetails.name subscription.endDate')
     .sort({ 'subscription.endDate': 1 })
     .limit(20)
