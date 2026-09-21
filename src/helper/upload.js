@@ -33,22 +33,32 @@ function ensureUploadsDir(folder = '') {
   return target;
 }
 
-// Allowed image mime types
+// Allowed image mime types. No SVG: an SVG is a document that can carry
+// script, and these files are served back from our own origin.
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
   'image/webp',
   'image/gif',
-  'image/svg+xml',
 ]);
+
+const MB = 1024 * 1024;
+
+// Vercel refuses any request body over 4.5 MB before this code ever runs,
+// with an error page the browser cannot read. On Vercel every upload is
+// therefore capped just under that, so the refusal is ours and says what to
+// do about it. Anywhere else the full limits below apply.
+const ON_VERCEL = !!process.env.VERCEL;
+const VERCEL_MAX_FILE_BYTES = 4 * MB;
+const platformCap = (bytes) => (ON_VERCEL ? Math.min(bytes, VERCEL_MAX_FILE_BYTES) : bytes);
 
 // File size limit (default 5MB)
 const MAX_FILE_MB = Number(process.env.UPLOAD_MAX_FILE_SIZE_MB || 5);
-const MAX_FILE_BYTES = Math.max(1, MAX_FILE_MB) * 1024 * 1024;
+const MAX_FILE_BYTES = platformCap(Math.max(1, MAX_FILE_MB) * MB);
 
 // Larger file size limit for blog hero images (20MB)
 const MAX_HERO_FILE_MB = 20;
-const MAX_HERO_FILE_BYTES = MAX_HERO_FILE_MB * 1024 * 1024;
+const MAX_HERO_FILE_BYTES = platformCap(MAX_HERO_FILE_MB * MB);
 
 // Video uploads (homepage videos section)
 const ALLOWED_VIDEO_MIME_TYPES = new Set([
@@ -58,7 +68,52 @@ const ALLOWED_VIDEO_MIME_TYPES = new Set([
   'video/quicktime',
 ]);
 const MAX_VIDEO_FILE_MB = Number(process.env.UPLOAD_MAX_VIDEO_SIZE_MB || 100);
-const MAX_VIDEO_FILE_BYTES = Math.max(1, MAX_VIDEO_FILE_MB) * 1024 * 1024;
+const MAX_VIDEO_FILE_BYTES = platformCap(Math.max(1, MAX_VIDEO_FILE_MB) * MB);
+
+// Member documents (10 MB) and CSV imports (5 MB).
+const MAX_DOCUMENT_FILE_BYTES = platformCap(10 * MB);
+const MAX_CSV_FILE_BYTES = platformCap(5 * MB);
+
+// The extension a stored file gets, from the type the filter checked rather
+// than from the name it arrived with: "logo.svg" sent as image/png is kept
+// as .png, and so served as an image and never as a document.
+const EXTENSION_FOR_MIME = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+  'video/ogg': '.ogv',
+  'video/quicktime': '.mov',
+  'application/pdf': '.pdf',
+};
+
+function tooLargeMessage(maxBytes) {
+  if (ON_VERCEL && maxBytes <= VERCEL_MAX_FILE_BYTES) {
+    return "Files over 4 MB can't be uploaded — compress the image or use a video link.";
+  }
+  return `Files over ${Math.round(maxBytes / MB)} MB can't be uploaded — compress the file and try again.`;
+}
+
+// multer's size error would otherwise reach the global handler in index.js,
+// which answers 400 and quotes the image limit whatever the route's own
+// limit was. Answered here instead: a 413, naming the limit that applied.
+function sizeLimited(middleware, maxBytes) {
+  return function sizeLimitedUpload(req, res, next) {
+    middleware(req, res, (error) => {
+      if (error && error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          success: false,
+          code: 'FILE_TOO_LARGE',
+          error: 'File too large',
+          message: tooLargeMessage(maxBytes)
+        });
+      }
+      return next(error);
+    });
+  };
+}
 
 // Each gym's files live in their own sub-folder, named by the gym's slug, so
 // two gyms on one server never see or overwrite each other's uploads. The
@@ -88,8 +143,9 @@ const storage = USE_BLOB_STORAGE
       filename: (req, file, cb) => {
         const timestamp = Date.now();
         const rand = Math.round(Math.random() * 1e9);
-        const ext = path.extname(file.originalname || '').toLowerCase();
-        const base = path.basename((file.originalname || 'file').replace(/\s+/g, '-'), ext);
+        const original = path.extname(file.originalname || '');
+        const ext = EXTENSION_FOR_MIME[file.mimetype] || original.toLowerCase();
+        const base = path.basename((file.originalname || 'file').replace(/\s+/g, '-'), original);
         const folder = tenantUploadFolder(req);
         cb(null, `${folder ? folder + '/' : ''}${timestamp}-${rand}-${base}${ext}`);
       },
@@ -126,9 +182,9 @@ const csvUpload = multer({
     if (ok) return cb(null, true);
     cb(new Error('Only .csv files are accepted'));
   },
-  limits: { fileSize: 5 * 1024 * 1024 }
+  limits: { fileSize: MAX_CSV_FILE_BYTES }
 });
-const csvUploadSingle = (fieldName) => csvUpload.single(fieldName);
+const csvUploadSingle = (fieldName) => sizeLimited(csvUpload.single(fieldName), MAX_CSV_FILE_BYTES);
 
 // Member documents: signed forms, ID scans, medical letters. Images or
 // PDFs, 10 MB.
@@ -139,21 +195,21 @@ const documentUpload = multer({
     if (ALLOWED_DOCUMENT_MIME_TYPES.has(file.mimetype)) return cb(null, true);
     cb(new Error('Only image or PDF files are allowed'));
   },
-  limits: { fileSize: 10 * 1024 * 1024 }
+  limits: { fileSize: MAX_DOCUMENT_FILE_BYTES }
 });
-const documentUploadSingle = (fieldName) => documentUpload.single(fieldName);
+const documentUploadSingle = (fieldName) => sizeLimited(documentUpload.single(fieldName), MAX_DOCUMENT_FILE_BYTES);
 
 // Convenience wrappers
-const uploadSingle = (fieldName) => upload.single(fieldName);
-const uploadArray = (fieldName, maxCount) => upload.array(fieldName, maxCount);
-const uploadFields = (fields) => upload.fields(fields);
+const uploadSingle = (fieldName) => sizeLimited(upload.single(fieldName), MAX_FILE_BYTES);
+const uploadArray = (fieldName, maxCount) => sizeLimited(upload.array(fieldName, maxCount), MAX_FILE_BYTES);
+const uploadFields = (fields) => sizeLimited(upload.fields(fields), MAX_FILE_BYTES);
 
 // Hero upload wrappers
-const heroUploadSingle = (fieldName) => heroUpload.single(fieldName);
-const heroUploadFields = (fields) => heroUpload.fields(fields);
+const heroUploadSingle = (fieldName) => sizeLimited(heroUpload.single(fieldName), MAX_HERO_FILE_BYTES);
+const heroUploadFields = (fields) => sizeLimited(heroUpload.fields(fields), MAX_HERO_FILE_BYTES);
 
 // Video upload wrapper
-const videoUploadSingle = (fieldName) => videoUpload.single(fieldName);
+const videoUploadSingle = (fieldName) => sizeLimited(videoUpload.single(fieldName), MAX_VIDEO_FILE_BYTES);
 
 // Helper to build public URL path (as served by Express static middleware)
 function toPublicPath(filename) {
@@ -194,6 +250,9 @@ module.exports = {
   MAX_FILE_BYTES,
   MAX_HERO_FILE_BYTES,
   MAX_VIDEO_FILE_BYTES,
+  MAX_DOCUMENT_FILE_BYTES,
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_VIDEO_MIME_TYPES,
+  EXTENSION_FOR_MIME,
+  sizeLimited,
 };

@@ -1,6 +1,7 @@
 // src/helper/blobUpload.js
 const { put, del } = require('@vercel/blob');
 const { currentTenant } = require('../platform/tenantContext');
+const { EXTENSION_FOR_MIME } = require('./upload');
 
 // Every gym's files sit under their own prefix in the store, named by the
 // gym's slug, so listings and clean-ups can be scoped to one customer.
@@ -17,12 +18,13 @@ function tenantFolder(folder) {
 // costs money to get wrong.
 const MB = 1024 * 1024;
 
+// No SVG: it is a document that can carry script, and a stored one would be
+// served back to anyone who opens its URL.
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
   'image/webp',
   'image/gif',
-  'image/svg+xml',
 ]);
 const ALLOWED_DOCUMENT_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png']);
 const ALLOWED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
@@ -77,10 +79,12 @@ async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads', opti
     throw new Error(`File size exceeds ${Math.round(maxBytes / MB)}MB limit`);
   }
 
-  // Generate unique filename
+  // Generate unique filename. The extension follows the type checked above,
+  // not the name the file arrived with ("logo.svg" sent as image/png is
+  // stored as .png).
   const timestamp = Date.now();
   const rand = Math.round(Math.random() * 1e9);
-  const ext = filename.split('.').pop()?.toLowerCase() || 'jpg';
+  const ext = (EXTENSION_FOR_MIME[mimetype] || '').slice(1) || filename.split('.').pop()?.toLowerCase() || 'jpg';
   const baseName = filename.replace(/\.[^/.]+$/, '').replace(/\s+/g, '-');
   const uniqueFilename = `${tenantFolder(folder)}/${timestamp}-${rand}-${baseName}.${ext}`;
 
@@ -273,8 +277,9 @@ async function processProductFiles(files) {
  * @returns {Promise<string>} - Public URL of uploaded file
  */
 async function uploadScreenshot(buffer, filename, mimetype) {
-  // Validate file type - allow all common image types
-  if (!mimetype.startsWith('image/')) {
+  // Validate file type - allow all common image types except SVG, which can
+  // carry script (see ALLOWED_IMAGE_MIME_TYPES above)
+  if (!mimetype.startsWith('image/') || mimetype === 'image/svg+xml') {
     throw new Error('Invalid file type. Only images are allowed.');
   }
 
