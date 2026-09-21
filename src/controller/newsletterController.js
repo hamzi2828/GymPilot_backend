@@ -1,6 +1,7 @@
 // src/controller/newsletterController.js
 const Newsletter = require('../models/newsletterModel');
 const Settings = require('../models/settings');
+const { verifyUnsubscribeToken } = require('../services/unsubscribeLinks');
 
 // Pages are capped so a single request cannot pull the whole list out.
 const MAX_PAGE_SIZE = 200;
@@ -105,9 +106,13 @@ exports.subscribe = async (req, res) => {
 };
 
 // Unsubscribe from newsletter
+//
+// Only with the token from the email's own link (services/unsubscribeLinks.js).
+// Anyone can type an address, so an address alone must not be enough to take
+// somebody off the list.
 exports.unsubscribe = async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, token } = req.body || {};
 
     if (!email) {
       return res.status(400).json({
@@ -116,7 +121,23 @@ exports.unsubscribe = async (req, res) => {
       });
     }
 
-    const subscription = await Newsletter.unsubscribeEmail(email);
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        code: 'UNSUBSCRIBE_TOKEN_MISSING',
+        message: 'Please use the unsubscribe link at the bottom of one of our newsletter emails.'
+      });
+    }
+
+    if (!verifyUnsubscribeToken(email, token)) {
+      return res.status(400).json({
+        success: false,
+        code: 'UNSUBSCRIBE_TOKEN_INVALID',
+        message: 'This unsubscribe link is not valid. Please use the link in the newsletter email itself, or contact the gym.'
+      });
+    }
+
+    const subscription = await Newsletter.unsubscribeEmail(String(email));
 
     if (!subscription) {
       return res.status(404).json({

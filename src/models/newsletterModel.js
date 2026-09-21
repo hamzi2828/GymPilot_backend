@@ -21,6 +21,12 @@ const newsletterSchema = new mongoose.Schema(
       enum: ['active', 'unsubscribed'],
       default: 'active'
     },
+    // Written by unsubscribeEmail below; without the field in the schema
+    // mongoose dropped it and the date was never kept.
+    unsubscribedAt: {
+      type: Date,
+      default: null
+    },
     source: {
       type: String,
       enum: ['blog', 'homepage', 'sidebar', 'footer'],

@@ -23,6 +23,7 @@ const { shell, escapeHtml } = require('../templates/gymEmails');
 const templates = require('./templateService');
 const messaging = require('./messaging');
 const notify = require('./gymNotifications');
+const { unsubscribeUrl } = require('./unsubscribeLinks');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MEMBER_FIELDS = 'firstName lastName email phone notificationPreferences tags';
@@ -104,7 +105,9 @@ function campaignVars(recipient, b) {
 
 function footerFor(recipient, b) {
   if (recipient.kind === 'newsletter') {
-    const url = `${b.accountUrl.replace(/\/user-detail$/, '')}/unsubscribe?email=${encodeURIComponent(recipient.email)}`;
+    // Signed for this address at this gym: the page will not unsubscribe
+    // anyone on an address alone (services/unsubscribeLinks.js).
+    const url = unsubscribeUrl(b.accountUrl.replace(/\/user-detail$/, ''), recipient.email);
     return `You are receiving this because you subscribed to ${escapeHtml(b.siteName)} updates. <a href="${escapeHtml(url)}" style="color:#a1a1aa">Unsubscribe</a>`;
   }
   return `You are receiving this because you are a member of ${escapeHtml(b.siteName)}. <a href="${escapeHtml(b.accountUrl)}" style="color:#a1a1aa">Manage what we send you</a>`;
