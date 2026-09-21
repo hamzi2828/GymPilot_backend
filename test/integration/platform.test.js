@@ -1,0 +1,326 @@
+// The platform against a real MongoDB.
+//
+// Webhook idempotency: the platform Stripe webhook (platformSettingsController
+// .webhook) with real signatures, so the claim in platform_stripe_events is
+// exercised end to end -- a redelivery is a duplicate, two deliveries at once
+// apply once, a claim abandoned for longer than STALE_CLAIM_MS is taken over,
+// a fresh or finished one is not.
+//
+// Dunning: a gym whose card keeps failing goes past due, is cut off after the
+// grace period however far Stripe has moved its period on, stays cut off
+// through Stripe's further retries, comes back when paid, and its owner is
+// told once when Stripe cancels.
+//
+// Provisioning: provisionGym() creating a tenant database and seeding it, and
+// rolling back on a failure part-way through seeding -- dropping a database it
+// created, never one that was already there. Email and Vercel are stand-ins.
+
+const assert = require('node:assert/strict');
+const Stripe = require('stripe');
+const h = require('./helpers/harness');
+
+const WEBHOOK_SECRET = 'whsec_integration_secret';
+const signer = new Stripe('sk_test_integration_signer').webhooks;
+
+let Gym;
+let PlatformSettings;
+let PlatformStripeEvent;
+let platformSettings;
+let provisioning;
+let contentPages;
+let Settings;
+let Role;
+let User;
+let billedGym;
+
+const test = h.suite(async () => {
+  Gym = h.src('platform/models/gymModel');
+  PlatformSettings = h.src('platform/models/platformSettingsModel');
+  PlatformStripeEvent = h.src('platform/models/platformStripeEventModel');
+  platformSettings = h.src('platform/controllers/platformSettingsController');
+  provisioning = h.src('platform/provisioning');
+  contentPages = h.src('seeds/contentPageDefaults');
+  Settings = h.src('models/settings');
+  Role = h.src('models/roleModel');
+  User = h.src('models/user');
+
+  await PlatformStripeEvent.init();
+  const settings = await PlatformSettings.getSettings();
+  settings.stripe.secretKey = 'sk_test_integration_platform';
+  settings.stripe.webhookSecret = WEBHOOK_SECRET;
+  await settings.save();
+
+  billedGym = await h.createGym('billed-gym', { currency: 'GBP' });
+  await Gym.updateOne({ _id: billedGym._id }, { $set: { 'subscription.status': 'trialing', 'subscription.stripeSubscriptionId': 'sub_integration' } });
+});
+
+const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+function subscriptionEvent(id, status, { createdAgoSeconds = 0 } = {}) {
+  return {
+    id,
+    object: 'event',
+    type: 'customer.subscription.updated',
+    created: nowSeconds() - createdAgoSeconds,
+    livemode: false,
+    data: {
+      object: {
+        id: 'sub_integration',
+        object: 'subscription',
+        status,
+        customer: 'cus_integration',
+        metadata: { gymId: String(billedGym._id) },
+        items: {
+          data: [{ current_period_end: nowSeconds() + 30 * 86400, quantity: 1, price: { currency: 'gbp', unit_amount: 4900, recurring: { interval: 'month' } } }]
+        }
+      }
+    }
+  };
+}
+
+function deliver(event, { secret = WEBHOOK_SECRET } = {}) {
+  const payload = JSON.stringify(event);
+  const header = signer.generateTestHeaderString({ payload, secret });
+  return h.call(platformSettings.webhook, { body: Buffer.from(payload), headers: { 'stripe-signature': header } });
+}
+
+async function gymStatus() {
+  return (await Gym.findById(billedGym._id).lean()).subscription.status;
+}
+
+// A claim written earlier, with its own createdAt: straight into the collection.
+function seedClaim(eventId, { createdAgoMs, handledAt = null }) {
+  const createdAt = new Date(Date.now() - createdAgoMs);
+  return PlatformStripeEvent.collection.insertOne({ eventId, type: 'customer.subscription.updated', livemode: false, gymId: null, gymSlug: '', result: '', handledAt, createdAt, updatedAt: createdAt });
+}
+
+test('a signature that does not verify is refused before anything is claimed', async () => {
+  const res = await deliver(subscriptionEvent('evt_forged', 'active'), { secret: 'whsec_wrong' });
+  assert.equal(res.statusCode, 400);
+  assert.equal(await PlatformStripeEvent.countDocuments({ eventId: 'evt_forged' }), 0);
+});
+
+test('one event delivered twice at the same moment is applied once', async () => {
+  const event = subscriptionEvent('evt_twice', 'active', { createdAgoSeconds: 300 });
+  const results = await Promise.all([deliver(event), deliver(event)]);
+  // The loser is either a plain duplicate (the winner had finished) or told
+  // to come back later (still in progress) -- never applied a second time.
+  for (const res of results) {
+    assert.ok(res.statusCode === 200 || (res.statusCode === 409 && res.body.inProgress), JSON.stringify(res.body));
+  }
+  const applied = results.filter((res) => !res.body.duplicate);
+  assert.equal(applied.length, 1, JSON.stringify(results.map((r) => r.body)));
+  assert.equal(applied[0].body.result, 'synced: active');
+
+  const gym = await Gym.findById(billedGym._id).lean();
+  assert.equal(gym.subscription.status, 'active');
+  assert.equal(gym.subscription.amount, 49);
+  assert.equal(gym.subscription.currency, 'GBP');
+
+  const claims = await PlatformStripeEvent.find({ eventId: 'evt_twice' }).lean();
+  assert.equal(claims.length, 1);
+  assert.ok(claims[0].handledAt instanceof Date);
+  assert.equal(claims[0].result, 'synced: active');
+
+  // And again later: still a duplicate.
+  const again = await deliver(event);
+  assert.equal(again.body.duplicate, true);
+});
+
+test('a claim abandoned past STALE_CLAIM_MS is taken over by the redelivery', async () => {
+  await seedClaim('evt_abandoned', { createdAgoMs: platformSettings.STALE_CLAIM_MS + 60000 });
+  const res = await deliver(subscriptionEvent('evt_abandoned', 'past_due', { createdAgoSeconds: 200 }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.duplicate, undefined, JSON.stringify(res.body));
+  assert.equal(res.body.result, 'synced: past_due');
+  assert.equal(await gymStatus(), 'past_due');
+  const claims = await PlatformStripeEvent.find({ eventId: 'evt_abandoned' }).lean();
+  assert.equal(claims.length, 1);
+  assert.ok(claims[0].handledAt instanceof Date);
+});
+
+test('a claim still in progress, or already handled, is not taken over', async () => {
+  await seedClaim('evt_in_progress', { createdAgoMs: 60000 });
+  await seedClaim('evt_long_done', { createdAgoMs: 3 * 3600000, handledAt: new Date(Date.now() - 2 * 3600000) });
+
+  const inProgress = await deliver(subscriptionEvent('evt_in_progress', 'cancelled', { createdAgoSeconds: 100 }));
+  assert.equal(inProgress.body.duplicate, true);
+  // Still in progress: not acknowledged, so Stripe retries rather than
+  // dropping the event if that first delivery never finishes.
+  assert.equal(inProgress.statusCode, 409);
+  assert.equal(inProgress.body.inProgress, true);
+  const done = await deliver(subscriptionEvent('evt_long_done', 'cancelled', { createdAgoSeconds: 90 }));
+  assert.equal(done.body.duplicate, true);
+  assert.equal(done.statusCode, 200);
+  assert.equal(await gymStatus(), 'past_due', 'neither was applied');
+});
+
+test('two redeliveries racing for one abandoned claim apply it once', async () => {
+  await seedClaim('evt_contested', { createdAgoMs: platformSettings.STALE_CLAIM_MS * 3 });
+  const event = subscriptionEvent('evt_contested', 'active', { createdAgoSeconds: 30 });
+  const results = await Promise.all([deliver(event), deliver(event)]);
+  const applied = results.filter((res) => !res.body.duplicate);
+  assert.equal(applied.length, 1, JSON.stringify(results.map((r) => r.body)));
+  assert.equal(await PlatformStripeEvent.countDocuments({ eventId: 'evt_contested' }), 1);
+  assert.equal(await gymStatus(), 'active');
+});
+
+test('a released claim can be claimed again; a handled one cannot be released', async () => {
+  const event = { id: 'evt_release', type: 'invoice.paid' };
+  assert.equal(await PlatformStripeEvent.claim(event), true);
+  assert.equal(await PlatformStripeEvent.claim(event), false);
+  await PlatformStripeEvent.release(event);
+  assert.equal(await PlatformStripeEvent.claim(event), true);
+  await PlatformStripeEvent.markHandled(event, { result: 'done' });
+  await PlatformStripeEvent.release(event);
+  assert.equal(await PlatformStripeEvent.claim(event), false, 'a finished event stays claimed');
+});
+
+/* ------------------------ a card that keeps failing ------------------------ */
+
+function billingEvent(id, type, object, createdAt) {
+  return { id, object: 'event', type, created: createdAt, livemode: false, data: { object } };
+}
+
+test('a gym whose card keeps failing is cut off after the grace period, though Stripe keeps moving its period on', async () => {
+  const jobs = h.src('platform/jobs');
+  const DAY = 86400;
+  const t = nowSeconds();
+  const gym = await h.createGym('dunning-gym', { currency: 'GBP' });
+  await Gym.updateOne(
+    { _id: gym._id },
+    {
+      $set: {
+        'owner.email': 'owner@dunning.test',
+        'owner.firstName': 'Dana',
+        'subscription.status': 'active',
+        'subscription.stripeSubscriptionId': 'sub_dunning',
+        'subscription.stripeCustomerId': 'cus_dunning',
+        'subscription.currentPeriodEnd': new Date((t + 2 * DAY) * 1000)
+      }
+    }
+  );
+  const invoice = (amountPaid = 0) => ({ id: 'in_dunning', object: 'invoice', subscription: 'sub_dunning', customer: 'cus_dunning', amount_paid: amountPaid, metadata: {}, lines: { data: [{ period: { end: t + 60 * DAY } }] } });
+  const subscription = (status, periodEnd) => ({
+    id: 'sub_dunning',
+    object: 'subscription',
+    status,
+    customer: 'cus_dunning',
+    metadata: { gymId: String(gym._id) },
+    items: { data: [{ current_period_end: periodEnd, quantity: 1, price: { currency: 'gbp', unit_amount: 4900, recurring: { interval: 'month' } } }] }
+  });
+  const read = async () => (await Gym.findById(gym._id).lean()).subscription;
+
+  // The renewal fails: past due, and the clock starts when Stripe said so.
+  await deliver(billingEvent('evt_dun_1', 'invoice.payment_failed', invoice(), t - 300));
+  let sub = await read();
+  assert.equal(sub.status, 'past_due');
+  assert.equal(sub.pastDueSince.getTime(), (t - 300) * 1000);
+
+  // Stripe moves the period on anyway, and retries: the clock keeps running.
+  await deliver(billingEvent('evt_dun_2', 'customer.subscription.updated', subscription('past_due', t + 32 * DAY), t - 200));
+  sub = await read();
+  assert.equal(sub.currentPeriodEnd.getTime(), (t + 32 * DAY) * 1000);
+  assert.equal(sub.pastDueSince.getTime(), (t - 300) * 1000);
+
+  // Eight days on, the period end still ahead: expired all the same.
+  const rolled = await jobs.rollSubscriptionStatuses({ now: new Date((t + 8 * DAY) * 1000) });
+  assert.ok(rolled.expired >= 1);
+  assert.equal((await read()).status, 'expired');
+
+  // Stripe's next retries fail too: still expired, not back to "past due" and served.
+  const retried = await deliver(billingEvent('evt_dun_3', 'invoice.payment_failed', invoice(), t - 100));
+  assert.equal(retried.body.result, 'already expired');
+  await deliver(billingEvent('evt_dun_4', 'customer.subscription.updated', subscription('past_due', t + 32 * DAY), t - 50));
+  assert.equal((await read()).status, 'expired');
+
+  // Paid at last: active, and the clock stops.
+  await deliver(billingEvent('evt_dun_5', 'invoice.paid', invoice(4900), t));
+  sub = await read();
+  assert.equal(sub.status, 'active');
+  assert.equal(sub.pastDueSince, null);
+
+  // Then cancelled in Stripe: the owner is told once, with the way back.
+  await deliver(billingEvent('evt_dun_6', 'customer.subscription.deleted', subscription('canceled', t + 60 * DAY), t + 10));
+  assert.equal((await read()).status, 'cancelled');
+  const toOwner = () => h.calls.emails.filter((mail) => mail.to === 'owner@dunning.test' && /has been cancelled/.test(mail.subject));
+  const first = await jobs.sendOwnerBillingNotices();
+  assert.ok(first.sent.some((entry) => entry.slug === 'dunning-gym' && entry.notice === 'cancelled'), JSON.stringify(first));
+  assert.equal(toOwner().length, 1);
+  assert.match(toOwner()[0].html, /Sign in to renew/);
+  await jobs.sendOwnerBillingNotices();
+  assert.equal(toOwner().length, 1, 'once');
+});
+
+const owner = (email) => ({ firstName: 'Olga', lastName: 'Owner', email, password: 'correct-horse-battery' });
+
+test('provisionGym creates the gym, its own database, and seeds it', async () => {
+  const before = await h.databaseNames();
+  const result = await provisioning.provisionGym({
+    name: 'Iron Works Integration',
+    owner: owner('olga@ironworks.test'),
+    domains: ['ironworks.localhost:3000'],
+    locale: { timezone: 'Europe/London', currency: 'GBP', country: 'GB' }
+  });
+
+  const gym = await Gym.findById(result.gym._id).lean();
+  assert.equal(gym.slug, 'iron-works-integration');
+  assert.ok(gym.provisionedAt instanceof Date);
+  assert.ok(gym.database.name.startsWith(h.TENANT_PREFIX));
+  assert.ok(!before.includes(gym.database.name));
+  assert.ok((await h.databaseNames()).includes(gym.database.name), 'the database now exists');
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.ownerInvite.sent, true);
+  assert.ok(h.calls.emails.some((mail) => mail.to === 'olga@ironworks.test'), 'the owner was emailed (stub)');
+
+  await h.inGym({ ...gym, database: { name: gym.database.name } }, async () => {
+    const settings = await Settings.findOne({ isActive: true }).lean();
+    assert.equal(settings.siteName, 'Iron Works Integration');
+    assert.equal(settings.currency, 'GBP');
+    assert.equal(settings.country, 'GB');
+    assert.ok(await Role.exists({ slug: 'admin' }));
+    const ownerUser = await User.findOne({ email: 'olga@ironworks.test' }).select('+passwordResetTokenHash').lean();
+    assert.equal(ownerUser.role, 'admin');
+    assert.ok(ownerUser.passwordResetTokenHash, 'a set-password token is waiting');
+  });
+
+  // The same name again gets the next free address, not an error.
+  const second = await provisioning.provisionGym({ name: 'Iron Works Integration', owner: owner('olga2@ironworks.test') });
+  assert.equal(second.gym.slug, 'iron-works-integration-2');
+  assert.notEqual(second.gym.database.name, gym.database.name);
+});
+
+async function withFailingSeed(fn) {
+  const original = contentPages.ensureSeeded;
+  contentPages.ensureSeeded = async () => {
+    throw new Error('seeded failure');
+  };
+  try {
+    return await fn();
+  } finally {
+    contentPages.ensureSeeded = original;
+  }
+}
+
+test('a failure part-way through seeding removes the gym and drops the database it created', async () => {
+  const database = `${h.TENANT_PREFIX}doomed_db`;
+  await withFailingSeed(async () => {
+    await assert.rejects(
+      provisioning.provisionGym({ name: 'Doomed Gym', owner: owner('d@doomed.test'), database: { name: database } }),
+      (error) => error instanceof provisioning.ProvisioningError && error.status === 500 && /seeded failure/.test(error.message)
+    );
+  });
+  assert.equal(await Gym.findOne({ slug: 'doomed-gym' }).lean(), null);
+  assert.ok(!(await h.databaseNames()).includes(database), 'the half-seeded database was dropped');
+});
+
+test('a failure never drops a database that was already there', async () => {
+  const database = `${h.TENANT_PREFIX}somebodys_data`;
+  await h.rawDb(database).collection('keep_me').insertOne({ note: 'existing data' });
+  await withFailingSeed(async () => {
+    await assert.rejects(provisioning.provisionGym({ name: 'Careful Gym', owner: owner('c@careful.test'), database: { name: database } }), /seeded failure/);
+  });
+  assert.equal(await Gym.findOne({ slug: 'careful-gym' }).lean(), null);
+  assert.ok((await h.databaseNames()).includes(database));
+  assert.equal(await h.rawDb(database).collection('keep_me').countDocuments(), 1);
+});
