@@ -201,18 +201,16 @@ classBookingSchema.statics.countWaitlisted = function (classId, sessionDate, ses
  * Returns the promoted booking, or null if nobody was waiting.
  */
 classBookingSchema.statics.promoteFromWaitlist = async function (classId, sessionDate, sessionStart) {
-  const next = await this.findOne({
-    classId,
-    sessionDate,
-    sessionStart,
-    status: 'waitlisted'
-  }).sort({ waitlistPosition: 1, createdAt: 1 });
+  // Taken off the queue with one conditional update, so two places freed at
+  // the same moment go to two different people rather than both to the
+  // front of the queue.
+  const next = await this.findOneAndUpdate(
+    { classId, sessionDate, sessionStart, status: 'waitlisted' },
+    { $set: { status: 'booked', waitlistPosition: null } },
+    { sort: { waitlistPosition: 1, createdAt: 1 }, new: true }
+  );
 
   if (!next) return null;
-
-  next.status = 'booked';
-  next.waitlistPosition = null;
-  await next.save();
 
   // Close the gap left behind, so positions stay contiguous.
   const remaining = await this.find({

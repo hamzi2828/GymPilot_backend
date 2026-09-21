@@ -264,7 +264,7 @@ module.exports = {
 
       const capacity = Number(gymClass.capacity) || 0;
       const taken = await ClassBooking.countBooked(gymClass._id, date, startTime);
-      const full = capacity > 0 && taken >= capacity;
+      let full = capacity > 0 && taken >= capacity;
 
       let waitlistPosition = null;
       if (full) {
@@ -275,7 +275,7 @@ module.exports = {
         credit = await takeCredit(membership, rules, actorId, `${gymClass.name} ${date} ${startTime}`);
       }
 
-      const booking = await ClassBooking.create({
+      let booking = await ClassBooking.create({
         classId: gymClass._id,
         className: gymClass.name,
         userId: member._id,
@@ -294,6 +294,32 @@ module.exports = {
         orderId: credit.orderId,
         notes: req.body.notes ? String(req.body.notes).trim() : ''
       });
+
+      // Two members taking the last place at the same moment both counted a
+      // free place above. Counting again now that this booking is written
+      // settles it: whoever finds the session over capacity gives the place
+      // up and joins the waiting list, exactly as if it had been full -- so
+      // a class can never end up with more people than places.
+      if (!full && capacity > 0) {
+        const nowTaken = await ClassBooking.countBooked(gymClass._id, date, startTime);
+        if (nowTaken > capacity) {
+          const position = (await ClassBooking.countWaitlisted(gymClass._id, date, startTime)) + 1;
+          const moved = await ClassBooking.findOneAndUpdate(
+            { _id: booking._id, status: 'booked' },
+            { $set: { status: 'waitlisted', waitlistPosition: position, creditUsed: false, orderId: null } },
+            { new: true }
+          );
+          if (moved) {
+            // The waiting list costs nothing until a place comes free.
+            const spent = credit;
+            credit = { creditUsed: false, orderId: null };
+            if (spent.creditUsed) await giveCreditBack({ creditUsed: true, orderId: spent.orderId }).catch(() => {});
+            booking = moved;
+            full = true;
+            waitlistPosition = position;
+          }
+        }
+      }
 
       // Fired, not awaited: a slow or misconfigured mail server must not hold
       // up the response to somebody standing in the gym with their phone out.
@@ -387,7 +413,8 @@ module.exports = {
 
       if (!mongoose.Types.ObjectId.isValid(id)) return fail(res, 400, 'Invalid booking id');
 
-      const [booking, rules] = await Promise.all([ClassBooking.findById(id), sessions.rules()]);
+      const [found, rules] = await Promise.all([ClassBooking.findById(id), sessions.rules()]);
+      let booking = found;
       if (!booking) return fail(res, 404, 'Booking not found');
 
       const isOwner = String(booking.userId) === String(actorId);
@@ -406,14 +433,37 @@ module.exports = {
       // member anything.
       const startsAt = sessions.localInstant(booking.sessionDate, booking.sessionStart);
       const late = rules.cancelHours > 0 && startsAt.getTime() - rules.cancelHours * 3600 * 1000 < Date.now();
-      booking.lateCancel = late && !req.isStaffBooking;
 
-      booking.status = 'cancelled';
-      booking.cancelledAt = new Date();
-      booking.cancelledBy = actorId;
-      booking.cancelReason = req.body && req.body.reason ? String(req.body.reason).trim() : '';
-      booking.waitlistPosition = null;
-      await booking.save();
+      // One conditional update from the status read above to cancelled. Two
+      // cancels arriving together (a double tap, the member and the desk)
+      // used to both get through -- the credit went back twice and two people
+      // were promoted into one freed place. Only the one that makes the
+      // change carries on.
+      const cancelled = await ClassBooking.findOneAndUpdate(
+        { _id: booking._id, status: booking.status },
+        {
+          $set: {
+            status: 'cancelled',
+            cancelledAt: new Date(),
+            cancelledBy: actorId || null,
+            cancelReason: req.body && req.body.reason ? String(req.body.reason).trim() : '',
+            waitlistPosition: null,
+            lateCancel: late && !req.isStaffBooking
+          }
+        },
+        { new: true }
+      );
+      if (!cancelled) {
+        const current = await ClassBooking.findById(booking._id).select('status').lean();
+        const status = current ? current.status : 'cancelled';
+        // Still live, just not as read a moment ago (promoted off the
+        // waiting list, say): nothing was cancelled, so ask for another go.
+        if (['booked', 'waitlisted'].includes(status)) {
+          return fail(res, 409, 'This booking changed a moment ago. Please try again.');
+        }
+        return fail(res, 409, `This booking is already ${status.replace('_', ' ')}.`);
+      }
+      booking = cancelled;
 
       if (!booking.lateCancel) await giveCreditBack(booking);
 
