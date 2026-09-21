@@ -455,6 +455,192 @@ function assertActive(order) {
   }
 }
 
+/* ------------------------------- freezing ------------------------------ */
+//
+// A freeze pauses a membership for n days and gives the n days back: the
+// end date moves out by n.
+//
+// On a Stripe subscription the next CHARGE has to move with it, or the two
+// disagree. Pausing collection (pause_collection 'void', which this used to
+// do) leaves Stripe's billing dates where they were and throws away any
+// invoice falling inside the pause. A freeze inside one billing period lost
+// the member their days -- the next invoice.paid overwrote the end date with
+// Stripe's unmoved period end -- and one spanning a renewal voided that
+// renewal: a period the gym never collected, with the member showing
+// expired until Stripe's next charge.
+//
+// Instead the next charge is pushed back by n days, the way Stripe documents
+// for moving a billing date: trial_end = the current period's end + n days,
+// with proration_behavior 'none'. The member has paid up to the period's
+// end; the n days after it are free, which is what the freeze gives them;
+// Stripe then bills a full period from the new date, and every period after
+// that from there. (Stripe issues, and settles, a 0 invoice for the free
+// days straight away.) The end date here is set to that same instant, so
+// every invoice.paid that follows agrees with it.
+//
+// Resuming early takes the unused whole days back off both: the charge moves
+// earlier by the same number of days -- and if that is already past (the
+// paid-for time ran out during the freeze) the trial ends now and Stripe
+// bills the next period at once. Resuming on schedule changes nothing at
+// Stripe: it already charges on the end date.
+//
+// This relies on classic billing mode, the default for the API version
+// stripeClient pins. Under flexible mode a trial does not move the billing
+// anchor, so the push would be followed by a part-period charge; such a
+// subscription is refused rather than guessed at.
+
+const FREEZE_STRIPE = 'stripe_trial';
+const FREEZE_LOCAL = 'local';
+
+// Subscriptions whose next charge can be moved, and those Stripe will never
+// charge again (a freeze of those is only a date here, as for cash).
+const STRIPE_MOVABLE = new Set(['active', 'trialing']);
+const STRIPE_ENDED = new Set(['canceled', 'incomplete_expired']);
+
+// Kept on the subscription's metadata: `${freeze number}:${days}:${trial_end}`.
+// A freeze whose Stripe half went through but whose record here failed to
+// save is tried again from the same starting point, rather than pushed twice.
+const FREEZE_MARKER = 'gympilot_freeze';
+
+// A billing date this close is not worth a trial: Stripe bills now instead.
+const TRIAL_END_MARGIN_MS = 5 * 60 * 1000;
+const DAY_S = DAY_MS / 1000;
+
+/** The freeze marker on a subscription's metadata, or null. */
+function readFreezeMarker(metadata) {
+  const match = /^(\d+):(\d+):(\d+)$/.exec(String((metadata && metadata[FREEZE_MARKER]) || ''));
+  return match ? { seq: Number(match[1]), days: Number(match[2]), trialEnd: Number(match[3]) } : null;
+}
+
+/**
+ * Where freezing for `days` moves Stripe's next charge, in Unix seconds:
+ * `days` after `periodEnd`, when Stripe would otherwise charge. When this
+ * same freeze (`seq`, its number on the order) already reached Stripe, the
+ * push starts from where that attempt started.
+ */
+function freezeTrialEnd({ periodEnd, days, seq, marker = null }) {
+  const base = marker && marker.seq === seq ? marker.trialEnd - marker.days * DAY_S : Math.floor(new Date(periodEnd).getTime() / 1000);
+  return base + days * DAY_S;
+}
+
+/**
+ * Where resuming early moves Stripe's next charge: `unusedDays` before
+ * `pushedTo` (Unix seconds), or 'now' when that is past or all but.
+ */
+function resumeTrialEnd({ pushedTo, unusedDays, now = new Date() }) {
+  const target = pushedTo - unusedDays * DAY_S;
+  return target * 1000 > now.getTime() + TRIAL_END_MARGIN_MS ? target : 'now';
+}
+
+/**
+ * Moving the billing date makes Stripe issue a 0 invoice for the free days.
+ * It is not a renewal: recorded as the order's latest invoice, the
+ * invoice.paid for it is recognised as already seen, rather than filed as a
+ * renewal of nothing with the member told their membership renewed. Only an
+ * invoice that is new and for nothing is taken -- a real renewal whose
+ * webhook is still on its way must not be marked as seen.
+ */
+function adoptZeroInvoice(order, updated, previousInvoiceId) {
+  const invoice = updated && updated.latest_invoice;
+  if (!invoice || typeof invoice !== 'object' || !invoice.id) return;
+  if (invoice.id === previousInvoiceId || invoice.id === order.payment.stripeInvoiceId) return;
+  if (Number(invoice.total) !== 0 || Number(invoice.amount_paid || 0) !== 0) return;
+  order.payment.stripeInvoiceId = invoice.id;
+}
+
+function stripeEndOf(updated, trialEnd) {
+  const seconds = (updated && Number(updated.trial_end)) || trialEnd;
+  return new Date(seconds * 1000);
+}
+
+/**
+ * Pushes a Stripe subscription's next charge back by `days` for a freeze.
+ * @returns {Promise<Date|null>} the new billing date, which is the
+ *   membership's new end date; null when Stripe will not charge this
+ *   subscription again
+ * @throws {MembershipError} 409 when the subscription's billing cannot be moved
+ */
+async function pushStripeCharge(order, { days, seq }) {
+  const subId = order.payment.stripeSubscriptionId;
+  const stripe = await getStripe();
+  const sub = await stripe.subscriptions.retrieve(subId);
+
+  if (STRIPE_ENDED.has(sub.status)) return null;
+  if (!STRIPE_MOVABLE.has(sub.status)) {
+    throw new MembershipError(
+      'There is a card payment outstanding on this membership. It can be frozen once that payment has gone through.',
+      409,
+      'FREEZE_PAYMENT_OUTSTANDING'
+    );
+  }
+  if (sub.pause_collection) {
+    throw new MembershipError('Card payments for this membership are paused in Stripe. Resume them there before freezing it here.', 409, 'FREEZE_STRIPE_PAUSED');
+  }
+  if (sub.billing_mode && sub.billing_mode.type === 'flexible') {
+    throw new MembershipError(
+      "This card subscription uses Stripe's flexible billing mode, where a freeze cannot move the billing date. Change the billing date in the Stripe dashboard instead.",
+      409,
+      'FREEZE_STRIPE_UNSUPPORTED'
+    );
+  }
+  const periodEnd = periodOf(sub).end;
+  if (!periodEnd) {
+    throw new MembershipError('Stripe did not say when this membership is next billed, so it has not been frozen. Try again in a moment.', 502, 'FREEZE_STRIPE_UNREADABLE');
+  }
+
+  const trialEnd = freezeTrialEnd({ periodEnd, days, seq, marker: readFreezeMarker(sub.metadata) });
+  const updated = await stripe.subscriptions.update(subId, {
+    trial_end: trialEnd,
+    proration_behavior: 'none',
+    metadata: { [FREEZE_MARKER]: `${seq}:${days}:${trialEnd}` },
+    expand: ['latest_invoice']
+  });
+  adoptZeroInvoice(order, updated, idOf(sub.latest_invoice));
+  order.subscription.stripeStatus = (updated && updated.status) || 'trialing';
+  return stripeEndOf(updated, trialEnd);
+}
+
+/**
+ * Resuming a Stripe freeze early: the next charge comes back by the unused
+ * days.
+ * @returns {Promise<{ endDate: Date, billedNow: boolean }|null>} null when
+ *   Stripe will not charge again (the local rule applies)
+ */
+async function pullStripeCharge(order, { unusedDays, now }) {
+  const subId = order.payment.stripeSubscriptionId;
+  const stripe = await getStripe();
+  const sub = await stripe.subscriptions.retrieve(subId);
+
+  if (STRIPE_ENDED.has(sub.status)) return null;
+  if (sub.status !== 'trialing') {
+    // The pushed date was ended at Stripe and it has billed again: its
+    // billing date stands.
+    const end = periodOf(sub).end;
+    return end ? { endDate: end, billedNow: false } : null;
+  }
+
+  // Where this freeze pushed the charge -- read from the marker, so a resume
+  // retried after its record failed to save does not pull it back twice.
+  const history = (order.freeze && order.freeze.history) || [];
+  const marker = readFreezeMarker(sub.metadata);
+  const pushedTo =
+    marker && marker.seq === history.length - 1 ? marker.trialEnd : Math.floor(new Date(order.subscription.endDate).getTime() / 1000);
+  const trialEnd = resumeTrialEnd({ pushedTo, unusedDays, now });
+
+  if (trialEnd === 'now') {
+    // The time paid for ran out while frozen: Stripe bills the next period
+    // now, and its invoice.paid moves the end date on.
+    const updated = await stripe.subscriptions.update(subId, { trial_end: 'now', proration_behavior: 'none' });
+    order.subscription.stripeStatus = (updated && updated.status) || 'active';
+    return { endDate: now, billedNow: true };
+  }
+
+  const updated = await stripe.subscriptions.update(subId, { trial_end: trialEnd, proration_behavior: 'none', expand: ['latest_invoice'] });
+  adoptZeroInvoice(order, updated, idOf(sub.latest_invoice));
+  order.subscription.stripeStatus = (updated && updated.status) || 'trialing';
+  return { endDate: stripeEndOf(updated, trialEnd), billedNow: false };
+}
+
 async function freeze(order, { days, reason = '', by = null, source = 'staff' }) {
   assertActive(order);
   if (order.status === 'frozen') throw new MembershipError('This membership is already frozen', 400);
@@ -467,22 +653,28 @@ async function freeze(order, { days, reason = '', by = null, source = 'staff' })
 
   const now = new Date();
   const resumeAt = new Date(now.getTime() + n * DAY_MS);
-  const endDate = new Date(new Date(order.subscription.endDate).getTime() + n * DAY_MS);
+  order.freeze = order.freeze || {};
+  order.freeze.history = order.freeze.history || [];
 
+  // Cash and bank terms -- and a subscription Stripe will not charge again
+  // -- simply end n days later. A live Stripe subscription ends when Stripe
+  // next charges, which the freeze has just pushed back.
+  let endDate = new Date(new Date(order.subscription.endDate).getTime() + n * DAY_MS);
+  let billing = FREEZE_LOCAL;
   if (order.payment.stripeSubscriptionId) {
-    const stripe = await getStripe();
-    await stripe.subscriptions.update(order.payment.stripeSubscriptionId, {
-      pause_collection: { behavior: 'void', resumes_at: Math.floor(resumeAt.getTime() / 1000) }
-    });
+    const pushedTo = await pushStripeCharge(order, { days: n, seq: order.freeze.history.length });
+    if (pushedTo) {
+      endDate = pushedTo;
+      billing = FREEZE_STRIPE;
+    }
   }
 
-  order.freeze = order.freeze || {};
   order.freeze.isFrozen = true;
   order.freeze.frozenAt = now;
   order.freeze.resumeAt = resumeAt;
   order.freeze.reason = reason;
+  order.freeze.billing = billing;
   order.freeze.totalFrozenDays = (order.freeze.totalFrozenDays || 0) + n;
-  order.freeze.history = order.freeze.history || [];
   order.freeze.history.push({ from: now, to: resumeAt, days: n, reason, by, source });
   order.subscription.endDate = endDate;
   order.subscription.renewalDate = endDate;
@@ -499,15 +691,27 @@ async function unfreeze(order, { by = null, source = 'staff' } = {}) {
   // Days handed back for resuming early: the end date moves back by the
   // part of the freeze that was not used.
   const unused = resumeAt > now ? Math.ceil((resumeAt.getTime() - now.getTime()) / DAY_MS) : 0;
+  const billing = (order.freeze && order.freeze.billing) || '';
+  const subId = order.payment.stripeSubscriptionId;
 
-  if (order.payment.stripeSubscriptionId) {
+  let endDate = new Date(new Date(order.subscription.endDate).getTime() - unused * DAY_MS);
+  let billedNow = false;
+  if (subId && billing === FREEZE_STRIPE) {
+    // ... and so does the next charge. On schedule there is nothing to do:
+    // Stripe already charges on the end date.
+    if (unused > 0) {
+      const moved = await pullStripeCharge(order, { unusedDays: unused, now });
+      if (moved) ({ endDate, billedNow } = moved);
+    }
+  } else if (subId && !billing) {
+    // A freeze from before charges were moved: Stripe collection was paused.
     const stripe = await getStripe();
-    await stripe.subscriptions.update(order.payment.stripeSubscriptionId, { pause_collection: '' });
+    await stripe.subscriptions.update(subId, { pause_collection: '' });
   }
 
   if (unused > 0) {
-    order.subscription.endDate = new Date(new Date(order.subscription.endDate).getTime() - unused * DAY_MS);
-    order.subscription.renewalDate = order.subscription.endDate;
+    order.subscription.endDate = endDate;
+    order.subscription.renewalDate = endDate;
     order.freeze.totalFrozenDays = Math.max(0, (order.freeze.totalFrozenDays || 0) - unused);
   }
   order.freeze.isFrozen = false;
@@ -518,7 +722,8 @@ async function unfreeze(order, { by = null, source = 'staff' } = {}) {
     last.days = Math.max(0, (last.days || 0) - unused);
     last.resumedBy = by;
   }
-  order.status = new Date(order.subscription.endDate) > now ? 'active' : 'expired';
+  // Billed now: live, as at any renewal, until Stripe says how the charge went.
+  order.status = billedNow || new Date(order.subscription.endDate) > now ? 'active' : 'expired';
   order.subscription.isActive = order.status === 'active';
   await order.save();
   return order;
@@ -840,6 +1045,21 @@ async function refundablePaymentIntent(stripe, order) {
     const invoice = sub && sub.latest_invoice && typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null;
     const intent = paymentIntentOf(invoice);
     if (intent) return intent;
+
+    // The latest invoice can be one that charged nothing -- the 0 invoice a
+    // freeze leaves when it moves the billing date -- so look back for the
+    // subscription's last real charge.
+    let paid = null;
+    try {
+      paid = await stripe.invoices.list({ subscription: p.stripeSubscriptionId, status: 'paid', limit: 10 });
+    } catch {
+      paid = null;
+    }
+    for (const candidate of (paid && paid.data) || []) {
+      if (!(Number(candidate.amount_paid) > 0)) continue;
+      const charged = paymentIntentOf(candidate);
+      if (charged) return charged;
+    }
   }
 
   return null;
@@ -1012,6 +1232,12 @@ module.exports = {
   freeze,
   unfreeze,
   resumeDueFreezes,
+  FREEZE_STRIPE,
+  FREEZE_LOCAL,
+  FREEZE_MARKER,
+  readFreezeMarker,
+  freezeTrialEnd,
+  resumeTrialEnd,
   cancel,
   resume,
   renew,

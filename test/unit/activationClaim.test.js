@@ -6,10 +6,14 @@ const assert = require('node:assert/strict');
 
 const claim = require('../../src/gymfolio/services/activationClaim');
 
-test('a claim is refused once paid or while another caller holds it, and allowed otherwise', () => {
+test('a claim is refused once paid, while another caller holds it, or once the sale was undone; allowed otherwise', () => {
   assert.equal(claim.canClaimActivation('paid'), false);
   assert.equal(claim.canClaimActivation('processing'), false);
-  for (const status of ['pending', 'failed', 'cancelled', 'refunded', '', undefined, null]) {
+  // Refunded money is not a payment to activate on, however late the event.
+  assert.equal(claim.canClaimActivation('refunded'), false);
+  assert.equal(claim.canClaimActivation('cancelled'), false);
+  // A checkout that expired or a card that was declined can still be paid.
+  for (const status of ['pending', 'failed', '', undefined, null]) {
     assert.equal(claim.canClaimActivation(status), true, `${status} can be claimed`);
   }
 });
@@ -17,7 +21,8 @@ test('a claim is refused once paid or while another caller holds it, and allowed
 test('the claim filter and update express exactly that rule for the database', () => {
   const filter = claim.claimFilter('order-1');
   assert.equal(filter._id, 'order-1');
-  assert.deepEqual([...filter['payment.status'].$nin].sort(), ['paid', 'processing']);
+  assert.deepEqual([...filter['payment.status'].$nin].sort(), ['cancelled', 'paid', 'processing', 'refunded']);
+  assert.deepEqual([...claim.UNDONE_STATUSES].sort(), ['cancelled', 'refunded']);
   assert.deepEqual(claim.claimUpdate(), { $set: { 'payment.status': 'processing' } });
   assert.equal(claim.CLAIMED_STATUS, 'processing');
 });

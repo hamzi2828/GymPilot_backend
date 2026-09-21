@@ -17,21 +17,48 @@
 // Pure decisions live here so they can be unit-tested; the database calls
 // that apply them are in gymfolioPaymentService.
 
-// A claim is refused once the order is paid, or while another caller holds
-// it. Anything else -- pending, failed, cancelled, refunded -- may be
-// claimed: Stripe is the authority on whether the money arrived.
+// A claim is refused once the order is paid, while another caller holds it,
+// and once the sale has been undone:
+//
+//   refunded   the money went back (membershipService.refund) and the
+//              membership was ended. A late or redelivered event for the
+//              original payment -- payment_intent.succeeded, invoice.paid,
+//              the member reopening the success page -- is news of money
+//              that has since been returned, not a new payment, and must not
+//              hand the membership back.
+//   cancelled  a payment called off for good. Nothing in this system writes
+//              it today; it is terminal by meaning, so it is treated like
+//              'refunded' rather than revived by whatever arrives later.
+//
+// 'pending' and 'failed' may still be claimed: Stripe is the authority on
+// whether the money arrived. An order closed because its checkout expired or
+// a card was declined ('failed', order 'cancelled') is activated if the
+// money then does arrive -- the member paid, so they get what they paid for.
+//
+// The order's own status is not consulted. The lifecycle statuses
+// ('active', 'frozen', 'past_due', 'expired') follow a paid payment, which
+// is blocked above, and a paid membership that is cancelled keeps its
+// payment 'paid'. An unpaid order closed by hand is treated like an expired
+// checkout: if the money then arrives, the order is activated.
 const BLOCKING = new Set(['paid', 'processing']);
+const UNDONE = new Set(['refunded', 'cancelled']);
+const REFUSED = [...BLOCKING, ...UNDONE];
 
 const CLAIMED_STATUS = 'processing';
 
 /** Whether an order whose payment is in `paymentStatus` may be claimed. */
 function canClaimActivation(paymentStatus) {
-  return !BLOCKING.has(String(paymentStatus || ''));
+  const status = String(paymentStatus || '');
+  return !BLOCKING.has(status) && !UNDONE.has(status);
 }
 
-/** The filter that wins the claim only when nobody else has. */
+/**
+ * The filter that wins the claim only when nobody else has -- and never on
+ * an order whose sale was undone, even if it was undone after the caller
+ * read it (a refund landing between the read and the claim).
+ */
 function claimFilter(orderId) {
-  return { _id: orderId, 'payment.status': { $nin: [...BLOCKING] } };
+  return { _id: orderId, 'payment.status': { $nin: [...REFUSED] } };
 }
 
 /** The update that takes the claim. */
@@ -55,6 +82,7 @@ function releaseUpdate(previousStatus) {
 
 module.exports = {
   BLOCKING_STATUSES: [...BLOCKING],
+  UNDONE_STATUSES: [...UNDONE],
   CLAIMED_STATUS,
   canClaimActivation,
   claimFilter,

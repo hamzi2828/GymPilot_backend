@@ -18,6 +18,8 @@ const notify = require('../../services/gymNotifications');
 const { can } = require('../../services/roleService');
 const { frontendOrigin } = require('../../platform/tenantContext');
 const { ensureInvoice, renderInvoicePdf } = require('../../services/invoiceService');
+const { afterResponse } = require('../../services/afterResponse');
+const { willAutoRenew } = require('../../services/reminderJobs');
 
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 let blobUpload;
@@ -68,6 +70,16 @@ async function loadOrder(req, { staffLevel = 'manage', allowMember = true } = {}
 
 async function memberOf(order) {
   return order.userId ? User.findById(order.userId).select('firstName lastName email').lean() : null;
+}
+
+/**
+ * Tells the member (notify[name]) once the response is on its way.
+ * afterResponse keeps the send alive on Vercel and logs a failure rather
+ * than dropping it; the member is looked up inside that work too, so a slow
+ * or failed lookup never holds up, or fails, the request that did the work.
+ */
+function tell(name, order) {
+  return afterResponse(async () => notify[name](order, await memberOf(order)), name);
 }
 
 async function activeBanks() {
@@ -122,7 +134,7 @@ module.exports = {
         return res.status(400).json({ success: false, message: 'Attach the transfer receipt or enter the transfer reference' });
       }
       await service.submitTransferProof(order, { url, note: req.body && req.body.note, reference: req.body && req.body.reference });
-      notify.transferReceived(order, await memberOf(order)).catch(() => {});
+      tell('transferReceived', order);
       return res.json({ success: true, message: 'Thanks — we will confirm your membership once the transfer is checked.', data: order });
     } catch (error) {
       return fail(res, error);
@@ -135,7 +147,7 @@ module.exports = {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       await service.approveTransfer(order, { by: userId(req) });
-      notify.membershipConfirmed(order, await memberOf(order)).catch(() => {});
+      tell('membershipConfirmed', order);
       return res.json({ success: true, message: `Payment confirmed. ${order.packageDetails.name} is now active.`, data: order });
     } catch (error) {
       return fail(res, error);
@@ -148,7 +160,7 @@ module.exports = {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       await service.rejectTransfer(order, { by: userId(req), reason: req.body && req.body.reason });
-      notify.transferRejected(order, await memberOf(order)).catch(() => {});
+      tell('transferRejected', order);
       return res.json({ success: true, message: 'Payment rejected and the member has been told.', data: order });
     } catch (error) {
       return fail(res, error);
@@ -160,8 +172,12 @@ module.exports = {
     try {
       const { order, source } = await loadOrder(req);
       await service.freeze(order, { days: req.body && req.body.days, reason: req.body && req.body.reason, by: userId(req), source });
-      notify.membershipFrozen(order, await memberOf(order)).catch(() => {});
-      return res.json({ success: true, message: `Membership frozen until ${new Date(order.freeze.resumeAt).toDateString()}.`, data: order });
+      tell('membershipFrozen', order);
+      // On a card subscription the next payment moved with the freeze; say so.
+      const nextCharge = order.freeze.billing === service.FREEZE_STRIPE && order.subscription.endDate
+        ? ` The next card payment moves to ${new Date(order.subscription.endDate).toDateString()}.`
+        : '';
+      return res.json({ success: true, message: `Membership frozen until ${new Date(order.freeze.resumeAt).toDateString()}.${nextCharge}`, data: order });
     } catch (error) {
       return fail(res, error);
     }
@@ -189,7 +205,7 @@ module.exports = {
         source,
         immediate: source === 'staff' && (body.immediate === true || body.immediate === 'true')
       });
-      notify.membershipCancelled(order, await memberOf(order)).catch(() => {});
+      tell('membershipCancelled', order);
       const ends = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
       return res.json({
         success: true,
@@ -215,12 +231,28 @@ module.exports = {
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/renew  (staff)  { paymentMethod, markPaid, months, notes }
+  // POST /api/gymfolio/package-orders/:id/renew  (staff)  { paymentMethod, markPaid, months, notes, force }
+  //
+  // A card subscription renews itself: a manual renewal on top would be paid
+  // for twice. One whose card payment failed is Stripe's to collect, not a
+  // term to sell again at the desk. Both are refused (409) unless `force` --
+  // the desk has checked, and means it.
   renew: async (req, res) => {
     try {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       const body = req.body || {};
+      const force = body.force === true || body.force === 'true';
+      if (!force && order.status === 'past_due' && order.payment && order.payment.stripeSubscriptionId) {
+        throw new service.MembershipError('Card payment failed — ask the member to update their card.', 409, 'CARD_PAYMENT_FAILED');
+      }
+      if (!force && willAutoRenew(order)) {
+        throw new service.MembershipError(
+          'This membership is billed automatically by card — a manual renewal would charge twice.',
+          409,
+          'AUTO_RENEWS'
+        );
+      }
       const renewal = await service.renew(order, {
         paymentMethod: body.paymentMethod,
         markPaid: body.markPaid !== false && body.markPaid !== 'false',
@@ -228,7 +260,7 @@ module.exports = {
         notes: body.notes,
         by: req.user && req.user.email
       });
-      if (renewal.payment.status === 'paid') notify.membershipConfirmed(renewal, await memberOf(renewal)).catch(() => {});
+      if (renewal.payment.status === 'paid') tell('membershipConfirmed', renewal);
       return res.status(201).json({ success: true, message: `Renewed: ${renewal.orderNumber} runs until ${new Date(renewal.subscription.endDate).toDateString()}.`, data: renewal });
     } catch (error) {
       return fail(res, error);
@@ -248,7 +280,7 @@ module.exports = {
         notes: body.notes,
         by: req.user && req.user.email
       });
-      if (result.order.payment.status === 'paid' && result.previous) notify.membershipConfirmed(result.order, await memberOf(result.order)).catch(() => {});
+      if (result.order.payment.status === 'paid' && result.previous) tell('membershipConfirmed', result.order);
       return res.status(201).json({
         success: true,
         message: result.credit !== null ? `Package changed. ${result.credit} credited for unused days.` : 'Subscription switched; Stripe will prorate the difference.',

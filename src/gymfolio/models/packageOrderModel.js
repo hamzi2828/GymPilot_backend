@@ -151,7 +151,8 @@ const packageOrderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      // frozen: paused by the member or staff, end date pushed out.
+      // frozen: paused by the member or staff, end date pushed out (and, on
+      // a Stripe subscription, the next charge with it).
       // past_due: a Stripe renewal failed; Stripe is retrying.
       enum: ['pending', 'active', 'expired', 'cancelled', 'suspended', 'frozen', 'past_due'],
       default: 'pending'
@@ -165,6 +166,15 @@ const packageOrderSchema = new mongoose.Schema(
       resumeAt: { type: Date, default: null },
       reason: { type: String, default: '' },
       totalFrozenDays: { type: Number, default: 0 },
+      // How the current (or last) freeze moved the billing, so resuming
+      // undoes the same thing (membershipService.freeze):
+      //   'stripe_trial'  the Stripe subscription's next charge was pushed
+      //                   back by the frozen days (trial_end)
+      //   'local'         only the end date here moved: cash and bank terms,
+      //                   or a subscription Stripe will not charge again
+      //   ''              a freeze from before this field: Stripe collection
+      //                   was paused (pause_collection)
+      billing: { type: String, default: '' },
       history: {
         type: [
           new mongoose.Schema(
