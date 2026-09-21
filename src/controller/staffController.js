@@ -311,7 +311,9 @@ module.exports = {
                 _id: '$personId',
                 visits: { $sum: 1 },
                 minutes: { $sum: { $ifNull: ['$workedMinutes', 0] } },
-                open: { $sum: { $cond: [{ $eq: ['$checkOutAt', null] }, 1, 0] } },
+                // Only a visit inside the open window counts as on shift now; one
+                // nobody checked out of weeks ago does not.
+                open: { $sum: { $cond: [openVisitExpr(new Date()), 1, 0] } },
                 lastCheckIn: { $last: '$checkInAt' },
                 lastShiftDate: { $last: '$shiftDate' }
               }
