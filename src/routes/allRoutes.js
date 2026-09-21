@@ -192,6 +192,19 @@ router.get('/staff/payslips/:id/pdf', auth, requirePermission('staff'), hrContro
 router.put('/staff/payslips/:id', auth, requirePermission('staff', 'manage'), hrController.updatePayslip);
 router.post('/staff/payslips/:id/:action', auth, requirePermission('staff', 'manage'), hrController.setPayslipStatus);
 
+// ---------------------------------------------------------------------------
+// Fingerprints on file -- see attendance/controller/fingerprintAdminController.js.
+// Under /api/attendance beside the rest of the attendance admin, but mounted
+// here: that router is read-only by design, and these routes delete. Seeing
+// who has a finger on file needs the attendance tab; removing one needs it
+// at manage. The /:finger form is what the admin panel sends, so the audit
+// trail (which keeps the path, not the query) says which finger went.
+// ---------------------------------------------------------------------------
+const fingerprintAdminController = require('../attendance/controller/fingerprintAdminController');
+router.get('/api/attendance/fingerprints', auth, requirePermission('attendance', 'view'), fingerprintAdminController.list);
+router.delete('/api/attendance/fingerprints/:personType/:personId', auth, requirePermission('attendance', 'manage'), fingerprintAdminController.remove);
+router.delete('/api/attendance/fingerprints/:personType/:personId/:finger', auth, requirePermission('attendance', 'manage'), fingerprintAdminController.remove);
+
 // Google OAuth 2.0 redirect flow
 router.get('/auth/google', userController.startGoogleOAuth);
 // Google calls back to the API's own address; the gym is read from `state`.
