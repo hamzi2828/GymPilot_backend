@@ -2,7 +2,7 @@
 const Blog = require('../../models/blogModel');
 const mongoose = require('mongoose');
 const fs = require('fs').promises;
-const path = require('path');
+const { localUploadPath } = require('../../helper/upload');
 
 /**
  * Delete a blog by ID with cleanup
@@ -129,11 +129,21 @@ const deleteAssociatedFiles = async (filePaths) => {
   const results = [];
   
   for (const filePath of filePaths) {
+    // Only a file inside the uploads folder is ever removed. The stored path
+    // can be any URL an editor typed in as the image, and "../.env" joined
+    // onto the uploads folder is the server's secrets. A blob URL, or
+    // anything else that is not one of our local files, is left alone.
+    const fullPath = localUploadPath(filePath);
+    if (!fullPath) {
+      results.push({
+        path: filePath,
+        deleted: false,
+        error: 'Not a file in the uploads folder'
+      });
+      continue;
+    }
+
     try {
-      // Convert URL path to filesystem path
-      const fileName = filePath.replace('/uploads/', '');
-      const fullPath = path.join(process.cwd(), 'uploads', fileName);
-      
       // Check if file exists
       await fs.access(fullPath);
       

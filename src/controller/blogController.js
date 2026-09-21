@@ -10,7 +10,19 @@ const {
 } = require('../services/blogs');
 const Blog = require('../models/blogModel');
 const BlogCategory = require('../models/BlogCategory');
+const User = require('../models/user');
+const { can, ADMIN_SLUG } = require('../services/roleService');
 const mongoose = require('mongoose');
+
+// Drafts are for the blog admin: an active account whose live role can at
+// least view Blogs. Visitors, members and the website's sitemap -- which call
+// the same GET /blogs without a staff token -- get published posts only.
+async function canSeeDrafts(req) {
+  if (!req.user || !req.user.id) return false;
+  const account = await User.findById(req.user.id).select('role isActive').lean();
+  if (!account || account.isActive === false) return false;
+  return account.role === ADMIN_SLUG || (await can(account.role, 'blogs', 'view'));
+}
 
 // ---------------------------------------------------------------------------
 // Categories
@@ -151,8 +163,8 @@ exports.getFeaturedBlogs = async (req, res) => {
 // Get all blogs with pagination and filtering
 exports.getAllBlogs = async (req, res) => {
   try {
-    const result = await getAllBlogsService(req.query);
-    
+    const result = await getAllBlogsService(req.query, { includeDrafts: await canSeeDrafts(req) });
+
     return res.status(200).json({
       success: true,
       message: 'Blogs retrieved successfully',

@@ -206,7 +206,9 @@ router.put('/admin/blogs/categories/:id', auth, requirePermission('blogs'), blog
 router.delete('/admin/blogs/categories/:id', auth, requirePermission('blogs'), blogController.deleteCategory);
 
 // Blog routes
-router.get('/blogs', blogController.getAllBlogs);
+// optionalAuth: the same list serves the public blog and the blog admin, which
+// also sees drafts (see blogController.canSeeDrafts).
+router.get('/blogs', optionalAuth, blogController.getAllBlogs);
 router.get('/blogs/featured', blogController.getFeaturedBlogs);
 router.get('/blogs/featured-categories', blogController.getFeaturedCategoriesWithBlogs);
 router.get('/blogs/slug/:slug', blogController.getBlogBySlug);

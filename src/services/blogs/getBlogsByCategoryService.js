@@ -10,7 +10,6 @@ const mongoose = require('mongoose');
  * @param {Object} options - Query options
  * @param {Number} options.page - Page number (default: 1)
  * @param {Number} options.limit - Items per page (default: 10)
- * @param {String} options.status - Filter by status (default: published)
  * @param {String} options.sortBy - Sort field (default: createdAt)
  * @param {String} options.sortOrder - Sort order (default: desc)
  * @param {Boolean} options.includeCategory - Include category details (default: true)
@@ -22,7 +21,6 @@ const getBlogsByCategoryService = async (categoryId, options = {}) => {
     const {
       page = 1,
       limit = 10,
-      status = 'published',
       sortBy = 'createdAt',
       sortOrder = 'desc',
       includeCategory = true,
@@ -42,15 +40,13 @@ const getBlogsByCategoryService = async (categoryId, options = {}) => {
       throw new Error('Category not found');
     }
     
-    // Build query
+    // Build query. Only ever called for the public blog pages, so published
+    // posts only: a `?status=draft` (or an empty `?status=`) on the URL used
+    // to list the drafts.
     const query = {
-      categoryId: category._id
+      categoryId: category._id,
+      status: 'published'
     };
-    
-    // Add status filter if provided
-    if (status) {
-      query.status = status;
-    }
 
     // Exclude specific blog if provided
     if (exclude && mongoose.Types.ObjectId.isValid(exclude)) {

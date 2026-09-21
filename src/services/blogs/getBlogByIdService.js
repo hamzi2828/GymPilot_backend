@@ -6,9 +6,11 @@ const mongoose = require('mongoose');
  * Get a single blog by ID or slug
  * @param {String} identifier - Blog ID or slug
  * @param {Boolean} incrementView - Whether to increment view count (default: false)
+ * @param {Object} [options]
+ * @param {Boolean} [options.includeDrafts] - Find a draft too (default: published only)
  * @returns {Promise<Object>} Blog details
  */
-const getBlogByIdService = async (identifier, incrementView = false) => {
+const getBlogByIdService = async (identifier, incrementView = false, { includeDrafts = false } = {}) => {
   try {
     // Determine if identifier is an ObjectId or slug
     let query;
@@ -16,8 +18,12 @@ const getBlogByIdService = async (identifier, incrementView = false) => {
       query = { _id: identifier };
     } else {
       // Treat as slug
-      query = { slug: identifier };
+      query = { slug: String(identifier) };
     }
+
+    // Public by default: a draft's slug is easy to guess from its title,
+    // and an unpublished post must read as "not found" rather than in full.
+    if (!includeDrafts) query.status = 'published';
     
     // Find the blog
     const blog = await Blog.findOne(query)

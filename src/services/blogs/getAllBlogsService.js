@@ -1,19 +1,30 @@
 // src/services/blogs/getAllBlogsService.js
 const Blog = require('../../models/blogModel');
 
+const BLOG_STATUSES = ['published', 'draft'];
+
+/**
+ * A search box's text as a literal pattern. Unescaped, "(" is a regex error
+ * (a 500) and a crafted pattern can keep the database busy for as long as
+ * it likes.
+ */
+const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
  * Get all blogs with pagination, filtering and population
  * @param {Object} queryParams - Query parameters for filtering
  * @param {Number} queryParams.page - Page number (default: 1)
  * @param {Number} queryParams.limit - Items per page (default: 10)
- * @param {String} queryParams.status - Filter by status (published/draft)
+ * @param {String} queryParams.status - Filter by status (published/draft); only honoured with includeDrafts
  * @param {String} queryParams.categoryId - Filter by category ID
  * @param {String} queryParams.search - Search in title and content
  * @param {String} queryParams.sortBy - Sort field (default: createdAt)
  * @param {String} queryParams.sortOrder - Sort order (asc/desc, default: desc)
+ * @param {Object} [options]
+ * @param {Boolean} [options.includeDrafts] - The admin list: drafts too (default: published only)
  * @returns {Promise<Object>} Blogs with pagination info
  */
-const getAllBlogsService = async (queryParams = {}) => {
+const getAllBlogsService = async (queryParams = {}, { includeDrafts = false } = {}) => {
   try {
     const {
       page = 1,
@@ -28,8 +39,12 @@ const getAllBlogsService = async (queryParams = {}) => {
     // Build query
     const query = {};
     
-    // Apply filters
-    if (status) {
+    // Apply filters. The public list -- the blog pages and the website's
+    // sitemap -- is published posts only, whatever the query string asks
+    // for; drafts are for the admin list, which says so with includeDrafts.
+    if (!includeDrafts) {
+      query.status = 'published';
+    } else if (BLOG_STATUSES.includes(status)) {
       query.status = status;
     }
     
@@ -38,11 +53,12 @@ const getAllBlogsService = async (queryParams = {}) => {
     }
     
     // Search functionality
-    if (search) {
+    const term = search ? escapeRegex(String(search).trim().slice(0, 100)) : '';
+    if (term) {
       query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { content: { $regex: search, $options: 'i' } },
-        { metaKeywords: { $regex: search, $options: 'i' } }
+        { title: { $regex: term, $options: 'i' } },
+        { content: { $regex: term, $options: 'i' } },
+        { metaKeywords: { $regex: term, $options: 'i' } }
       ];
     }
     
@@ -110,3 +126,4 @@ const calculateReadingTime = (content) => {
 };
 
 module.exports = getAllBlogsService;
+module.exports.escapeRegex = escapeRegex;
