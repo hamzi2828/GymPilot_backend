@@ -753,23 +753,50 @@ async function consumeSession(order, { by = null, note = '' } = {}) {
   return updated;
 }
 
-/** Gives a session back -- a booking cancelled in time, a class the gym called off. */
+/**
+ * Gives a session back -- a booking cancelled in time, a class the gym called
+ * off. Returns the updated order (the one passed in when there was nothing to
+ * give back), or null when the order is not a pack.
+ *
+ * One conditional update, like consumeSession: "decrement used, but only
+ * while it is above zero". Subtracting one from the copy the caller read and
+ * saving it wrote that copy's count back, wiping out a session a booking had
+ * taken from the same pack in between.
+ */
 async function refundSession(order) {
   if (!order.sessions || !order.sessions.total) return null;
-  if ((order.sessions.used || 0) <= 0) return order;
-  order.sessions.used -= 1;
-  order.sessions.log = order.sessions.log || [];
-  order.sessions.log.push({ at: new Date(), by: null, note: 'refunded' });
-  // A pack that had just run out is live again.
-  if (order.sessions.exhaustedAt && order.sessions.used < order.sessions.total) {
-    order.sessions.exhaustedAt = null;
-    if (order.status === 'expired' && order.subscription && order.subscription.endDate && new Date(order.subscription.endDate) >= new Date()) {
-      order.status = 'active';
-      order.subscription.isActive = true;
+
+  const now = new Date();
+  let updated = await PackageOrder.findOneAndUpdate(
+    { _id: order._id, 'sessions.used': { $gt: 0 } },
+    { $inc: { 'sessions.used': -1 }, $push: { 'sessions.log': { at: now, by: null, note: 'refunded' } } },
+    { new: true }
+  );
+  if (!updated) return order;
+
+  // A pack that had just run out is live again. Conditional too: if a
+  // booking has already taken the session straight back, it stays spent.
+  const total = Number(updated.sessions.total) || 0;
+  if (updated.sessions.exhaustedAt && (updated.sessions.used || 0) < total) {
+    const set = { 'sessions.exhaustedAt': null };
+    const endDate = updated.subscription && updated.subscription.endDate;
+    if (updated.status === 'expired' && endDate && new Date(endDate) >= now) {
+      set.status = 'active';
+      set['subscription.isActive'] = true;
     }
+    const reopened = await PackageOrder.findOneAndUpdate(
+      { _id: order._id, status: updated.status, 'sessions.exhaustedAt': { $ne: null }, 'sessions.used': { $lt: total } },
+      { $set: set },
+      { new: true }
+    );
+    if (reopened) updated = reopened;
   }
-  await order.save();
-  return order;
+
+  // Keep the caller's document in step with what was written.
+  order.sessions = updated.sessions;
+  order.status = updated.status;
+  if (order.subscription && updated.subscription) order.subscription.isActive = updated.subscription.isActive;
+  return updated;
 }
 
 /* -------------------------------- refunds ------------------------------ */
@@ -818,6 +845,11 @@ async function refundablePaymentIntent(stripe, order) {
   return null;
 }
 
+// How long a refund under way holds its order. Far longer than the Stripe
+// calls behind it can take: a claim older than this was left by a process
+// that stopped part-way, and the next attempt may take it over.
+const REFUND_CLAIM_MS = 15 * 60 * 1000;
+
 /**
  * Refunds a paid order and ends the membership it bought.
  *
@@ -825,6 +857,8 @@ async function refundablePaymentIntent(stripe, order) {
  * says otherwise); cash, bank and terminal payments are simply recorded as
  * refunded -- the money moves by hand. Either way the order's subscription,
  * if it has one at Stripe, is cancelled, and the refund is kept on the order.
+ *
+ * An order is refunded once: afterwards it is 'refunded', partial or not.
  */
 async function refund(order, { amount, reason = '', by = null } = {}) {
   if (order.payment.status === 'refunded') throw new MembershipError('This order has already been refunded', 400);
@@ -851,43 +885,99 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
   const viaStripe =
     order.payment.method === 'stripe' || !!order.payment.stripePaymentIntentId || !!order.payment.stripeSessionId;
 
-  if (viaStripe) {
-    const stripe = await getStripe();
-    const intentId = await refundablePaymentIntent(stripe, order);
-    if (!intentId) {
-      throw new MembershipError('Could not find the Stripe payment behind this order. Refund it from the Stripe dashboard.', 409);
-    }
-    const params = { payment_intent: intentId };
-    // A full refund is left to Stripe to size: the charge may have been
-    // smaller than payment.amount if a Stripe promotion code was used.
-    if (wanted !== null) params.amount = toMinorUnits(wanted, currency);
-    const stripeRefund = await stripe.refunds.create(params);
-    record.stripeRefundId = stripeRefund.id;
-    if (stripeRefund.amount !== undefined && stripeRefund.amount !== null) {
-      record.amount = fromMinorUnits(stripeRefund.amount, stripeRefund.currency || currency);
-    }
+  // Claim the order before any money moves. The checks above read the copy
+  // the caller loaded, and two refunds sent together (a double click, two
+  // members of staff) both passed them and both refunded at Stripe. Only
+  // the request that sets the claim goes on.
+  const claimedAt = new Date();
+  const claim = await PackageOrder.updateOne(
+    {
+      _id: order._id,
+      'payment.status': 'paid',
+      $or: [{ 'refund.claimedAt': null }, { 'refund.claimedAt': { $lt: new Date(claimedAt.getTime() - REFUND_CLAIM_MS) } }]
+    },
+    { $set: { 'refund.claimedAt': claimedAt } }
+  );
+  if (!claim.matchedCount) {
+    const fresh = await PackageOrder.findById(order._id).select('payment.status').lean();
+    const status = fresh && fresh.payment ? fresh.payment.status : null;
+    if (status === 'refunded') throw new MembershipError('This order has already been refunded', 400);
+    if (status !== 'paid') throw new MembershipError('Only a paid order can be refunded', 400);
+    throw new MembershipError('This order is already being refunded', 409);
   }
 
-  // A refunded term is not one the member keeps: end it now, and stop the
-  // subscription behind it renewing.
-  if (order.status !== 'cancelled') {
-    await cancel(order, { reason: record.reason || 'Refunded', by, source: 'staff', immediate: true });
-  } else if (order.payment.stripeSubscriptionId) {
-    // Cancelled at period end earlier, so the subscription at Stripe is
-    // still running until then.
-    const stripe = await getStripe();
-    await stripe.subscriptions.cancel(order.payment.stripeSubscriptionId).catch((error) => {
-      if (!/No such subscription|already been canceled/i.test(error.message)) throw error;
-    });
-    order.subscription.autoRenew = false;
-    order.subscription.cancelAtPeriodEnd = false;
+  try {
+    if (viaStripe) {
+      const stripe = await getStripe();
+      const intentId = await refundablePaymentIntent(stripe, order);
+      if (!intentId) {
+        throw new MembershipError('Could not find the Stripe payment behind this order. Refund it from the Stripe dashboard.', 409);
+      }
+      const params = { payment_intent: intentId };
+      // A full refund is left to Stripe to size: the charge may have been
+      // smaller than payment.amount if a Stripe promotion code was used.
+      if (wanted !== null) params.amount = toMinorUnits(wanted, currency);
+      // Asking again for the same refund of the same order -- a retry after
+      // a timeout, or after a claim a stopped process left behind -- gets
+      // back the refund Stripe already made instead of making a second.
+      const idempotencyKey = `refund-${order._id}-${params.amount === undefined ? 'full' : params.amount}`;
+      const stripeRefund = await stripe.refunds.create(params, { idempotencyKey });
+      record.stripeRefundId = stripeRefund.id;
+      if (stripeRefund.amount !== undefined && stripeRefund.amount !== null) {
+        record.amount = fromMinorUnits(stripeRefund.amount, stripeRefund.currency || currency);
+      }
+    }
+
+    // A refunded term is not one the member keeps: end it now, and stop the
+    // subscription behind it renewing.
+    if (order.status !== 'cancelled') {
+      await cancel(order, { reason: record.reason || 'Refunded', by, source: 'staff', immediate: true });
+    } else if (order.payment.stripeSubscriptionId) {
+      // Cancelled at period end earlier, so the subscription at Stripe is
+      // still running until then.
+      const stripe = await getStripe();
+      await stripe.subscriptions.cancel(order.payment.stripeSubscriptionId).catch((error) => {
+        if (!/No such subscription|already been canceled/i.test(error.message)) throw error;
+      });
+      order.subscription.autoRenew = false;
+      order.subscription.cancelAtPeriodEnd = false;
+    }
+
+    // Finished only while the claim is still this request's; writing the
+    // whole refund block also clears the claim.
+    const finished = await PackageOrder.updateOne(
+      { _id: order._id, 'payment.status': 'paid', 'refund.claimedAt': claimedAt },
+      {
+        $set: {
+          'payment.status': 'refunded',
+          status: 'cancelled',
+          'subscription.isActive': false,
+          'subscription.autoRenew': order.subscription.autoRenew,
+          'subscription.cancelAtPeriodEnd': order.subscription.cancelAtPeriodEnd,
+          refund: record
+        }
+      }
+    );
+    if (!finished.matchedCount) {
+      // Only when this refund outlived its claim and another attempt took
+      // the order over; that attempt records the refund.
+      console.error(`[membership] refund of ${order.orderNumber} finished after its claim was taken over; check it against Stripe`);
+    }
+  } catch (error) {
+    // Let go, so the refund can be tried again rather than the order being
+    // stuck as under way. If the money did go back at Stripe before the
+    // failure, the idempotency key turns the retry into the same refund.
+    await PackageOrder.updateOne(
+      { _id: order._id, 'refund.claimedAt': claimedAt },
+      { $unset: { 'refund.claimedAt': 1 } }
+    ).catch(() => {});
+    throw error;
   }
 
   order.payment.status = 'refunded';
   order.status = 'cancelled';
   order.subscription.isActive = false;
   order.refund = record;
-  await order.save();
   return order;
 }
 

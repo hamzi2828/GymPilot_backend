@@ -20,6 +20,7 @@ const sessions = require('../services/classSessions');
 const { consumeSession, refundSession } = require('../services/membershipService');
 const { membershipFor, ensureMemberCode } = require('../../attendance/services/peopleDirectory');
 const notify = require('../../services/gymNotifications');
+const { afterResponse } = require('../../services/afterResponse');
 const T = require('../../attendance/services/timeUtils');
 
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
@@ -262,20 +263,17 @@ module.exports = {
         if (paused) return fail(res, 403, paused);
       }
 
+      // The places still free, by seat number ([] when the session is full).
+      // A class without a capacity does not number its places.
       const capacity = Number(gymClass.capacity) || 0;
-      const taken = await ClassBooking.countBooked(gymClass._id, date, startTime);
-      let full = capacity > 0 && taken >= capacity;
+      const seats = capacity > 0 ? await ClassBooking.freeSeats(gymClass._id, date, startTime, capacity) : [];
+      let full = capacity > 0 && !seats.length;
 
-      let waitlistPosition = null;
-      if (full) {
-        waitlistPosition = (await ClassBooking.countWaitlisted(gymClass._id, date, startTime)) + 1;
-      } else {
-        // A place on a session pack costs a credit; the waiting list costs
-        // nothing until a place actually comes free.
-        credit = await takeCredit(membership, rules, actorId, `${gymClass.name} ${date} ${startTime}`);
-      }
+      // A place on a session pack costs a credit; the waiting list costs
+      // nothing until a place actually comes free.
+      if (!full) credit = await takeCredit(membership, rules, actorId, `${gymClass.name} ${date} ${startTime}`);
 
-      let booking = await ClassBooking.create({
+      const fields = {
         classId: gymClass._id,
         className: gymClass.name,
         userId: member._id,
@@ -285,45 +283,48 @@ module.exports = {
         sessionStart: startTime,
         sessionEnd: slot.endTime || '',
         instructorName: (exception && exception.kind === 'substitute' && exception.instructorName) || slot.instructorName || '',
-        status: full ? 'waitlisted' : 'booked',
-        waitlistPosition,
         bookedBy: req.isStaffBooking ? 'staff' : 'member',
         bookedByUserId: actorId,
         membershipStatus: membership.status,
-        creditUsed: credit.creditUsed,
-        orderId: credit.orderId,
         notes: req.body.notes ? String(req.body.notes).trim() : ''
-      });
+      };
+      const place = { status: 'booked', creditUsed: credit.creditUsed, orderId: credit.orderId };
 
-      // Two members taking the last place at the same moment both counted a
-      // free place above. Counting again now that this booking is written
-      // settles it: whoever finds the session over capacity gives the place
-      // up and joins the waiting list, exactly as if it had been full -- so
-      // a class can never end up with more people than places.
-      if (!full && capacity > 0) {
-        const nowTaken = await ClassBooking.countBooked(gymClass._id, date, startTime);
-        if (nowTaken > capacity) {
-          const position = (await ClassBooking.countWaitlisted(gymClass._id, date, startTime)) + 1;
-          const moved = await ClassBooking.findOneAndUpdate(
-            { _id: booking._id, status: 'booked' },
-            { $set: { status: 'waitlisted', waitlistPosition: position, creditUsed: false, orderId: null } },
-            { new: true }
-          );
-          if (moved) {
-            // The waiting list costs nothing until a place comes free.
-            const spent = credit;
-            credit = { creditUsed: false, orderId: null };
-            if (spent.creditUsed) await giveCreditBack({ creditUsed: true, orderId: spent.orderId }).catch(() => {});
-            booking = moved;
-            full = true;
-            waitlistPosition = position;
-          }
+      // Two members after the last place both find it free above. Each
+      // writes its booking holding that place's number, and the unique index
+      // on the number lets exactly one of them have it; the other tries the
+      // next free number. Every free place is taken, and a class never ends
+      // up with more people than places.
+      let booking = null;
+      if (!capacity) booking = await ClassBooking.create({ ...fields, ...place });
+      for (const seat of seats) {
+        try {
+          booking = await ClassBooking.create({ ...fields, ...place, seat });
+          break;
+        } catch (error) {
+          if (!ClassBooking.seatTaken(error)) throw error;
         }
       }
 
-      // Fired, not awaited: a slow or misconfigured mail server must not hold
-      // up the response to somebody standing in the gym with their phone out.
-      notify.bookingCreated(booking, member);
+      // Full -- or every free place went to somebody else a moment ago, which
+      // is exactly as if it had been full, so the credit goes back: the
+      // waiting list costs nothing until a place comes free.
+      let waitlistPosition = null;
+      if (!booking) {
+        if (credit.creditUsed) {
+          const spent = credit;
+          credit = { creditUsed: false, orderId: null };
+          await giveCreditBack({ creditUsed: true, orderId: spent.orderId }).catch(() => {});
+        }
+        full = true;
+        waitlistPosition = (await ClassBooking.countWaitlisted(gymClass._id, date, startTime)) + 1;
+        booking = await ClassBooking.create({ ...fields, status: 'waitlisted', waitlistPosition });
+      }
+
+      // Not awaited: a slow or misconfigured mail server must not hold up the
+      // response to somebody standing in the gym with their phone out. Kept
+      // alive past the response on Vercel (services/afterResponse.js).
+      afterResponse(notify.bookingCreated(booking, member), 'booking notice');
 
       return res.status(201).json({
         success: true,
@@ -471,10 +472,14 @@ module.exports = {
       // promotes nobody.
       let promoted = null;
       if (heldAPlace) {
+        // The freed place is taken by its seat number, which needs the
+        // class's capacity to know which numbers there are.
+        const gymClass = await GymClass.findById(booking.classId).select('capacity').lean();
         promoted = await ClassBooking.promoteFromWaitlist(
           booking.classId,
           booking.sessionDate,
-          booking.sessionStart
+          booking.sessionStart,
+          Number(gymClass && gymClass.capacity) || 0
         );
         // The promoted member's pack pays for the place now that they have it.
         if (promoted) {
@@ -499,18 +504,24 @@ module.exports = {
       // Two people to tell: whoever gave the place up, and whoever just got
       // it. The second matters more -- a member on a waiting list has no way
       // to know a place came free unless we say so.
-      User.findById(booking.userId)
-        .select('firstName lastName email')
-        .lean()
-        .then((member) => notify.bookingCancelled(booking, member, !!req.isStaffBooking))
-        .catch(() => {});
-
-      if (promoted) {
-        User.findById(promoted.userId)
+      // Both run after the response, the member lookup included -- on Vercel
+      // a lookup still in flight when the response goes would never send.
+      afterResponse(
+        User.findById(booking.userId)
           .select('firstName lastName email')
           .lean()
-          .then((member) => notify.bookingPromoted(promoted, member))
-          .catch(() => {});
+          .then((member) => notify.bookingCancelled(booking, member, !!req.isStaffBooking)),
+        'booking cancelled notice'
+      );
+
+      if (promoted) {
+        afterResponse(
+          User.findById(promoted.userId)
+            .select('firstName lastName email')
+            .lean()
+            .then((member) => notify.bookingPromoted(promoted, member)),
+          'booking promoted notice'
+        );
       }
 
       return res.json({
@@ -583,6 +594,13 @@ module.exports = {
 
       const booking = await ClassBooking.findById(id);
       if (!booking) return fail(res, 404, 'Booking not found');
+
+      // Put back into a place by hand -- from a no-show, a cancellation or
+      // the waiting list. The seat number it had may belong to somebody else
+      // by now, so it goes back without one; it still counts as a place
+      // taken (see ClassBooking.freeSeats), the desk having overridden.
+      const holdsAPlace = (s) => ['booked', 'attended'].includes(s);
+      if (holdsAPlace(status) && !holdsAPlace(booking.status)) booking.seat = undefined;
 
       booking.status = status;
       booking.attendedAt = status === 'attended' ? new Date() : null;

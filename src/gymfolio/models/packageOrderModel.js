@@ -199,7 +199,11 @@ const packageOrderSchema = new mongoose.Schema(
       reason: { type: String, default: '' },
       at: { type: Date, default: null },
       byUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-      stripeRefundId: { type: String, default: null }
+      stripeRefundId: { type: String, default: null },
+      // Only while a refund is under way: when it was claimed, so a second
+      // refund of the same order is turned away (membershipService.refund).
+      // Gone once the refund is recorded or has failed.
+      claimedAt: { type: Date }
     },
     // Session packs: how many are on it and how many have been used.
     sessions: {

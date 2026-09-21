@@ -26,6 +26,10 @@ const { tenantModel } = require('../../platform/modelRegistry');
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+// The statuses that occupy one of the class's places. 'attended' still
+// occupies the place it was booked into; a no-show has given it up.
+const HOLDS_A_PLACE = ['booked', 'attended'];
+
 const classBookingSchema = new mongoose.Schema(
   {
     classId: {
@@ -96,6 +100,17 @@ const classBookingSchema = new mongoose.Schema(
     // an admin can reorder a queue if they have a reason to.
     waitlistPosition: { type: Number, default: null },
 
+    // Which of the class's places this booking holds, numbered 1..capacity.
+    // Taking a place means writing its number, and the unique index below
+    // lets only one booking hold each number -- that, not a count taken
+    // beforehand, is what keeps a session to its capacity when members book
+    // at the same moment. Absent on the waiting list, on classes without a
+    // capacity, and on bookings made before places were numbered (those
+    // still count; see freeSeats). Left in place when a booking is cancelled
+    // or marked a no-show: the index only covers bookings that hold a place,
+    // so the number is free again the moment the status changes.
+    seat: { type: Number },
+
     cancelledAt: { type: Date, default: null },
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     cancelReason: { type: String, default: '', trim: true },
@@ -162,6 +177,18 @@ classBookingSchema.index(
   }
 );
 
+// One booking per place: within a slot, no two bookings holding a place have
+// the same seat number. Partial for the same reason as the index above, and
+// only numbered rows are in it -- waiting-list rows, classes without a
+// capacity and bookings from before places were numbered have no seat.
+classBookingSchema.index(
+  { classId: 1, sessionDate: 1, sessionStart: 1, seat: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: { $in: HOLDS_A_PLACE }, seat: { $gt: 0 } }
+  }
+);
+
 // The count behind every capacity check.
 classBookingSchema.index({ classId: 1, sessionDate: 1, sessionStart: 1, status: 1 });
 // A member's own list, newest session first.
@@ -177,8 +204,40 @@ classBookingSchema.statics.countBooked = function (classId, sessionDate, session
     classId,
     sessionDate,
     sessionStart,
-    status: { $in: ['booked', 'attended'] }
+    status: { $in: HOLDS_A_PLACE }
   });
+};
+
+/**
+ * The seat numbers a booking may try for one slot, lowest first -- as many
+ * as there are places free, so an empty list means the session is full.
+ *
+ * A booking holding a place without a usable number (made before places
+ * were numbered, put back by the desk, or numbered above a capacity that has
+ * since been lowered) still takes up a place, so it is left out of what is
+ * offered. Offering only the lowest free numbers is what keeps that exact
+ * under a race: every number handed out stays within the places those
+ * bookings leave, and two members after the last place are offered the
+ * same number, which only one of them can write.
+ */
+classBookingSchema.statics.freeSeats = async function (classId, sessionDate, sessionStart, capacity) {
+  const held = await this.find({ classId, sessionDate, sessionStart, status: { $in: HOLDS_A_PLACE } })
+    .select('seat')
+    .lean();
+  const numbered = new Set(held.map((b) => b.seat).filter((seat) => seat > 0 && seat <= capacity));
+  const open = Math.max(0, capacity - held.length);
+  const seats = [];
+  for (let seat = 1; seat <= capacity && seats.length < open; seat++) {
+    if (!numbered.has(seat)) seats.push(seat);
+  }
+  return seats;
+};
+
+/** Whether a write failed because somebody else holds that seat number. */
+classBookingSchema.statics.seatTaken = function (error) {
+  if (!error || error.code !== 11000) return false;
+  if (error.keyPattern) return Object.prototype.hasOwnProperty.call(error.keyPattern, 'seat');
+  return /seat_1/.test(String(error.message || ''));
 };
 
 /** How many are queued for one slot. */
@@ -198,17 +257,34 @@ classBookingSchema.statics.countWaitlisted = function (classId, sessionDate, ses
  * waitlistPosition is stored: after this runs the queue is still 1..n with no
  * gaps, so "you are third in line" stays true without recomputing it on read.
  *
- * Returns the promoted booking, or null if nobody was waiting.
+ * The place is taken the way a new booking takes one, by writing a free
+ * seat number (see freeSeats), so a member booking at the same moment and
+ * the front of the queue cannot both have it. `capacity` is the class's;
+ * 0 (no limit) promotes without a number.
+ *
+ * Returns the promoted booking, or null if nobody was waiting or the place
+ * has already gone.
  */
-classBookingSchema.statics.promoteFromWaitlist = async function (classId, sessionDate, sessionStart) {
+classBookingSchema.statics.promoteFromWaitlist = async function (classId, sessionDate, sessionStart, capacity = 0) {
+  const seats = capacity > 0 ? await this.freeSeats(classId, sessionDate, sessionStart, capacity) : [null];
+
   // Taken off the queue with one conditional update, so two places freed at
   // the same moment go to two different people rather than both to the
   // front of the queue.
-  const next = await this.findOneAndUpdate(
-    { classId, sessionDate, sessionStart, status: 'waitlisted' },
-    { $set: { status: 'booked', waitlistPosition: null } },
-    { sort: { waitlistPosition: 1, createdAt: 1 }, new: true }
-  );
+  let next = null;
+  for (const seat of seats) {
+    try {
+      next = await this.findOneAndUpdate(
+        { classId, sessionDate, sessionStart, status: 'waitlisted' },
+        { $set: seat ? { status: 'booked', waitlistPosition: null, seat } : { status: 'booked', waitlistPosition: null } },
+        { sort: { waitlistPosition: 1, createdAt: 1 }, new: true }
+      );
+      break;
+    } catch (error) {
+      // That number went to somebody else a moment ago: try the next.
+      if (!this.seatTaken(error)) throw error;
+    }
+  }
 
   if (!next) return null;
 
