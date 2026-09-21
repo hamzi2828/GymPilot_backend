@@ -371,18 +371,33 @@ module.exports = {
     try {
       const range = L.readRange(req.query);
       const filter = { paidAt: { $gte: range.start, $lt: range.end } };
-      if (isId(req.query.memberId)) filter.memberId = req.query.memberId;
-      const rows = await Sale.find(filter).sort({ paidAt: -1 }).limit(500).lean();
+      // An ObjectId, not the string: aggregate() does not cast like find().
+      if (isId(req.query.memberId)) filter.memberId = new mongoose.Types.ObjectId(String(req.query.memberId));
+      // The list is capped; the summary is worked out over every sale in the
+      // range, so a busy till's totals are not just its latest 500 receipts.
+      const [rows, [summary]] = await Promise.all([
+        Sale.find(filter).sort({ paidAt: -1 }).limit(500).lean(),
+        Sale.aggregate([
+          { $match: { ...filter, status: 'paid' } },
+          {
+            $facet: {
+              byCurrency: [{ $group: { _id: '$currency', total: { $sum: '$total' }, n: { $sum: 1 } } }],
+              byMethod: [{ $group: { _id: '$paymentMethod', total: { $sum: '$total' } } }],
+              items: [{ $unwind: '$items' }, { $group: { _id: null, n: { $sum: '$items.quantity' } } }]
+            }
+          }
+        ])
+      ]);
       const totals = {};
       const byMethod = {};
-      let items = 0;
-      for (const s of rows) {
-        if (s.status !== 'paid') continue;
-        totals[s.currency] = round((totals[s.currency] || 0) + s.total);
-        byMethod[s.paymentMethod] = round((byMethod[s.paymentMethod] || 0) + s.total);
-        items += (s.items || []).reduce((n, i) => n + i.quantity, 0);
+      let sales = 0;
+      for (const row of summary.byCurrency) {
+        totals[row._id] = round(row.total);
+        sales += row.n;
       }
-      return res.json({ success: true, range: { from: range.from, to: range.to, label: L.rangeLabel(range.from, range.to) }, summary: { totals, by_method: byMethod, sales: rows.filter((s) => s.status === 'paid').length, items }, data: rows.map(saleView) });
+      for (const row of summary.byMethod) byMethod[row._id] = round(row.total);
+      const items = (summary.items[0] && summary.items[0].n) || 0;
+      return res.json({ success: true, range: { from: range.from, to: range.to, label: L.rangeLabel(range.from, range.to) }, summary: { totals, by_method: byMethod, sales, items }, data: rows.map(saleView) });
     } catch (error) {
       console.error('[pos] sales failed:', error);
       return fail(res, 500, 'Could not load sales');
@@ -393,13 +408,16 @@ module.exports = {
   refundSale: async (req, res) => {
     try {
       if (!isId(req.params.id)) return fail(res, 404, 'Sale not found');
-      const sale = await Sale.findById(req.params.id);
-      if (!sale) return fail(res, 404, 'Sale not found');
-      if (sale.status === 'refunded') return fail(res, 409, 'Already refunded');
-      sale.status = 'refunded';
-      sale.refundedAt = new Date();
-      sale.refundReason = String((req.body || {}).reason || '').trim().slice(0, 300);
-      await sale.save();
+      // One conditional update from paid to refunded: a double-click sends two
+      // refunds, and only the one that makes the change returns the stock.
+      const sale = await Sale.findOneAndUpdate(
+        { _id: req.params.id, status: 'paid' },
+        { $set: { status: 'refunded', refundedAt: new Date(), refundReason: String((req.body || {}).reason || '').trim().slice(0, 300) } },
+        { new: true }
+      );
+      if (!sale) {
+        return (await Sale.exists({ _id: req.params.id })) ? fail(res, 409, 'Already refunded') : fail(res, 404, 'Sale not found');
+      }
       const byName = await actorName(req);
       for (const item of sale.items) {
         if (!item.productId) continue;
