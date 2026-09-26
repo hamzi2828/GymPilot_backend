@@ -3,9 +3,9 @@
 // as it was, so a rename is "copy, switch the env, check, then drop the old
 // one by hand".
 //
-//   node scripts/platform/copyDatabase.js --from gymwear --to GymPilot --dry-run
-//   node scripts/platform/copyDatabase.js --from gymwear --to GymPilot
-//   node scripts/platform/copyDatabase.js --from gymwear --to GymPilot --overwrite
+//   node scripts/platform/copyDatabase.js --from old_db --to GymPilot --dry-run
+//   node scripts/platform/copyDatabase.js --from old_db --to GymPilot
+//   node scripts/platform/copyDatabase.js --from old_db --to GymPilot --overwrite
 //
 // A target that already holds documents is refused unless --overwrite is
 // given, which drops the target's matching collections first.

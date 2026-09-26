@@ -1,4 +1,4 @@
-process.env.MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/gymwear';
+process.env.MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/gympilot_demo';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

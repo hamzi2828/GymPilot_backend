@@ -1,12 +1,12 @@
 // Back up one gym's database (or every gym's) to compressed JSON files.
 //
-//   node scripts/backupGym.js --gym thejymor [--out backups]
+//   node scripts/backupGym.js --gym demo [--out backups]
 //   node scripts/backupGym.js --all         [--out backups]
 //
 // Writes backups/<slug>/<timestamp>/<collection>.jsonl.gz -- one document
 // per line, in MongoDB Extended JSON, so `mongoimport --gzip` restores it:
 //
-//   gunzip -c backups/thejymor/2026-09-07T05-00-00/users.jsonl.gz | \
+//   gunzip -c backups/demo/2026-09-07T05-00-00/users.jsonl.gz | \
 //     mongoimport --uri "$MONGO_URI" --db GymPilot --collection users
 //
 // Schedule it (cron, Task Scheduler, a GitHub Action) and copy the folder

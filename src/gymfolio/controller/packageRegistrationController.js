@@ -20,10 +20,10 @@ const createRegistration = async (req, res) => {
     }
 
     // Validate platform
-    if (!['gymwear', 'gymfolio'].includes(platform)) {
+    if (platform !== 'gymfolio') {
       return res.status(400).json({
         success: false,
-        message: 'Platform must be either gymwear or gymfolio'
+        message: "Platform must be 'gymfolio'"
       });
     }
 

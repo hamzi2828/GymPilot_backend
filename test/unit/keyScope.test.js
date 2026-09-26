@@ -21,7 +21,7 @@ const { seal, open, usesLegacyKey } = require('../../src/services/secretBox');
 const Fingerprint = require('../../src/attendance/models/fingerprintModel');
 const { runWithTenant } = require('../../src/platform/tenantContext');
 
-const jymor = { _id: '0000000000000000000000a1', slug: 'thejymor', database: { name: 'gympilot_unit_thejymor' } };
+const demoGym = { _id: '0000000000000000000000a1', slug: 'demo', database: { name: 'gympilot_unit_demo' } };
 const other = { _id: '0000000000000000000000a2', slug: 'ironworks', database: { name: 'gympilot_unit_ironworks' } };
 
 // Sets (or, with undefined, removes) env vars for the length of fn.
@@ -55,40 +55,40 @@ async function quietly(fn) {
 test('the legacy gym is named by LEGACY_KEY_TENANT_SLUG, falling back to DEFAULT_TENANT_SLUG', async () => {
   assert.equal(usesLegacyKey(null), true, 'outside any gym');
 
-  await withEnv({ DEFAULT_TENANT_SLUG: 'thejymor', LEGACY_KEY_TENANT_SLUG: undefined }, () => {
-    assert.equal(usesLegacyKey(jymor), true, 'today: the default gym');
+  await withEnv({ DEFAULT_TENANT_SLUG: 'demo', LEGACY_KEY_TENANT_SLUG: undefined }, () => {
+    assert.equal(usesLegacyKey(demoGym), true, 'today: the default gym');
     assert.equal(usesLegacyKey(other), false);
   });
 
-  await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: 'thejymor' }, () => {
-    assert.equal(usesLegacyKey(jymor), true, 'default unset, legacy slug kept');
+  await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: 'demo' }, () => {
+    assert.equal(usesLegacyKey(demoGym), true, 'default unset, legacy slug kept');
     assert.equal(usesLegacyKey(other), false);
   });
 
-  await withEnv({ DEFAULT_TENANT_SLUG: 'ironworks', LEGACY_KEY_TENANT_SLUG: 'thejymor' }, () => {
-    assert.equal(usesLegacyKey(jymor), true, 'the legacy slug wins over the default');
+  await withEnv({ DEFAULT_TENANT_SLUG: 'ironworks', LEGACY_KEY_TENANT_SLUG: 'demo' }, () => {
+    assert.equal(usesLegacyKey(demoGym), true, 'the legacy slug wins over the default');
     assert.equal(usesLegacyKey(other), false);
   });
 
   await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: undefined }, () => {
-    assert.equal(usesLegacyKey(jymor), false, 'neither set: every gym has its own key');
+    assert.equal(usesLegacyKey(demoGym), false, 'neither set: every gym has its own key');
   });
 });
 
 test('settings secrets still open after DEFAULT_TENANT_SLUG is removed, when LEGACY_KEY_TENANT_SLUG is set', async () => {
-  let sealedByJymor;
+  let sealedByDemo;
   let sealedByOther;
-  await withEnv({ DEFAULT_TENANT_SLUG: 'thejymor', LEGACY_KEY_TENANT_SLUG: undefined }, async () => {
-    sealedByJymor = await runWithTenant(jymor, () => seal('sk_live_jymor'));
+  await withEnv({ DEFAULT_TENANT_SLUG: 'demo', LEGACY_KEY_TENANT_SLUG: undefined }, async () => {
+    sealedByDemo = await runWithTenant(demoGym, () => seal('sk_live_demo'));
     sealedByOther = await runWithTenant(other, () => seal('sk_live_ironworks'));
   });
   // The scope is the original, un-suffixed one: what a pre-platform process
   // (no gym in context) sealed.
   const sealedBeforePlatform = seal('smtp-password-from-2025');
 
-  await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: 'thejymor' }, async () => {
-    await runWithTenant(jymor, () => {
-      assert.equal(open(sealedByJymor), 'sk_live_jymor');
+  await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: 'demo' }, async () => {
+    await runWithTenant(demoGym, () => {
+      assert.equal(open(sealedByDemo), 'sk_live_demo');
       assert.equal(open(sealedBeforePlatform), 'smtp-password-from-2025');
     });
     await runWithTenant(other, () => assert.equal(open(sealedByOther), 'sk_live_ironworks'));
@@ -97,22 +97,22 @@ test('settings secrets still open after DEFAULT_TENANT_SLUG is removed, when LEG
   // What happened before this setting existed: unsetting the default re-keyed
   // the gym and its secrets silently became "not set".
   await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: undefined }, () =>
-    quietly(() => runWithTenant(jymor, () => assert.equal(open(sealedByJymor), '')))
+    quietly(() => runWithTenant(demoGym, () => assert.equal(open(sealedByDemo), '')))
   );
 });
 
 test('fingerprint templates follow the same rule', async () => {
   let stored;
-  await withEnv({ DEFAULT_TENANT_SLUG: 'thejymor', LEGACY_KEY_TENANT_SLUG: undefined }, async () => {
-    stored = await runWithTenant(jymor, () => Fingerprint.encryptTemplate('UEVSU09O'));
+  await withEnv({ DEFAULT_TENANT_SLUG: 'demo', LEGACY_KEY_TENANT_SLUG: undefined }, async () => {
+    stored = await runWithTenant(demoGym, () => Fingerprint.encryptTemplate('UEVSU09O'));
   });
 
-  await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: 'thejymor' }, async () => {
-    await runWithTenant(jymor, () => assert.equal(Fingerprint.decryptTemplate(stored), 'UEVSU09O'));
+  await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: 'demo' }, async () => {
+    await runWithTenant(demoGym, () => assert.equal(Fingerprint.decryptTemplate(stored), 'UEVSU09O'));
     await runWithTenant(other, () => assert.equal(Fingerprint.decryptTemplate(stored), null, 'another gym cannot read it'));
   });
 
   await withEnv({ DEFAULT_TENANT_SLUG: undefined, LEGACY_KEY_TENANT_SLUG: undefined }, async () => {
-    await runWithTenant(jymor, () => assert.equal(Fingerprint.decryptTemplate(stored), null));
+    await runWithTenant(demoGym, () => assert.equal(Fingerprint.decryptTemplate(stored), null));
   });
 });

@@ -5,8 +5,8 @@
 // so deploying this feature gives nobody anything until you run this.
 //
 //   node scripts/attendanceAccess.js list
-//   node scripts/attendanceAccess.js grant desk@thejymor.com --enroll --location "Johar Town"
-//   node scripts/attendanceAccess.js revoke desk@thejymor.com
+//   node scripts/attendanceAccess.js grant desk@demogym.test --enroll --location "Johar Town"
+//   node scripts/attendanceAccess.js revoke desk@demogym.test
 //
 // `grant` without --enroll gives sign-in only: that account can record
 // attendance but not register new fingerprints.

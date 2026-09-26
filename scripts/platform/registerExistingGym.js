@@ -8,10 +8,10 @@
 // the running app already does on first use.
 //
 //   node scripts/platform/registerExistingGym.js \
-//        --name "The Jymor" --slug thejymor --db GymPilot \
-//        --domain thejymor.com --domain localhost:3000 \
+//        --name "Demo Gym" --slug demo --db GymPilot \
+//        --domain demogym.example --domain localhost:3000 \
 //        --timezone Asia/Karachi --currency PKR \
-//        [--owner-email owner@thejymor.com] [--plan <plan-slug>]
+//        [--owner-email owner@demogym.example] [--plan <plan-slug>]
 //
 // Then set DEFAULT_TENANT_SLUG=<slug> in .env so requests that carry no
 // recognisable domain (plain localhost, curl) still reach this gym.

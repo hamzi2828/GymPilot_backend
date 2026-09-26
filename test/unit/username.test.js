@@ -56,14 +56,14 @@ test('an unknown or missing colour scheme falls back to the default', () => {
 test('a gym logo the phone app can load', () => {
   // Uploaded logos are already absolute and are left exactly as they are.
   const blob = 'https://blob.example.com/logos/lift.png';
-  assert.equal(absoluteAsset(blob, 'https://thejymor.com', 'https://api.gympilot.app'), blob);
+  assert.equal(absoluteAsset(blob, 'https://demogym.example', 'https://api.gympilot.app'), blob);
 
   // A relative path belongs to the gym's own website, not to the API, and the
   // first origin offered wins.
-  assert.equal(absoluteAsset('/images/logo.png', 'https://thejymor.com/', ''), 'https://thejymor.com/images/logo.png');
-  assert.equal(absoluteAsset('images/logo.png', '', 'https://thejymor.com'), 'https://thejymor.com/images/logo.png');
+  assert.equal(absoluteAsset('/images/logo.png', 'https://demogym.example/', ''), 'https://demogym.example/images/logo.png');
+  assert.equal(absoluteAsset('images/logo.png', '', 'https://demogym.example'), 'https://demogym.example/images/logo.png');
 
   // Nothing to resolve against, and nothing to resolve.
   assert.equal(absoluteAsset('/images/logo.png'), '/images/logo.png');
-  assert.equal(absoluteAsset('', 'https://thejymor.com'), '');
+  assert.equal(absoluteAsset('', 'https://demogym.example'), '');
 });

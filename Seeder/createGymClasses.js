@@ -73,7 +73,7 @@ const classTemplates = [
     rating: 4.9,
     reviewsCount: 87,
     enrolledCount: 145,
-    trainerEmail: 'emily.rodriguez@gymwear.com',
+    trainerEmail: 'emily.rodriguez@demogym.test',
     schedule: [
       { day: 'Monday', startTime: '07:00', endTime: '08:00' },
       { day: 'Wednesday', startTime: '07:00', endTime: '08:00' },
@@ -139,7 +139,7 @@ const classTemplates = [
     rating: 4.8,
     reviewsCount: 112,
     enrolledCount: 198,
-    trainerEmail: 'marcus.chen@gymwear.com',
+    trainerEmail: 'marcus.chen@demogym.test',
     schedule: [
       { day: 'Monday', startTime: '06:00', endTime: '06:45' },
       { day: 'Wednesday', startTime: '06:00', endTime: '06:45' },
@@ -211,7 +211,7 @@ const classTemplates = [
     rating: 4.9,
     reviewsCount: 95,
     enrolledCount: 167,
-    trainerEmail: 'david.thompson@gymwear.com',
+    trainerEmail: 'david.thompson@demogym.test',
     schedule: [
       { day: 'Tuesday', startTime: '18:00', endTime: '19:00' },
       { day: 'Thursday', startTime: '18:00', endTime: '19:00' },
@@ -284,7 +284,7 @@ const classTemplates = [
     rating: 4.7,
     reviewsCount: 156,
     enrolledCount: 234,
-    trainerEmail: 'jessica.martinez@gymwear.com',
+    trainerEmail: 'jessica.martinez@demogym.test',
     schedule: [
       { day: 'Monday', startTime: '18:00', endTime: '18:50' },
       { day: 'Wednesday', startTime: '18:00', endTime: '18:50' },
@@ -358,7 +358,7 @@ const classTemplates = [
     rating: 4.8,
     reviewsCount: 73,
     enrolledCount: 128,
-    trainerEmail: 'sarah.johnson@gymwear.com',
+    trainerEmail: 'sarah.johnson@demogym.test',
     schedule: [
       { day: 'Tuesday', startTime: '08:00', endTime: '09:00' },
       { day: 'Thursday', startTime: '08:00', endTime: '09:00' },
@@ -424,7 +424,7 @@ const classTemplates = [
     rating: 5.0,
     reviewsCount: 42,
     enrolledCount: 56,
-    trainerEmail: 'sarah.johnson@gymwear.com',
+    trainerEmail: 'sarah.johnson@demogym.test',
     schedule: [
       { day: 'Monday', startTime: '17:00', endTime: '18:30' },
       { day: 'Thursday', startTime: '17:00', endTime: '18:30' }
@@ -497,7 +497,7 @@ const classTemplates = [
     rating: 4.9,
     reviewsCount: 68,
     enrolledCount: 102,
-    trainerEmail: 'emily.rodriguez@gymwear.com',
+    trainerEmail: 'emily.rodriguez@demogym.test',
     schedule: [
       { day: 'Tuesday', startTime: '19:00', endTime: '20:15' },
       { day: 'Sunday', startTime: '17:00', endTime: '18:15' }
@@ -560,7 +560,7 @@ const classTemplates = [
     rating: 4.7,
     reviewsCount: 54,
     enrolledCount: 89,
-    trainerEmail: 'marcus.chen@gymwear.com',
+    trainerEmail: 'marcus.chen@demogym.test',
     schedule: [
       { day: 'Tuesday', startTime: '17:00', endTime: '17:45' },
       { day: 'Thursday', startTime: '17:00', endTime: '17:45' },

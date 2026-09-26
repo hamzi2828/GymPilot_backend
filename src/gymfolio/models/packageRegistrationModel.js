@@ -1,4 +1,4 @@
-// packageRegistrationModel.js - Package Registration Model for GymFolio/Gymwear
+// packageRegistrationModel.js - Package Registration Model for the gym website
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
@@ -31,8 +31,8 @@ const packageRegistrationSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Platform is required'],
       enum: {
-        values: ['gymwear', 'gymfolio'],
-        message: 'Platform must be either gymwear or gymfolio'
+        values: ['gymfolio'],
+        message: 'Platform must be gymfolio'
       }
     },
     status: {

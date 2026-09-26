@@ -123,9 +123,9 @@ plan is left off and noted in the request's `warnings`.
 
 ```bash
 # 1. Register the gym that already exists (its data stays where it is)
-node scripts/platform/registerExistingGym.js --name "The Jymor" --slug thejymor --db GymPilot \
-     --domain thejymor.com --domain localhost:3000 --timezone Asia/Karachi --currency PKR
-#    then in .env:  DEFAULT_TENANT_SLUG=thejymor   (single-gym / dev only)
+node scripts/platform/registerExistingGym.js --name "Demo Gym" --slug demo --db GymPilot \
+     --domain demogym.example --domain localhost:3000 --timezone Asia/Karachi --currency PKR
+#    then in .env:  DEFAULT_TENANT_SLUG=demo   (single-gym / dev only)
 
 # 2. A super admin
 node scripts/platform/createSuperAdmin.js you@yourcompany.com "a strong password" --name "You"
@@ -207,9 +207,9 @@ Every script that touches gym data takes `--gym <slug>` (or uses
 `DEFAULT_TENANT_SLUG`):
 
 ```bash
-node scripts/expireMemberships.js --gym thejymor --apply
-node scripts/sendReminders.js --gym thejymor --send
-node scripts/attendanceAccess.js --gym thejymor grant desk@thejymor.com --enroll
+node scripts/expireMemberships.js --gym demo --apply
+node scripts/sendReminders.js --gym demo --send
+node scripts/attendanceAccess.js --gym demo grant desk@demogym.example --enroll
 npm run seed:classes -- --gym demo-gym
 ```
 

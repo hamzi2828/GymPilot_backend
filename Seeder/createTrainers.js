@@ -25,7 +25,7 @@ const trainerTemplates = [
     role: 'Head Personal Trainer & Strength Coach',
     bio: 'Sarah is a certified personal trainer with over 10 years of experience in strength training and athletic conditioning. She specializes in helping clients build functional strength and achieve their fitness goals through personalized training programs. Her approach combines traditional strength training with modern sports science to deliver exceptional results. Sarah has worked with professional athletes, busy professionals, and fitness enthusiasts of all levels.',
     image: '/uploads/trainer-1.svg',
-    email: 'sarah.johnson@gymwear.com',
+    email: 'sarah.johnson@demogym.test',
     phone: '+1 (555) 123-4567',
     specialties: [
       'Strength Training',
@@ -66,7 +66,7 @@ const trainerTemplates = [
     role: 'HIIT & Cardio Specialist',
     bio: 'Marcus brings energy and expertise to every high-intensity interval training session. With a background in competitive athletics and exercise physiology, he creates challenging yet achievable workouts that maximize calorie burn and improve cardiovascular fitness. His classes are known for their perfect blend of intensity, motivation, and fun. Marcus believes that fitness should be enjoyable and sustainable for long-term success.',
     image: '/uploads/trainer2.svg',
-    email: 'marcus.chen@gymwear.com',
+    email: 'marcus.chen@demogym.test',
     phone: '+1 (555) 234-5678',
     specialties: [
       'HIIT Training',
@@ -106,7 +106,7 @@ const trainerTemplates = [
     role: 'Yoga & Pilates Instructor',
     bio: 'Emily is a passionate yoga and Pilates instructor dedicated to helping students find balance, flexibility, and inner peace. With her gentle yet effective teaching style, she guides practitioners of all levels through mindful movement and breath work. Emily completed her 500-hour yoga teacher training in India and has studied various styles including Vinyasa, Hatha, and Restorative yoga. She believes in the transformative power of mindful movement.',
     image: '/uploads/trainer3.svg',
-    email: 'emily.rodriguez@gymwear.com',
+    email: 'emily.rodriguez@demogym.test',
     phone: '+1 (555) 345-6789',
     specialties: [
       'Vinyasa Yoga',
@@ -149,7 +149,7 @@ const trainerTemplates = [
     role: 'CrossFit Coach & Nutrition Specialist',
     bio: 'David is a former competitive CrossFit athlete turned coach who brings intense passion and technical expertise to his training sessions. He specializes in functional fitness movements and believes in building well-rounded athletes. Beyond the gym, David is also a certified nutrition coach who helps clients optimize their diet for performance and recovery. His holistic approach addresses both training and nutrition to help clients achieve remarkable transformations.',
     image: '/uploads/trainer4.svg',
-    email: 'david.thompson@gymwear.com',
+    email: 'david.thompson@demogym.test',
     phone: '+1 (555) 456-7890',
     specialties: [
       'CrossFit Training',
@@ -191,7 +191,7 @@ const trainerTemplates = [
     role: 'Group Fitness & Dance Instructor',
     bio: 'Jessica is an energetic and motivating group fitness instructor who makes every class feel like a party. With a background in dance and choreography, she brings creativity and fun to traditional fitness formats. Her classes range from dance-based cardio to strength training, always infused with great music and positive vibes. Jessica is passionate about creating an inclusive environment where everyone feels welcome and empowered to move their body.',
     image: '/uploads/trainer5.svg',
-    email: 'jessica.martinez@gymwear.com',
+    email: 'jessica.martinez@demogym.test',
     phone: '+1 (555) 567-8901',
     specialties: [
       'Zumba & Dance Fitness',

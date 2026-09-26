@@ -8,8 +8,8 @@ it is code.
 
 | Variable | Value | Why |
 |---|---|---|
-| `DEFAULT_TENANT_SLUG` | `thejymor` **for now** | The pre-platform gym keeps using the env `STRIPE_*` keys and `FRONTEND_ORIGIN` only while it is the default gym. Unset it once The Jymor has its own Stripe keys in Settings → Stripe and you run more than one gym — **but only after** `LEGACY_KEY_TENANT_SLUG` below is set. |
-| `LEGACY_KEY_TENANT_SLUG` | `thejymor`, **permanently** | Names the gym whose stored secrets (Stripe, SMTP, SMS/WhatsApp tokens, push VAPID key under Settings) and fingerprint templates were encrypted before keys carried a gym id. While unset it falls back to `DEFAULT_TENANT_SLUG`, so today nothing changes — but unsetting `DEFAULT_TENANT_SLUG` without it re-keys The Jymor: every one of those secrets silently reads back empty (card payments and email stop) and no desk can match a single finger. Set it before touching `DEFAULT_TENANT_SLUG`, and never change or remove it. |
+| `DEFAULT_TENANT_SLUG` | `demo` **for now** | A request that names no gym is served the demo gym, and that gym keeps using the env `STRIPE_*` keys and `FRONTEND_ORIGIN`. Unset it once the demo gym has its own Stripe keys in Settings → Stripe and you run real gyms beside it — **but only after** `LEGACY_KEY_TENANT_SLUG` below is set. |
+| `LEGACY_KEY_TENANT_SLUG` | `demo`, **permanently** | Names the gym whose stored secrets (Stripe, SMTP, SMS/WhatsApp tokens, push VAPID key under Settings) and fingerprint templates were encrypted before keys carried a gym id — the demo gym, which started life as the single-gym install. While unset it falls back to `DEFAULT_TENANT_SLUG`, so nothing changes until that is removed — and unsetting `DEFAULT_TENANT_SLUG` without this set re-keys that gym: every one of those secrets silently reads back empty (card payments and email stop) and no desk can match a single finger. It follows the gym's slug, so set it again if the slug is ever changed. |
 | `SETTINGS_ENCRYPTION_KEY` | the **current** `JWT_SECRET` value, copied | Seals each gym's Settings secrets at rest. While unset it falls back to `JWT_SECRET`, so rotating `JWT_SECRET` would turn every stored Stripe key, SMTP password and messaging token into an empty value. Copying today's `JWT_SECRET` here keeps them readable and frees `JWT_SECRET` to be rotated later. Never change it once set. |
 | `PLATFORM_DB_NAME` | leave unset (= `GymPilot`, the `MONGO_URI` database) | Gyms, plans and super admins live in the main database beside the first gym's data. |
 | `TENANT_DB_PREFIX` | leave unset (= `GymPilot_`) | New gyms get `GymPilot_<slug>` on the same cluster. |
@@ -83,10 +83,10 @@ self-serve sign-up pays with (BILLING.md → *Platform billing*):
   payment_intent.succeeded, payment_intent.payment_failed`.
 * **Billing → Customer portal**: activate the default configuration once, or
   "Manage card" in the member portal fails.
-* For The Jymor, while `DEFAULT_TENANT_SLUG=thejymor`, the env keys apply and
+* For the demo gym, while `DEFAULT_TENANT_SLUG=demo`, the env keys apply and
   the existing `/api/gymfolio/payment/webhook` endpoint keeps working.
-* Before unsetting `DEFAULT_TENANT_SLUG`: set `LEGACY_KEY_TENANT_SLUG=thejymor`
-  and redeploy, then check The Jymor's Settings → Stripe / Email still show
+* Before unsetting `DEFAULT_TENANT_SLUG`: set `LEGACY_KEY_TENANT_SLUG=demo`
+  and redeploy, then check the demo gym's Settings → Stripe / Email still show
   their keys and a front desk still matches fingers. Only then unset
   `DEFAULT_TENANT_SLUG`.
 
@@ -109,7 +109,7 @@ online or staff recorded consent under Users.
 ## 5. After the first deploy
 
 1. Deploy `GymPilot_frontendAdmin` (marketing site + platform panel) with `NEXT_PUBLIC_BACKEND_URL` and `NEXT_PUBLIC_SITE_URL` set, and put its origin in the API's `PLATFORM_ADMIN_ORIGIN`. Sign in at `<that origin>/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
-2. Create your platform plans (**Plans**) and put The Jymor on one.
+2. Create your platform plans (**Plans**) and put the demo gym on one.
 3. Provision new gyms from **Gyms → New gym**; each owner lands in the setup
    wizard at `/admin/setup`. Gyms can also sign up and pay on their own at
    `<PLATFORM_ADMIN_ORIGIN>/checkout` once `PLATFORM_ROOT_DOMAIN` and the

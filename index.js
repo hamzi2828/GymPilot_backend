@@ -78,8 +78,6 @@ const STATIC_ORIGINS = new Set(
     ...originList(process.env.PLATFORM_ADMIN_ORIGIN),
     'http://localhost:3000',
     'http://localhost:3001',
-    'https://www.thejymor.com',
-    'https://thejymor.com',
     ...originList(process.env.EXTRA_CORS_ORIGINS)
   ]
     .map(normalizeOrigin)

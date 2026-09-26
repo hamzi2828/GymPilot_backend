@@ -1,9 +1,9 @@
 // Give every existing account a username, and publish it to the platform
 // directory the phone app signs in against.
 //
-//   node scripts/assignUsernames.js --gym thejymor --dry-run
-//   node scripts/assignUsernames.js --gym thejymor
-//   node scripts/assignUsernames.js --gym thejymor --repair
+//   node scripts/assignUsernames.js --gym demo --dry-run
+//   node scripts/assignUsernames.js --gym demo
+//   node scripts/assignUsernames.js --gym demo --repair
 //
 // Accounts created from now on get one automatically (a hook on the user
 // model); this is only for the ones that already existed. Safe to re-run:
