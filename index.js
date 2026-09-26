@@ -583,11 +583,15 @@ app.use((error, req, res, next) => {
     return res.status(413).json({ success: false, error: 'Payload too large', message: 'The request body is too large.' });
   }
 
-  // Default error handler
+  // Default error handler. Only something nobody wrote a message for reaches
+  // here, so the message is whatever the library that threw it says -- a
+  // driver or validation string that can name a field, a collection or a
+  // host. It goes to the log, where it is useful, and the caller is told the
+  // same thing every time.
   console.error(error);
-  res.status(500).json({ 
-    error: 'Internal server error', 
-    message: error.message || 'Something went wrong' 
+  res.status(500).json({
+    error: 'Internal server error',
+    message: 'Something went wrong'
   });
 });
 

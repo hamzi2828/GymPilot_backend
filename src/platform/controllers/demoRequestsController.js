@@ -286,6 +286,13 @@ module.exports = {
         kind: result.data.kind,
         createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
       });
+      // Whether a confirmation can go out at all. The emails below are sent
+      // after the response, so nobody can wait on their result -- but a
+      // platform with no sender configured will certainly send nothing, and
+      // the page must not promise an email that cannot arrive.
+      const { platformEmailConfigured } = require('./signupController');
+      const emailed = platformEmailConfigured();
+
       if (recent) {
         // Somebody going back to fix a typo or change their mind: everything
         // they sent the second time replaces the first on the same record --
@@ -297,7 +304,7 @@ module.exports = {
           recent.warnings = priced.warnings;
         }
         await recent.save();
-        return res.status(201).json({ success: true, message: THANKS, id: String(recent._id) });
+        return res.status(201).json({ success: true, message: THANKS, id: String(recent._id), emailed });
       }
 
       const doc = await DemoRequest.create({
@@ -310,7 +317,7 @@ module.exports = {
       // Not waited for, but kept alive on Vercel until they have gone.
       afterResponse(() => notifyAdmins(doc), 'demo request email to admins');
       afterResponse(() => confirmToRequester(doc), 'demo request confirmation');
-      return res.status(201).json({ success: true, message: THANKS, id: String(doc._id) });
+      return res.status(201).json({ success: true, message: THANKS, id: String(doc._id), emailed });
     } catch (error) {
       console.error('[platform] demo request failed:', error);
       return res.status(500).json({ success: false, message: 'Could not send your request right now. Please try again.' });
