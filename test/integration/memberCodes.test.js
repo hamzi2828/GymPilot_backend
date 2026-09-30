@@ -130,3 +130,23 @@ test('the Users list carries the ID and phone, and finds a member by either', as
   const byPhone = await call({ search: '0700 000002' });
   assert.deepEqual(byPhone.body.data.map((u) => u.firstName), ['Second']);
 });
+
+test('a code imported in another width does not stop the series', async () => {
+  // "GP-101" from an old system beside the series' own "GP-0102".."GP-0104":
+  // as strings "GP-101" is the highest, so every try at the next code used
+  // to land on a taken one and the member was left with none.
+  await h.inGym(gym, async () => {
+    await User.create({ firstName: 'Old', lastName: 'Width', phone: '0700 000101', memberCode: 'GP-101' });
+    for (const memberCode of ['GP-0102', 'GP-0103', 'GP-0104']) {
+      await User.create({ firstName: 'Taken', lastName: memberCode, phone: `0700 ${memberCode}`, memberCode });
+    }
+  });
+  const highest = Math.max(
+    ...(await h.inGym(gym, () => User.find({ memberCode: /^GP-\d+$/ }).select('memberCode').lean())).map((u) => number(u.memberCode))
+  );
+
+  const res = await create({ firstName: 'After', lastName: 'Import', phone: '0700 000105' });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.match(res.body.data.memberCode || '', CODE);
+  assert.equal(number(res.body.data.memberCode), highest + 1, 'the next number after the highest, whatever its width');
+});
