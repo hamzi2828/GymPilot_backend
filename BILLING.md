@@ -19,6 +19,13 @@ Packages**.
 | `sessions` | sessions on a pack (packs expire when used up or when `durationDays` passes) |
 | `joiningFee` | charged once, on top of a member's first membership: not to anyone who has had a paid (or refunded) membership before, and never on a renewal or a package change (`membershipService.joiningFeeDue`) |
 
+A package members still hold cannot be deleted: `DELETE /packages/:id`
+answers `409 { code: 'PACKAGE_IN_USE', live, renewable }` while any order
+for it is running or awaiting payment (`live`), or is a lapsed membership
+that is still its member's latest order (`renewable` — the desk may renew
+it, and renewing reads the package). Deactivate it instead; the Packages
+screen offers that on the refusal.
+
 ## Ways to pay
 
 `GET /api/gymfolio/payment/methods` tells the checkout which are available.

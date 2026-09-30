@@ -1,4 +1,6 @@
+const mongoose = require('mongoose');
 const Package = require('../models/packageModel');
+const PackageOrder = require('../models/packageOrderModel');
 const { currencyOr } = require('../../services/currency');
 const { parseAmount } = require('../../helper/money');
 
@@ -336,16 +338,72 @@ const updatePackageOrder = async (req, res) => {
   }
 };
 
-// Delete package
+// Who still depends on a package, as far as deleting it goes.
+//
+// `live`: orders that are running or waiting on a payment -- a paid
+// membership that is active, frozen or past due, or a pending one (a bank
+// transfer yet to be confirmed). `renewable`: lapsed memberships that are
+// still their member's latest order, i.e. the member has not come back on
+// anything since, so the desk may yet renew them. Renewing reads the package
+// itself (membershipService.renew), so either kind breaks once it is gone.
+// Guest orders are left out of `renewable`: with no account there is nothing
+// to renew.
+async function packageHolders(packageId) {
+  const live = await PackageOrder.countDocuments({
+    packageId,
+    $or: [
+      { 'payment.status': 'paid', status: { $in: ['active', 'frozen', 'past_due'] } },
+      { 'payment.status': { $in: ['pending', 'processing'] }, status: 'pending' }
+    ]
+  });
+
+  const lapsed = await PackageOrder.find({ packageId, userId: { $ne: null }, 'payment.status': 'paid', status: 'expired' })
+    .select('userId createdAt')
+    .lean();
+  let renewable = 0;
+  if (lapsed.length) {
+    const members = [...new Map(lapsed.map((o) => [String(o.userId), o.userId])).values()];
+    const latest = await PackageOrder.aggregate([
+      { $match: { userId: { $in: members }, 'payment.status': { $in: ['paid', 'refunded'] } } },
+      { $group: { _id: '$userId', at: { $max: '$createdAt' } } }
+    ]);
+    const latestBy = new Map(latest.map((row) => [String(row._id), new Date(row.at).getTime()]));
+    renewable = lapsed.filter((o) => latestBy.get(String(o.userId)) === new Date(o.createdAt).getTime()).length;
+  }
+  return { live, renewable };
+}
+
+// Delete package.
+//
+// Refused (409) while members still hold it: renewing an order reads its
+// package, so deleting one somebody holds left the desk unable to renew
+// them. Deactivating takes a package off sale and keeps those working.
 const deletePackage = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(404).json({ success: false, message: 'Package not found' });
+    }
 
     const package = await Package.findById(id);
     if (!package) {
       return res.status(404).json({
         success: false,
         message: 'Package not found'
+      });
+    }
+
+    const { live, renewable } = await packageHolders(package._id);
+    if (live || renewable) {
+      const held = [live ? `${live} running or awaiting payment` : '', renewable ? `${renewable} lapsed and not yet renewed` : '']
+        .filter(Boolean)
+        .join(', ');
+      return res.status(409).json({
+        success: false,
+        code: 'PACKAGE_IN_USE',
+        message: `${package.name} cannot be deleted while members still hold it (${held}). Deactivate it instead: it comes off sale and their memberships keep working.`,
+        live,
+        renewable
       });
     }
 
