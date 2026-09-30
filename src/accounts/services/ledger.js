@@ -374,7 +374,13 @@ function ownPaymentEntries() {
  * Output: { _id (order), orderNumber, userId, customer, email, packageName,
  * method, paymentStatus, orderStatus, startDate, endDate, kind ('initial' |
  * 'installment' | 'renewal'), at, amount, admission, trainerFee, membership,
- * currency (upper case) }
+ * currency (upper case), renewedFrom }
+ *
+ * `renewedFrom` is the order this one renewed or replaced (null for none):
+ * renewing at the desk and changing package each make a new order, whose own
+ * first payment is 'initial' like any other -- only Stripe's renewals of one
+ * order are 'renewal' -- so a reader telling new business from renewals
+ * reads both.
  *
  * `amount` is the whole payment; `admission` and `trainerFee` are the
  * joining fee and personal trainer's fee inside it, and `membership` the
@@ -423,6 +429,7 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
       $project: {
         orderNumber: 1,
         userId: 1,
+        renewedFrom: 1,
         customer: '$customerInfo.fullName',
         email: '$customerInfo.email',
         packageName: '$packageDetails.name',
@@ -459,6 +466,7 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
       $project: {
         orderNumber: 1,
         userId: 1,
+        renewedFrom: { $ifNull: ['$renewedFrom', null] },
         customer: 1,
         email: 1,
         packageName: 1,

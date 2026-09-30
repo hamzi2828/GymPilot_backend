@@ -171,3 +171,39 @@ test('the accounts overview counts the money received, part payments included', 
     assert.equal(res.body.income.base_amount, 100);
   });
 });
+
+test('daily sales count a desk renewal and a package change as renewals; the ledger rows say which order each renewed', async () => {
+  await h.inGym(gym, async () => {
+    const { dailySales } = h.src('services/dailySales');
+    const T = h.src('attendance/services/timeUtils');
+    const today = L.readRange({ from: T.dateKey(), to: T.dateKey() });
+    const gold = await Package.create({ name: 'Gold', price: '60', currency: 'GBP', period: 'month', features: ['Everything'] });
+    const before = (await dailySales(today)).totals;
+
+    // One member joins and renews at the desk; another joins and moves to Gold.
+    const renewer = await User.create({ firstName: 'Ren', lastName: 'Fees', email: 'ren@fees.test', role: 'user' });
+    const joined = await service.createManualOrder({ user: renewer, pkg: monthly });
+    const renewal = await service.renew(joined, {});
+    const mover = await User.create({ firstName: 'Mo', lastName: 'Fees', email: 'mo@fees.test', role: 'user' });
+    const started = await service.createManualOrder({ user: mover, pkg: monthly });
+    const { order: moved } = await service.changePackage(started, { packageId: gold._id });
+
+    const after = (await dailySales(today)).totals;
+    const change = (column) => Math.round((after[column] - before[column]) * 100) / 100;
+    assert.equal(change('new_signups'), 80, 'the two first memberships');
+    assert.equal(change('admission'), 50);
+    assert.equal(change('renewals'), Math.round((40 + moved.payment.amount) * 100) / 100, 'the renewal and the package change');
+    assert.equal(change('total'), Math.round((65 + 40 + 65 + moved.payment.amount) * 100) / 100);
+
+    const rows = await PackageOrder.aggregate(
+      L.membershipPaymentStages(today, { orderNumber: { $in: [joined.orderNumber, renewal.orderNumber, moved.orderNumber] } })
+    );
+    const renewedFrom = Object.fromEntries(rows.map((r) => [r.orderNumber, r.renewedFrom ? String(r.renewedFrom) : null]));
+    assert.deepEqual(renewedFrom, {
+      [joined.orderNumber]: null,
+      [renewal.orderNumber]: String(joined._id),
+      [moved.orderNumber]: String(started._id)
+    });
+    assert.ok(rows.every((r) => r.kind === 'initial'), 'the kind each payment already had is unchanged');
+  });
+});

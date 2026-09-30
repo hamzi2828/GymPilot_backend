@@ -176,6 +176,10 @@ the platform's gym stats all read membership money through — gives every
 payment row `admission`, `trainerFee` and `membership` beside `amount`,
 the payment's own `method`, and `kind` (`initial`, `installment` for later
 parts of an order paid in parts, `renewal` — which carries neither fee).
+`kind: 'renewal'` is Stripe charging one order again; a desk renewal or a
+package change is a new order whose first payment is `initial`, and the row's
+`renewedFrom` (the order it renewed or replaced; `null` for none) is what
+tells it apart — Daily sales files those under renewals.
 
 ### Paying in parts
 

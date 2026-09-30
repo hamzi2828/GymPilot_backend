@@ -16,10 +16,17 @@
 // owed. Payments recorded before that split existed have none of it, and
 // count wholly as membership money of their kind.
 //
+// A renewal is either kind the ledger knows: Stripe charging an order again
+// (kind 'renewal'), or the first payment of an order that renewed or
+// replaced another (renewedFrom) -- renewing at the desk and changing
+// package each make a new order, and filing those as new sign-ups
+// disagreed with the reports' overview, which counts them as renewals.
+//
 // The columns never overlap, so each day's parts add up to its total:
 //
 //   new_signups   first payments: the membership part only
-//   renewals      renewal payments: the membership part only
+//   renewals      renewal payments, and first payments of renewing or
+//                 replacing orders: the membership part only
 //   admission     admission fees taken with a first payment or renewal
 //   trainer_fees  trainer fees taken with a first payment or renewal
 //   dues          instalments -- later part-payments of dues -- whole
@@ -73,7 +80,8 @@ function num(value) {
  * @param {string} input.from  'YYYY-MM-DD'
  * @param {string} input.to    'YYYY-MM-DD'
  * @param {string} input.base  the gym's currency, upper case
- * @param {Array<{ day, kind, method, currency, amount, admission?, trainerFee?, membership?, n }>} input.payments
+ * @param {Array<{ day, kind, renewed?, method, currency, amount, admission?, trainerFee?, membership?, n }>} input.payments
+ *   `renewed`: the payment's order renewed or replaced another (renewedFrom).
  * @param {Array<{ day, method, currency, amount, n }>} input.refunds
  * @param {Array<{ day, method, currency, total, n }>} input.sales
  */
@@ -115,7 +123,7 @@ function buildDailySales({ from, to, base, payments = [], refunds = [], sales = 
     const membership = row.membership === undefined || row.membership === null ? amount - admission - trainerFee : num(row.membership);
     day.admission += admission;
     day.trainer_fees += trainerFee;
-    if (row.kind === 'renewal') day.renewals += membership;
+    if (row.kind === 'renewal' || row.renewed) day.renewals += membership;
     else day.new_signups += membership;
   }
 
@@ -196,7 +204,13 @@ async function dailySales(range) {
       ...L.membershipPaymentStages(range),
       {
         $group: {
-          _id: { day: dayOf('$at'), kind: '$kind', method: '$method', currency: '$currency' },
+          _id: {
+            day: dayOf('$at'),
+            kind: '$kind',
+            renewed: { $ne: [{ $ifNull: ['$renewedFrom', null] }, null] },
+            method: '$method',
+            currency: '$currency'
+          },
           amount: { $sum: '$amount' },
           admission: { $sum: zero('$admission') },
           trainerFee: { $sum: zero('$trainerFee') },
