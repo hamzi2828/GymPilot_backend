@@ -224,6 +224,10 @@ router.get('/package-orders/me', auth, gymfolioPaymentController.getUserOrders);
 // '/package-orders/:id', which would otherwise take the name for an id.
 const membershipListsController = require('../controller/membershipListsController');
 router.get('/package-orders/dues', auth, requirePermission('package-orders', 'view'), membershipListsController.dues);
+router.get('/package-orders/expiring', auth, requirePermission('package-orders', 'view'), membershipListsController.expiring);
+router.get('/package-orders/expired', auth, requirePermission('package-orders', 'view'), membershipListsController.expired);
+// A read, sent as a POST only because 500 ids do not fit in an address.
+router.post('/package-orders/summary', auth, requirePermission('package-orders', 'view'), membershipListsController.summary);
 router.get('/package-orders/:id', auth, gymfolioPaymentController.getOrderById);
 router.put('/package-orders/:id/status', auth, requirePermission('package-orders'), gymfolioPaymentController.updateOrderStatus);
 router.post('/package-orders/:id/cancel-subscription', auth, gymfolioPaymentController.cancelSubscription);

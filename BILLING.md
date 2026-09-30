@@ -206,6 +206,30 @@ did include the fee (subtotal = price + fee), fill it in per gym:
     node scripts/backfillOrderFees.js --gym <slug>           # report only
     node scripts/backfillOrderFees.js --gym <slug> --apply   # write it
 
+## Member lists for the desk — `src/gymfolio/services/membershipLists.js`
+
+One row per **member**, not per order, for the desk's screens to be built
+on. "Membership" means a package of kind `membership` (orders from before
+kinds read as memberships); packs, passes and trials are not what runs out
+and gets renewed. All are package-orders · view, and sweep lapsed orders
+first (throttled), like the orders list.
+
+Every list row carries the member — `memberId` (null for a guest order),
+`name`, `phone`, `email`, `gender`, `memberCode` (from the member's record,
+read-only; else the order's own copy) — and the membership it is about:
+`orderId`, `orderNumber`, `packageName`, `status`, `paymentStatus`,
+`startDate`, `endDate`, `amount`, `balanceDue`, `currency`. Lists answer
+`{ success, data: [row], pagination: { page, limit, total, pages } }`
+(`limit` at most 200, default 50) and take `search` (order number, name,
+email or phone).
+
+| Route | Answer |
+|---|---|
+| `GET /package-orders/expiring?days=7&includeAutoRenew=0` | Members whose membership ends within `days` (1–365, default 7; else `400 INVALID_QUERY`) and who have not renewed: each member's live membership (paid; active, frozen or past due) that runs **latest** must end inside the window, so a paid renewal running past it takes the member off the list — an unpaid one does not. Rows add `daysLeft` (whole days at the gym; 0 = ends today) and `autoRenews`; card subscriptions Stripe renews by itself are left out unless `includeAutoRenew=1`. Soonest first; the answer also says `days`. |
+| `GET /package-orders/expired?withinDays=` | Members whose latest membership — the one ending last among those not cancelled or refunded: paid, paid in part, **or never paid** (assigned pending) — has ended, and no paid membership of theirs runs past it (a renewal waiting to be paid does not count). `withinDays` (1–3650) keeps those that ended in the last so many days. Rows add `daysOverdue`. Most recently lapsed first. |
+| `POST /package-orders/summary { userIds: [...] }` | At most 500 member ids (`400 INVALID_QUERY` for more, none, or one that is not an id). `{ success, data: [{ userId, membership }] }` in the order asked, each member once: their current membership (paid, live and running today; the one ending last if several), else their latest (ending last, whatever became of it), else `null`. `membership`: `{ orderId, orderNumber, packageName, status, paymentStatus, method, current, startDate, endDate, daysLeft, amount, discountAmount, joiningFee, trainerFee, amountPaid (money received; the whole amount on older paid orders), balanceDue, currency, trainerName }`. A read sent as a POST because 500 ids do not fit in an address. |
+| `GET /package-orders/dues` | see *Paying in parts* above |
+
 ## Settings that matter here
 
 Under **Settings → General**: currency (any ISO code), tax rate, timezone,
