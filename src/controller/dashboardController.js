@@ -28,7 +28,7 @@ const Expense = require('../accounts/models/expenseModel');
 const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
-const { openVisitExpr } = require('../attendance/services/staleVisits');
+const { isOpenVisit } = require('../attendance/services/staleVisits');
 const sessions = require('../gymfolio/services/classSessions');
 const { sweepIfDue, liveFilter, countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
@@ -40,14 +40,67 @@ const EXPIRING_WINDOW_DAYS = 7;
 // The most rows the fees-due list shows; "View all" opens the full list.
 const FEES_DUE_ROWS = 8;
 
-// A member's visit is PAID when the membership they walked in on was paid for
-// and still running: in date (active, expiring), paused (frozen) or cancelled
-// with days still left on it. Everything else -- expired, a failed card
-// renewal (past_due), a transfer nobody has confirmed (pending), suspended,
-// or no membership at all (none) -- is UNPAID. Read from the attendance row's
-// own snapshot, taken at check-in, so a renewal later in the day does not
-// rewrite what the morning's visit was.
-const PAID_VISIT_STATUSES = ['active', 'expiring', 'frozen', 'cancelled'];
+// Today's visits read per row; far more than any gym's day.
+const ATTENDANCE_ROWS = 5000;
+
+// ---------------------------------------------------------------------------
+// Who came in today, paid or not
+//
+// The same rules as the attendance screen's live board
+// (attendance/services/liveBoard.js: isPaidVisit, balanceOwed, tally), so the
+// two never disagree -- and `tally` below takes and returns what that one
+// does, so it can be swapped for it. Read from each visit's own membership
+// snapshot, taken at check-in: a renewal at noon does not turn a morning
+// visit on an expired package into a paid one.
+//
+// PAID: the member walked in on a paid membership still running -- active
+// (expiring soon included: the desk records that as active), frozen, or
+// cancelled but still inside what was paid for (a cancelled one that has run
+// out is recorded as expired). UNPAID: expired, none, past_due, pending,
+// suspended. Money still owed on a running membership (membership.balanceDue)
+// is paid, and counted again as "balance due". Each member counts once, by
+// their latest visit today.
+// ---------------------------------------------------------------------------
+
+const PAID_MEMBERSHIP = new Set(['active', 'frozen', 'cancelled']);
+
+function isPaidVisit(row) {
+  return row.personType === 'member' && PAID_MEMBERSHIP.has((row.membership && row.membership.status) || 'none');
+}
+
+function balanceOwed(row) {
+  const due = Number((row.membership && row.membership.balanceDue) ?? 0);
+  return Number.isFinite(due) && due > 0 ? due : 0;
+}
+
+/** Today's counts over the day's rows; `isOpen(row)` answers "still inside". */
+function tally(rows, isOpen) {
+  const latest = new Map();
+  let inNow = 0;
+  const staff = new Set();
+
+  for (const row of rows) {
+    if (isOpen(row)) inNow++;
+    const key = String(row.personId);
+    if (row.personType !== 'member') {
+      staff.add(key);
+      continue;
+    }
+    const seen = latest.get(key);
+    if (!seen || new Date(row.checkInAt || 0) >= new Date(seen.checkInAt || 0)) latest.set(key, row);
+  }
+
+  let paid = 0;
+  let unpaid = 0;
+  let balanceDue = 0;
+  for (const row of latest.values()) {
+    if (isPaidVisit(row)) paid++;
+    else unpaid++;
+    if (balanceOwed(row) > 0) balanceDue++;
+  }
+
+  return { visits: rows.length, members: latest.size, staff: staff.size, in_now: inNow, paid, unpaid, balance_due: balanceDue };
+}
 
 function startOfLocalDay(dateKey) {
   const [y, m, d] = dateKey.split('-').map(Number);
@@ -172,20 +225,12 @@ module.exports = {
 
         membershipCounts(now),
 
-        // Distinct people, not rows: somebody who came in twice today is one
-        // person in the building, and is "still in" if any visit is open --
-        // and a paid member if any of their visits was (PAID_VISIT_STATUSES).
-        Attendance.aggregate([
-          { $match: { shiftDate: today } },
-          {
-            $group: {
-              _id: { type: '$personType', person: '$personId' },
-              open: { $max: { $cond: [openVisitExpr(now), 1, 0] } },
-              paid: { $max: { $cond: [{ $in: [{ $ifNull: ['$membership.status', 'none'] }, PAID_VISIT_STATUSES] }, 1, 0] } }
-            }
-          },
-          { $group: { _id: '$_id.type', n: { $sum: 1 }, open: { $sum: '$open' }, paid: { $sum: '$paid' } } }
-        ]),
+        // Today's visits, counted by tally() above: people, not rows.
+        Attendance.find({ shiftDate: today })
+          .select('personType personId checkInAt checkOutAt autoClosed voided openUntil membership.status membership.balanceDue')
+          .sort({ checkInAt: 1, _id: 1 })
+          .limit(ATTENDANCE_ROWS)
+          .lean(),
 
         Contact.countDocuments({ status: { $in: ['new', 'pending', 'open'] } }).catch(() => 0),
         PackageRegistration.countDocuments({ status: 'pending' }).catch(() => 0),
@@ -306,17 +351,15 @@ module.exports = {
       const spentToday = totalsOf(expenseTodayRows, base);
       const spentMonth = totalsOf(expenseMonthRows, base);
 
-      const attendance = { member: 0, staff: 0, still_in: 0, paid: 0, unpaid: 0 };
-      for (const row of todayAttendance) {
-        if (row._id === 'staff') {
-          attendance.staff = row.n;
-        } else {
-          attendance.member = row.n;
-          attendance.paid = row.paid || 0;
-          attendance.unpaid = row.n - (row.paid || 0);
-        }
-        attendance.still_in += row.open;
-      }
+      const counts = tally(todayAttendance, (row) => isOpenVisit(row, now));
+      const attendance = {
+        member: counts.members,
+        staff: counts.staff,
+        still_in: counts.in_now,
+        paid: counts.paid,
+        unpaid: counts.unpaid,
+        balance_due: counts.balance_due
+      };
 
       const [classCount, trainerCount, packageCount, memberCount] = catalogue;
 

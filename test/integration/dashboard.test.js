@@ -113,33 +113,41 @@ async function setup() {
       expense('EXP-4', 10, 'paid', longAgo)
     ]);
 
-    // Today's visits: two paid members (one of them twice, the second time on
-    // an expired snapshot -- still a paid member today), three unpaid, one
-    // staff punch.
+    // Today's visits, each member judged by their LATEST one: one renewed
+    // between two visits (paid), one whose membership ran out between two
+    // (unpaid), frozen and cancelled-with-days-left (paid), expired, pending,
+    // none and suspended (unpaid), one paid up but still owing 25 and still
+    // inside (paid, and balance due), and one staff punch.
     const today = T.dateKey(now);
-    const visit = (personType, personId, status, minutes) => ({
+    const visit = (personType, personId, status, minutes, { balanceDue, open = false } = {}) => ({
       personType,
       personId,
       personName: 'seeded',
       personCode: '',
       shiftDate: today,
       checkInAt: h.minutesAgo(minutes, now),
-      checkOutAt: h.minutesAgo(minutes - 30, now),
-      workedMinutes: 30,
+      checkOutAt: open ? null : h.minutesAgo(minutes - 30, now),
+      workedMinutes: open ? null : 30,
       checkIn: {},
       checkOut: {},
-      membership: personType === 'member' ? { orderId: null, packageName: '', endDate: null, status } : undefined,
+      membership: personType === 'member' ? { orderId: null, packageName: '', endDate: null, status, ...(balanceDue ? { balanceDue } : {}) } : undefined,
       status: '',
       autoClosed: false
     });
-    const paidTwice = new Types.ObjectId();
+    const renewed = new Types.ObjectId();
+    const ranOut = new Types.ObjectId();
     await Attendance.collection.insertMany([
-      visit('member', paidTwice, 'active', 200),
-      visit('member', paidTwice, 'expired', 100),
+      visit('member', renewed, 'expired', 200),
+      visit('member', renewed, 'active', 100),
+      visit('member', ranOut, 'active', 190),
+      visit('member', ranOut, 'expired', 90),
       visit('member', new Types.ObjectId(), 'frozen', 180),
+      visit('member', new Types.ObjectId(), 'cancelled', 175),
       visit('member', new Types.ObjectId(), 'expired', 170),
       visit('member', new Types.ObjectId(), 'pending', 160),
       visit('member', new Types.ObjectId(), 'none', 150),
+      visit('member', new Types.ObjectId(), 'suspended', 140),
+      visit('member', new Types.ObjectId(), 'active', 20, { balanceDue: 25, open: true }),
       visit('staff', new Types.ObjectId(), undefined, 300)
     ]);
   });
@@ -180,15 +188,16 @@ test('dashboard: new this month counts members who joined this month', async () 
   });
 });
 
-test('dashboard: members in today are split paid and unpaid by their visit snapshot', async () => {
+test('dashboard: members in today are split paid and unpaid by their latest visit, as the attendance board does', async () => {
   await h.inGym(gym, async () => {
     const res = await h.call(dashboard.overview);
     const a = res.body.attendance_today;
-    assert.equal(a.member, 5, 'people, not visits');
-    assert.equal(a.paid, 2, 'active (once, though they came twice) and frozen');
-    assert.equal(a.unpaid, 3, 'expired, pending and none');
+    assert.equal(a.member, 9, 'people, not visits');
+    assert.equal(a.paid, 4, 'renewed since their first visit, frozen, cancelled with days left, and the one owing money');
+    assert.equal(a.unpaid, 5, 'ran out since their first visit, expired, pending, none, suspended');
+    assert.equal(a.balance_due, 1, 'paid, and counted again as owing');
     assert.equal(a.staff, 1);
-    assert.equal(a.still_in, 0);
+    assert.equal(a.still_in, 1);
   });
 });
 
