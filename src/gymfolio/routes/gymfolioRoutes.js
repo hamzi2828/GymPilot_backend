@@ -185,6 +185,9 @@ router.get('/payment/methods', optionalAuth, gymfolioPaymentController.paymentMe
 router.get('/payment/banks', membershipController.banks);
 router.post('/payment/bank-transfer', paymentLimiter, auth, membershipController.createBankTransfer);
 router.get('/membership/rules', membershipController.rules);
+// optionalAuth: the checkout summary asks for the signed-in account; signed
+// out it is told the answer is not known yet.
+router.get('/membership/joining-fee-due', optionalAuth, membershipController.joiningFeeDue);
 
 router.get('/payments/public-key', gymfolioPaymentController.getPublicKey);
 router.post('/payments/checkout', paymentLimiter, optionalAuth, gymfolioPaymentController.createPackageCheckoutSession);

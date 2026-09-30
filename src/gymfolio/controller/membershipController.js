@@ -424,5 +424,22 @@ module.exports = {
     } catch (error) {
       return fail(res, error);
     }
+  },
+
+  // GET /api/gymfolio/membership/joining-fee-due -- whether checkout will add
+  // the joining fee for the signed-in account (service.joiningFeeDue, the rule
+  // checkout charges by), so the order summary shows the total actually paid.
+  // Asked only about the caller's own account, never about an email the
+  // request names: that would tell anyone who has been a member here. Signed
+  // out, `due` is null -- not known until checkout sees who is paying.
+  joiningFeeDue: async (req, res) => {
+    try {
+      const me = userId(req);
+      const user = me && mongoose.Types.ObjectId.isValid(String(me)) ? await User.findById(me).select('email').lean() : null;
+      const due = user ? await service.joiningFeeDue({ userId: user._id, email: user.email }) : null;
+      return res.json({ success: true, data: { due } });
+    } catch (error) {
+      return fail(res, error);
+    }
   }
 };
