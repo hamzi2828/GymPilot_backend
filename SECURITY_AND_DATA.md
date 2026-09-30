@@ -30,6 +30,15 @@ password.
 Platform (super admin) tokens have their own secret and are refused by every
 gym endpoint.
 
+## Who may act on whose account
+
+Below an administrator, nobody creates an account in, moves one into or out
+of, deactivates, deletes or sets the password of one whose role holds any tab
+at a higher level than their own, or switches on a front-desk grant they lack
+(`src/services/roleGuards.js`, `src/services/adminPasswords.js`). A new
+account's emailed password counts: it goes to whatever address was typed.
+Only an administrator touches an administrator.
+
 ## Staff pay
 
 Holding `staff: manage` does not let anyone below an administrator change

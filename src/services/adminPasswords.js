@@ -22,8 +22,7 @@
 
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { isAdmin } = require('./roleGuards');
-const { TAB_KEYS, LEVEL_RANK, normaliseLevel, PERMISSION_TABS } = require('../config/permissions');
+const { isAdmin, widerTab, deskGrantBeyond } = require('./roleGuards');
 
 // Minimum that is worth enforcing. Deliberately a length rule and nothing
 // else: composition rules push people towards "Password1!" and no further.
@@ -64,16 +63,12 @@ function same(a, b) {
   return a != null && b != null && String(a) === String(b);
 }
 
-function rank(permissions, tab) {
-  const held = permissions instanceof Map ? permissions.get(tab) : (permissions || {})[tab];
-  return LEVEL_RANK[normaliseLevel(held)];
-}
-
 /**
  * May `actor` set `target`'s password? Setting a password is signing in as
- * that person, so the rule is the role guards' rule carried one step
- * further: nobody may do it to an account that could reach anything their
- * own cannot.
+ * that person, so nobody may do it to an account that could reach anything
+ * their own cannot -- the same line the role guards hold on creating,
+ * promoting, demoting and removing accounts (services/roleGuards.js), so
+ * there is no way round it through a role change.
  *
  *   * not your own -- that is "change password", which asks for the
  *     current one, from the account page;
@@ -100,14 +95,12 @@ function resetProblem({ actorId, actorRole, actorPermissions, actorGrants = {}, 
   // An administrator reaches everything already.
   if (isAdmin(actorRole)) return null;
 
-  const wider = TAB_KEYS.find((tab) => rank(targetPermissions, tab) > rank(actorPermissions, tab));
+  const wider = widerTab(actorPermissions, targetPermissions);
   if (wider) {
-    const label = (PERMISSION_TABS.find((entry) => entry.key === wider) || {}).label || wider;
-    return `This account has more access than yours (${label}), so ask an administrator to set its password.`;
+    return `This account has more access than yours (${wider}), so ask an administrator to set its password.`;
   }
 
-  if ((target.allowAttendanceApp && !actorGrants.allowAttendanceApp)
-    || (target.allowFingerprintEnrollment && !actorGrants.allowFingerprintEnrollment)) {
+  if (deskGrantBeyond(actorGrants, target)) {
     return 'This account can use the front-desk app and yours cannot, so ask an administrator to set its password.';
   }
 
@@ -116,23 +109,12 @@ function resetProblem({ actorId, actorRole, actorPermissions, actorGrants = {}, 
 
 /**
  * resetProblem with the accounts' live roles and grants read from the
- * database: the role requirePermission just read (req.roleSlug), never the
- * claim in a token that may predate a demotion.
+ * database (roleService.actorAccess).
  */
 async function resetRefusal(req, target) {
-  const User = require('../models/user');
-  const { permissionsFor } = require('./roleService');
-  const actorId = req.user && (req.user.id || req.user._id);
-  const actor = actorId
-    ? await User.findById(actorId).select('role allowAttendanceApp allowFingerprintEnrollment').lean()
-    : null;
-  const actorRole = req.roleSlug || (actor && actor.role) || (req.user && req.user.role) || '';
-
+  const { actorAccess, permissionsFor } = require('./roleService');
   return resetProblem({
-    actorId,
-    actorRole,
-    actorPermissions: await permissionsFor(actorRole),
-    actorGrants: actor || {},
+    ...(await actorAccess(req)),
     target,
     targetPermissions: await permissionsFor(target.role)
   });

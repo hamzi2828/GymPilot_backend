@@ -169,3 +169,120 @@ test('nobody chooses or sees the password of a new account above their own', asy
   assert.match(res.body.message, /more access than yours/);
   assert.equal(await h.inGym(gym, () => User.exists({ email: 'boss@passwords.test' })), null);
 });
+
+// The set-password rule has two ways round it unless every role action holds
+// the same line: (a) demote the manager to member, set the member's password,
+// restore the role; (b) create a manager with the password emailed to an
+// address you typed yourself.
+const jwt = require('jsonwebtoken');
+const token = (user) => `Bearer ${jwt.sign({ id: String(user._id), email: user.email, role: user.role }, process.env.JWT_SECRET)}`;
+const withToken = (actor) => ({ ...as(actor), headers: { authorization: token(actor) } });
+const setRole = (actor, target, role) =>
+  h.inGym(gym, () => h.call(users.updateUserRoleById, { ...withToken(actor), params: { id: String(target._id) }, body: { role } }));
+
+// A custom role with the Users and Staff screens but less than a manager:
+// what a gym that splits the front desk from the office would make.
+let supervisor;
+async function makeSupervisor() {
+  if (supervisor) return supervisor;
+  const Role = h.src('models/roleModel');
+  const { fullPermissionMap } = h.src('config/permissions');
+  await h.inGym(gym, async () => {
+    await Role.create({ name: 'Supervisor', slug: 'supervisor', isStaff: true, permissions: fullPermissionMap({ users: 'manage', staff: 'manage', attendance: 'manage' }) });
+    h.src('services/roleService').invalidate();
+    supervisor = await User.create({ firstName: 'Sue', lastName: 'Supervisor', email: 'sue@passwords.test', role: 'supervisor', password: await bcrypt.hash(OLD, 4), employment: { isStaff: true } });
+  });
+  return supervisor;
+}
+
+test('nobody demotes, deactivates or deletes an account above their own, so it cannot be taken over', async () => {
+  const sup = await makeSupervisor();
+
+  const demote = await setRole(receptionist, manager, 'user');
+  assert.equal(demote.statusCode, 403, JSON.stringify(demote.body));
+  assert.match(demote.body.message, /more access than yours/);
+
+  // The Staff screen's role picker and "remove from staff" hold the same line.
+  const staffDemote = await h.inGym(gym, () => h.call(staff.update, { ...as(sup), params: { id: String(manager._id) }, body: { role: 'supervisor' } }));
+  assert.equal(staffDemote.statusCode, 403, JSON.stringify(staffDemote.body));
+  const removed = await h.inGym(gym, () => h.call(staff.remove, { ...as(sup), params: { id: String(manager._id) } }));
+  assert.equal(removed.statusCode, 403, JSON.stringify(removed.body));
+
+  const off = await h.inGym(gym, () => h.call(users.updateUserStatusById, { ...withToken(receptionist), params: { id: String(manager._id) }, body: { isActive: false } }));
+  assert.equal(off.statusCode, 403, JSON.stringify(off.body));
+  const staffOff = await h.inGym(gym, () => h.call(staff.setStatus, { ...as(sup), params: { id: String(manager._id) }, body: { isActive: false } }));
+  assert.equal(staffOff.statusCode, 403, JSON.stringify(staffOff.body));
+  const deleted = await h.inGym(gym, () => h.call(users.deleteUserById, { ...withToken(receptionist), params: { id: String(manager._id) } }));
+  assert.equal(deleted.statusCode, 403, JSON.stringify(deleted.body));
+
+  const still = await h.inGym(gym, () => User.findById(manager._id).select('role isActive employment.isStaff').lean());
+  assert.equal(still.role, 'manager');
+  assert.equal(still.isActive, true);
+  assert.equal(still.employment.isStaff, true);
+  // And so its password stays out of reach.
+  const reset = await h.inGym(gym, () => h.call(users.setUserPassword, { ...as(receptionist), params: { id: String(manager._id) }, body: {} }));
+  assert.equal(reset.statusCode, 403);
+});
+
+test('nobody promotes an account, or gives a front-desk grant, beyond their own', async () => {
+  const sup = await makeSupervisor();
+
+  const promote = await setRole(receptionist, member, 'manager');
+  assert.equal(promote.statusCode, 403, JSON.stringify(promote.body));
+  assert.match(promote.body.message, /That role has more access than yours/);
+  const staffPromote = await h.inGym(gym, () => h.call(staff.update, { ...as(sup), params: { id: String(member._id) }, body: { role: 'manager' } }));
+  assert.equal(staffPromote.statusCode, 403, JSON.stringify(staffPromote.body));
+  assert.match(staffPromote.body.message, /That role has more access than yours/);
+  const grant = await h.inGym(gym, () => h.call(staff.update, { ...as(sup), params: { id: String(receptionist._id) }, body: { allowAttendanceApp: true } }));
+  assert.equal(grant.statusCode, 403, JSON.stringify(grant.body));
+  assert.match(grant.body.message, /front-desk app/);
+
+  assert.equal((await h.inGym(gym, () => User.findById(member._id).lean())).role, 'user');
+  const desk = await h.inGym(gym, () => User.findById(receptionist._id).lean());
+  assert.equal(desk.role, 'receptionist');
+  assert.equal(!!desk.allowAttendanceApp, false);
+
+  // Within their own reach it all still works...
+  assert.equal((await setRole(receptionist, member, 'receptionist')).statusCode, 200);
+  assert.equal((await setRole(receptionist, member, 'user')).statusCode, 200);
+  // ...and an administrator's reach is everything.
+  assert.equal((await setRole(admin, manager, 'receptionist')).statusCode, 200);
+  assert.equal((await setRole(admin, manager, 'manager')).statusCode, 200);
+});
+
+test('an account above your own is not created, not even with the password emailed to an address you typed', async () => {
+  const sup = await makeSupervisor();
+  const emailsBefore = h.calls.emails.length;
+
+  for (const credentials of ['email', undefined, 'show']) {
+    const res = await h.inGym(gym, () =>
+      h.call(users.adminCreateUser, { ...as(receptionist), body: { firstName: 'Esc', lastName: 'Alate', email: 'attacker@elsewhere.test', role: 'manager', ...(credentials ? { credentials } : {}) } })
+    );
+    assert.equal(res.statusCode, 403, `${credentials}: ${JSON.stringify(res.body)}`);
+    assert.match(res.body.message, /more access than yours/);
+  }
+  const staffManager = await h.inGym(gym, () =>
+    h.call(staff.create, { ...as(sup), body: { firstName: 'Esc', lastName: 'Alate', email: 'attacker@elsewhere.test', role: 'manager', credentials: 'email' } })
+  );
+  assert.equal(staffManager.statusCode, 403, JSON.stringify(staffManager.body));
+  const staffDesk = await h.inGym(gym, () =>
+    h.call(staff.create, { ...as(sup), body: { firstName: 'Esc', lastName: 'Alate', email: 'attacker@elsewhere.test', role: 'cleaner', allowAttendanceApp: true } })
+  );
+  assert.equal(staffDesk.statusCode, 403, JSON.stringify(staffDesk.body));
+  assert.match(staffDesk.body.message, /front-desk app/);
+
+  assert.equal(await h.inGym(gym, () => User.exists({ email: 'attacker@elsewhere.test' })), null);
+  assert.equal(h.calls.emails.length, emailsBefore, 'nothing was emailed');
+
+  // Emailing an account within your own reach is unchanged, and an
+  // administrator still creates anything.
+  const peer = await h.inGym(gym, () =>
+    h.call(users.adminCreateUser, { ...as(receptionist), body: { firstName: 'Pat', lastName: 'Peer', email: 'pat@passwords.test', role: 'receptionist' } })
+  );
+  assert.equal(peer.statusCode, 201, JSON.stringify(peer.body));
+  assert.equal(peer.body.emailed, true);
+  const boss = await h.inGym(gym, () =>
+    h.call(staff.create, { ...as(admin), body: { firstName: 'New', lastName: 'Boss', email: 'newboss@passwords.test', role: 'manager', allowAttendanceApp: true } })
+  );
+  assert.equal(boss.statusCode, 201, JSON.stringify(boss.body));
+});
