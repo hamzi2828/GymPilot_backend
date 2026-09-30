@@ -218,6 +218,23 @@ const AWAITING_PAYMENT = {
   status: 'pending'
 };
 
+// Money still owed on a PAID order (payment.balanceDue) -- a package sold
+// part-paid: the membership runs, and the desk is told to collect the rest.
+// Zero when nothing is owed, on an order not paid at all (its whole price is
+// owed, which the desk already hears as "awaiting payment"), and on an order
+// from before the field existed. Read-only: the attendance side never writes
+// it.
+function balanceOf(order) {
+  const payment = order.payment || {};
+  if (payment.status !== 'paid') return 0;
+  const due = Number(payment.balanceDue ?? 0);
+  return Number.isFinite(due) && due > 0 ? due : 0;
+}
+
+function currencyOf(order) {
+  return order.payment && order.payment.currency ? String(order.payment.currency).toUpperCase() : '';
+}
+
 function describeOrder(order, status, now) {
   const endDate = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
 
@@ -234,7 +251,9 @@ function describeOrder(order, status, now) {
     packageName: (order.packageDetails && order.packageDetails.name) || 'Membership',
     endDate,
     daysLeft,
-    sessionsLeft
+    sessionsLeft,
+    balanceDue: balanceOf(order),
+    currency: currencyOf(order)
   };
 }
 
@@ -377,7 +396,9 @@ async function membershipsFor(users, now) {
   };
 
   // Only what membershipFromOrders reads, plus the two owner fields.
-  const fields = 'userId customerInfo.email packageDetails.name subscription sessions status createdAt';
+  const fields =
+    'userId customerInfo.email packageDetails.name subscription sessions status createdAt ' +
+    'payment.status payment.balanceDue payment.currency';
   const [paidOrders, unpaidOrders] = await Promise.all([
     PackageOrder.find({ ...owners, ...PAID_ORDER }).select(fields).lean(),
     PackageOrder.find({ ...owners, ...AWAITING_PAYMENT }).select(fields).lean()

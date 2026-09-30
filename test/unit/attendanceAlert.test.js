@@ -3,8 +3,10 @@
 // without a database: which verdicts are a problem, which only a warning,
 // which get the "fee expired" message and which get the sound alone, the
 // defaults a gym that never saved anything hears, and the settings endpoint's
-// refusals that come before any read. The same against a real MongoDB --
-// the settings round trip and the punch payload -- is in
+// refusals that come before any read. Then a balance owing on the package:
+// read only from a paid order, a warning (never a refusal), and one line with
+// whatever else the desk has to say. The same against a real MongoDB -- the
+// settings round trip and the punch payload -- is in
 // test/integration/attendance.test.js.
 process.env.MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/gympilot_unit_tests';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'unit-test-secret';
@@ -137,4 +139,90 @@ test('the settings endpoint refuses a voice it cannot store, before anything is 
     // One bad field refuses the whole request: nothing half-saved.
     await expect({ memberScanOut: true, voice: { enabled: 'no' } }, /voice.enabled/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Balance due
+// ---------------------------------------------------------------------------
+
+const { memberWarning, moneyLabel } = require('../../src/attendance/services/punchService');
+const { membershipFromOrders } = require('../../src/attendance/services/peopleDirectory');
+
+function owing(status, balanceDue, { endIn = 20, currency = 'GBP' } = {}) {
+  const v = visit(status, { endIn });
+  v.membership.balanceDue = balanceDue;
+  v.membership.currency = currency;
+  return v;
+}
+
+test('money owing on a running membership is a warning, and the gym asks for it', () => {
+  assert.deepEqual(memberAlert(owing('membership_active', 25), VOICE_DEFAULTS), {
+    level: 'warning',
+    speech: 'Please clear your balance'
+  });
+  assert.equal(memberWarning(owing('membership_active', 25)), 'Balance due £25');
+  // Nothing owed, nothing said -- and a negative or missing balance is nothing.
+  assert.deepEqual(memberAlert(owing('membership_active', 0), VOICE_DEFAULTS), { level: 'ok', speech: null });
+  assert.deepEqual(memberAlert(owing('membership_active', -5), VOICE_DEFAULTS), { level: 'ok', speech: null });
+  assert.equal(memberWarning(owing('membership_active', 0)), null);
+  assert.equal(memberWarning(visit('membership_active')), null, 'a visit from before the field');
+});
+
+test('money owing on top of another warning: both said, both on the one line', () => {
+  assert.deepEqual(memberAlert(owing('membership_expiring', 25, { endIn: 3 }), VOICE_DEFAULTS), {
+    level: 'warning',
+    speech: 'Your fee expires soon. Please clear your balance.'
+  });
+  assert.equal(memberWarning(owing('membership_expiring', 25, { endIn: 3 })), 'EXPIRES IN 3 DAYS · Balance due £25');
+
+  // It never softens a problem.
+  assert.deepEqual(memberAlert(owing('membership_frozen', 25), VOICE_DEFAULTS), {
+    level: 'problem',
+    speech: 'Please clear your balance'
+  });
+  assert.deepEqual(memberAlert(owing('membership_expired', 25, { endIn: -3 }), VOICE_DEFAULTS), {
+    level: 'problem',
+    speech: 'Fee expired, please renew. Please clear your balance.'
+  });
+  assert.equal(memberWarning(owing('membership_expired', 25, { endIn: -3 })), 'MEMBERSHIP EXPIRED · Balance due £25');
+
+  // Voice off: the warning sound and the line stay, the words go.
+  assert.deepEqual(memberAlert(owing('membership_active', 25), voiceSettings({ enabled: false })), { level: 'warning', speech: null });
+});
+
+test('the amount is written in its own currency, pence only when there are some', () => {
+  assert.equal(moneyLabel(25, 'GBP'), '£25');
+  assert.equal(moneyLabel(2500, 'pkr'), 'PKR 2,500');
+  assert.equal(moneyLabel(12.5, 'USD'), 'US$12.50');
+  assert.equal(memberWarning(owing('membership_active', 2500, { currency: 'PKR' })), 'Balance due PKR 2,500');
+});
+
+test("the membership carries what is still owed on a paid order -- and only a paid one's", () => {
+  const now = new Date('2026-09-21T12:00:00Z');
+  const user = { _id: '0000000000000000000000c1', email: 'owes@example.test' };
+  const order = (payment, extra = {}) => ({
+    _id: '0000000000000000000000d1',
+    userId: user._id,
+    customerInfo: { email: user.email },
+    packageDetails: { name: 'Monthly' },
+    subscription: { endDate: new Date(now.getTime() + 20 * DAY) },
+    status: 'active',
+    createdAt: new Date(now.getTime() - 10 * DAY),
+    payment,
+    ...extra
+  });
+
+  const owes = membershipFromOrders([order({ status: 'paid', balanceDue: 25, currency: 'gbp' })], null, now);
+  assert.equal(owes.status, 'active');
+  assert.equal(owes.balanceDue, 25);
+  assert.equal(owes.currency, 'GBP');
+
+  assert.equal(membershipFromOrders([order({ status: 'paid', currency: 'gbp' })], null, now).balanceDue, 0, 'from before the field');
+  assert.equal(membershipFromOrders([order({ status: 'paid', balanceDue: -3 })], null, now).balanceDue, 0);
+
+  // An order not paid at all owes its whole price; the desk hears that as
+  // "awaiting payment", not as a balance.
+  const pending = membershipFromOrders([], order({ status: 'pending', balanceDue: 40 }, { status: 'pending' }), now);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.balanceDue, 0);
 });

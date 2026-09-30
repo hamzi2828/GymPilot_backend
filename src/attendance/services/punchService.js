@@ -15,6 +15,7 @@ const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const Settings = require('../../models/settings');
 const { resolvePerson, membershipFor } = require('./peopleDirectory');
 const { OPEN_VISIT_HOURS, openVisitMatch, staffOpenUntil } = require('./staleVisits');
+const { defaultCurrency } = require('../../services/currency');
 const T = require('./timeUtils');
 
 // A finger resting on the reader fires repeatedly, and a member who scans
@@ -395,6 +396,10 @@ async function buildReceipt(record, action, person) {
     // The sound and the words for a recorded member punch (memberAlert);
     // null for staff and for a repeat scan, which each client handles itself.
     alert: null,
+    // Money still owed on the member's package when they walked in: never a
+    // reason to refuse the visit, always one to say so (see memberWarning).
+    balance_due: record.personType === 'member' ? balanceDueOf(record) : 0,
+    balance_due_label: record.personType === 'member' ? balanceDueLabel(record) : null,
 
     rows,
     footer: splitLine(record)
@@ -598,7 +603,7 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     }
 
     const detail = await buildReceipt(openRecord, 'check_out', person);
-    detail.warning = personType === 'member' ? membershipWarningFor(openRecord) : null;
+    detail.warning = personType === 'member' ? memberWarning(openRecord) : null;
     detail.alert = personType === 'member' ? memberAlert(openRecord, (await gymSettings()).voice) : null;
 
     return {
@@ -629,11 +634,16 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     const membership = await membershipFor(person.record);
     const verdict = membershipVerdict({ ...membership, autoRenews: await autoRenews(membership) });
 
+    const balanceDue = Number(membership.balanceDue ?? 0) > 0 ? Number(membership.balanceDue) : 0;
     record.membership = {
       orderId: membership.orderId,
       packageName: membership.packageName,
       endDate: membership.endDate,
-      status: membership.status
+      status: membership.status,
+      balanceDue,
+      // The order's own currency; the gym's only when the order names none
+      // and there is money to put a currency on.
+      currency: membership.currency || (balanceDue > 0 ? await defaultCurrency() : '')
     };
     record.status = verdict.status;
     record.statusLabel = verdict.label;
@@ -677,7 +687,7 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   }
 
   const detail = await buildReceipt(record, 'check_in', person);
-  detail.warning = personType === 'member' ? membershipWarningFor(record) : null;
+  detail.warning = personType === 'member' ? memberWarning(record) : null;
   detail.alert = personType === 'member' ? memberAlert(record, (await gymSettings()).voice) : null;
 
   return {
@@ -778,7 +788,63 @@ function memberAlert(record, voice) {
     say = settings.expiringMessage;
   }
 
-  return { level, speech: settings.enabled === false ? null : joinSpeech([say]) };
+  // Money owing never blocks the visit and is never more than a word -- but
+  // it is at least that, whatever the membership's own state, and it is
+  // said after anything the membership needed saying.
+  let owed = null;
+  if (balanceDueOf(record) > 0) {
+    if (level === 'ok') level = 'warning';
+    owed = settings.balanceDueMessage;
+  }
+
+  return { level, speech: settings.enabled === false ? null : joinSpeech([say, owed]) };
+}
+
+// ---------------------------------------------------------------------------
+// Balance due
+// ---------------------------------------------------------------------------
+
+function balanceDueOf(record) {
+  const due = Number((record && record.membership && record.membership.balanceDue) ?? 0);
+  return Number.isFinite(due) && due > 0 ? due : 0;
+}
+
+// "£40", "PKR 2,500", "$12.50": the gym's money as the office writes it --
+// no pence on a round amount, which is what a desk sale usually leaves owing.
+function moneyLabel(amount, currency) {
+  const code = String(currency || '').toUpperCase();
+  const value = Number(amount) || 0;
+  try {
+    return new Intl.NumberFormat('en-GB', {
+      style: 'currency',
+      currency: code || 'USD',
+      minimumFractionDigits: Number.isInteger(value) ? 0 : 2
+    })
+      .format(value)
+      // "PKR 2,500" comes with a no-break space; the desk and the kiosk want
+      // plain text.
+      .replace(/ /g, ' ');
+  } catch {
+    return `${code} ${value}`.trim();
+  }
+}
+
+// The line the desk shows for money owing, or null when nothing is.
+function balanceDueLabel(record) {
+  const due = balanceDueOf(record);
+  return due > 0 ? `Balance due ${moneyLabel(due, record.membership.currency)}` : null;
+}
+
+// The receipt's one warning line: the membership's, the balance owing, or
+// both. Both have to fit the desk's one-line banner, so the membership's
+// part loses its advice ("— offer a renewal") and the money follows it:
+// "EXPIRES IN 3 DAYS · Balance due £40".
+function memberWarning(record) {
+  const warning = membershipWarningFor(record);
+  const owed = balanceDueLabel(record);
+  if (!owed) return warning;
+  if (!warning) return owed;
+  return `${warning.split(' — ')[0]} · ${owed}`;
 }
 
 // The verdict helpers are exported alongside recordPunch so anything that has
@@ -794,6 +860,9 @@ module.exports = {
   voiceSettings,
   VOICE_DEFAULTS,
   memberAlert,
+  memberWarning,
+  balanceDueLabel,
+  moneyLabel,
   membershipVerdict,
   scheduleFor,
   arrivalVerdict,

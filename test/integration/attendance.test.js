@@ -780,3 +780,57 @@ test('the punch says which sound to play and what to say: expired, expiring, fin
     }
   });
 });
+
+// payment.balanceDue arrives with the package-order work (membership
+// module); written straight to the collection here, so these tests hold
+// whether or not this branch's order schema has the field yet.
+async function owe(user, balanceDue, extra = {}) {
+  await PackageOrder.collection.updateOne({ userId: user._id }, { $set: { 'payment.balanceDue': balanceDue, ...extra } });
+}
+
+test('a balance owing: checked in all the same, told "Balance due" in the order\'s currency, with the warning sound and words', async () => {
+  await h.inGym(gym, async () => {
+    const owes = await memberWithOrder('Owes', 11, { endIn: 40 });
+    await owe(owes, 25);
+
+    const inside = await scan('member', owes);
+    assert.equal(inside.success, true, inside.message);
+    assert.equal(inside.action, 'check_in', 'money owing never stops the visit');
+    assert.equal(inside.detail.status, 'membership_active');
+    assert.equal(inside.detail.warning, 'Balance due £25');
+    assert.equal(inside.detail.balance_due, 25);
+    assert.equal(inside.detail.balance_due_label, 'Balance due £25');
+    assert.deepEqual(inside.detail.alert, { level: 'warning', speech: 'Please clear your balance' });
+    assert.equal(inside.record.membership.balanceDue, 25);
+    assert.equal(inside.record.membership.currency, 'GBP');
+
+    // The check-out says it again, from what was owed on the way in.
+    await backdate(owes._id, 60);
+    const out = await scan('member', owes);
+    assert.equal(out.action, 'check_out', out.message);
+    assert.equal(out.detail.warning, 'Balance due £25');
+    assert.deepEqual(out.detail.alert, { level: 'warning', speech: 'Please clear your balance' });
+
+    // Running out AND owing: one line, both said.
+    const both = await memberWithOrder('Both', 12, { endIn: 3 });
+    await owe(both, 12.5);
+    const bothIn = await scan('member', both);
+    assert.equal(bothIn.detail.status, 'membership_expiring');
+    assert.equal(bothIn.detail.warning, 'EXPIRES IN 3 DAYS · Balance due £12.50');
+    assert.deepEqual(bothIn.detail.alert, { level: 'warning', speech: 'Your fee expires soon. Please clear your balance.' });
+
+    // An order that names no currency is in the gym's.
+    const bare = await memberWithOrder('Bare', 13, { endIn: 40 });
+    await owe(bare, 40, { 'payment.currency': '' });
+    const bareIn = await scan('member', bare);
+    assert.equal(bareIn.detail.warning, 'Balance due £40');
+
+    // Nothing owed (0, or an order from before the field) is nothing at all.
+    const clear = await memberWithOrder('Clear', 14, { endIn: 40 });
+    await owe(clear, 0);
+    const clearIn = await scan('member', clear);
+    assert.equal(clearIn.detail.warning, null);
+    assert.equal(clearIn.detail.balance_due, 0);
+    assert.deepEqual(clearIn.detail.alert, { level: 'ok', speech: null });
+  });
+});
