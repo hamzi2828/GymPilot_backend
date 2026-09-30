@@ -85,3 +85,30 @@ test('the payments pipeline gives every payment its admission, trainer and membe
     $subtract: [{ $ifNull: ['$entries.amount', 0] }, { $add: [{ $ifNull: ['$entries.admission', 0] }, { $ifNull: ['$entries.trainerFee', 0] }] }]
   });
 });
+
+test('money received so far: amountPaid when recorded, else all of a paid order', () => {
+  assert.equal(M.paidSoFar({ amount: 65, amountPaid: 30, status: 'paid' }), 30);
+  assert.equal(M.paidSoFar({ amount: 65, amountPaid: 0, status: 'paid' }), 0);
+  assert.equal(M.paidSoFar({ amount: 65, status: 'paid' }), 65, 'from before part payments: paid in full');
+  assert.equal(M.paidSoFar({ amount: 65, amountPaid: null, status: 'refunded' }), 65);
+  assert.equal(M.paidSoFar({ amount: 65, status: 'pending' }), 0);
+});
+
+test('the parts so far: the installments, or the payment taken at once as the first', () => {
+  const at = new Date('2026-09-01T10:00:00Z');
+  const recorded = [{ amount: 30, joiningFee: 25, trainerFee: 5, method: 'cash', at }];
+  assert.deepEqual(M.partsSoFar({ installments: recorded, amountPaid: 30 }), recorded);
+  assert.deepEqual(M.partsSoFar({ amount: 65, joiningFee: 25, trainerFee: 10, amountPaid: 30, method: 'jazzcash', paidAt: at, status: 'paid' }), [
+    { amount: 30, joiningFee: 25, trainerFee: 5, method: 'jazzcash', at, by: null, note: 'Paid when the membership was sold' }
+  ]);
+  // Nothing taken yet: no parts to carry.
+  assert.deepEqual(M.partsSoFar({ amount: 65, amountPaid: 0, status: 'paid' }), []);
+});
+
+test('the next part settles what is still owed of the fees first', () => {
+  const payment = { amount: 100, joiningFee: 25, trainerFee: 30 };
+  const parts = [{ amount: 40, joiningFee: 25, trainerFee: 15 }];
+  assert.deepEqual(M.nextPart(payment, parts, 20), { amount: 20, joiningFee: 0, trainerFee: 15 });
+  assert.deepEqual(M.nextPart(payment, [...parts, { amount: 20, joiningFee: 0, trainerFee: 15 }], 40), { amount: 40, joiningFee: 0, trainerFee: 0 });
+  assert.deepEqual(M.nextPart(payment, [], 10), { amount: 10, joiningFee: 10, trainerFee: 0 });
+});

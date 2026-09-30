@@ -17,7 +17,7 @@ const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/mon
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
 const { readDeskMethod } = require('../../services/paymentMethods');
-const { allocate } = require('./orderMoney');
+const { allocate, paidSoFar, partsSoFar, nextPart } = require('./orderMoney');
 const T = require('../../attendance/services/timeUtils');
 
 const DAY_MS = 86400000;
@@ -251,6 +251,12 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
   order.payment.lastPaidAt = paidAt;
   if (transactionId) order.payment.transactionId = transactionId;
   if (method) order.payment.method = method;
+  // Paid in full -- unless the desk took only part of it, in which case
+  // createManualOrder has already said how much and what is left.
+  if (order.payment.amountPaid === null || order.payment.amountPaid === undefined) {
+    order.payment.amountPaid = order.payment.amount;
+    order.payment.balanceDue = 0;
+  }
 
   const snapshot = order.packageDetails || {};
   const start = startDate
@@ -345,6 +351,9 @@ function readStartDate(value, now = new Date()) {
  *   discountAmount, discountNote off the package price
  *   amountOverride (or amount)   charge this total instead
  *   waiveJoiningFee              no admission fee on this order
+ *   amountPaid                   paid now, when less than the total: the
+ *                                membership is granted and the rest is a
+ *                                balance due (recordPayment settles it)
  *   paymentMethod                checked by createManualOrder
  *   trainerId, trainerFee,       a personal trainer sold with it (sale only,
  *   trainerCommissionType,       not renewals): 'percent' of the fee, or a
@@ -377,6 +386,9 @@ function readDeskTerms(body = {}, { trainer: allowTrainer = true, now = new Date
 
   const override = money(present(body.amountOverride) ? body.amountOverride : body.amount, 'amountOverride');
   if (override !== undefined) terms.amountOverride = override;
+  // Part of the total taken now; the rest is the member's balance due.
+  const paidNow = money(body.amountPaid, 'amountPaid');
+  if (paidNow !== undefined) terms.amountPaid = paidNow;
 
   if (truthy(body.waiveJoiningFee)) terms.chargeJoiningFee = false;
   if (present(body.paymentMethod)) terms.paymentMethod = body.paymentMethod;
@@ -424,6 +436,11 @@ function commissionOn(fee, { commissionType, commissionValue }) {
  * readDeskTerms): a personal trainer sold with the membership. The fee is
  * charged on top as payment.trainerFee, the commission is recorded on
  * trainerAssignment, and the member's assigned trainer becomes this one.
+ *
+ * `amountPaid`: what was taken now, when it is less than the total. The
+ * membership is granted all the same (paid, active) with the rest as
+ * payment.balanceDue, and what was taken is the order's first installment,
+ * recorded as received by `paidBy` (a staff account id).
  */
 async function createManualOrder({
   user,
@@ -441,6 +458,8 @@ async function createManualOrder({
   renewedFrom = null,
   chargeJoiningFee,
   trainer = null,
+  amountPaid,
+  paidBy = null,
   by = null
 }) {
   const settings = await Settings.getSettings().catch(() => null);
@@ -490,6 +509,20 @@ async function createManualOrder({
 
   const paid = markPaid !== false;
   const now = new Date();
+
+  // Paid in part: checked against the total before anything is written.
+  let taken = amount;
+  if (amountPaid !== undefined && amountPaid !== null && amountPaid !== '') {
+    taken = parseAmount(amountPaid);
+    if (taken === null || taken < 0) throw new MembershipError('amountPaid must be an amount of 0 or more', 400, 'INVALID_TERMS');
+    taken = round2(taken);
+    if (!paid && taken > 0) {
+      throw new MembershipError('An order left pending has nothing paid yet: mark it paid to take part of the money now', 400, 'INVALID_TERMS');
+    }
+    if (taken > amount) throw new MembershipError(`amountPaid cannot be more than the ${amount} charged`, 400, 'INVALID_TERMS');
+  }
+  const balance = paid ? round2(amount - taken) : 0;
+  const staff = paidBy && mongoose.Types.ObjectId.isValid(String(paidBy)) ? paidBy : null;
   const start = startDate ? new Date(startDate) : await startDateFor({ userId: user._id, email: user.email, kind: snapshot.kind, now });
   let end = termEnd(start, snapshot);
   const months = Number(durationMonths);
@@ -524,7 +557,12 @@ async function createManualOrder({
       couponCode: coupon ? coupon.code : '',
       currency: currency.toLowerCase(),
       status: paid ? 'paid' : 'pending',
-      paidAt: paid ? now : undefined
+      paidAt: paid ? now : undefined,
+      amountPaid: paid ? taken : null,
+      balanceDue: balance,
+      // Paid in part: what was taken is the first installment (nothing
+      // taken yet, none). Paid in full at once needs none.
+      installments: balance > 0 && taken > 0 ? [{ ...nextPart({ joiningFee: parts.joiningFee, trainerFee: parts.trainerFee }, [], taken), method, at: now, by: staff, note: '' }] : []
     },
     subscription: {
       startDate: start,
@@ -562,6 +600,86 @@ async function createManualOrder({
     await User.updateOne({ _id: user._id }, { $set: { assignedTrainerId: coach._id } });
   }
   return order;
+}
+
+/* ---------------------------- part payments ---------------------------- */
+
+/** Whether an order's money goes through Stripe (and so is recorded there). */
+function stripeBilled(order) {
+  const p = (order && order.payment) || {};
+  return p.method === 'stripe' || !!p.stripeSubscriptionId || !!p.stripePaymentIntentId || !!p.stripeSessionId;
+}
+
+/**
+ * Money received at the desk against an order's balance due.
+ *
+ * The payment becomes one of the order's installments -- the day it
+ * arrived, how it was paid, who took it -- with whatever is still owed of
+ * the admission fee and the trainer's fee taken first. An order paid in
+ * part at once, with no installments yet, first gets that payment as its
+ * opening installment (dated when it was paid), so the accounts keep
+ * counting it where it was received.
+ *
+ * Written with one conditional update on the balance it started from: two
+ * people recording the same payment at once take it off once, and the
+ * second is told the balance moved.
+ *
+ * @throws {MembershipError} 409 STRIPE_BILLED / NOT_PAID / NO_BALANCE /
+ *   BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
+ *   than the balance); 422 PAYMENT_METHOD_INVALID
+ */
+async function recordPayment(order, { amount, method, note = '', by = null, now = new Date() } = {}) {
+  if (stripeBilled(order)) {
+    throw new MembershipError('This membership is paid by card through Stripe; there is no balance to take at the desk.', 409, 'STRIPE_BILLED');
+  }
+  if (order.payment.status !== 'paid') {
+    throw new MembershipError(
+      order.payment.status === 'refunded' ? 'This order has been refunded.' : 'This order has not been paid for yet: confirm or assign it first.',
+      409,
+      'NOT_PAID'
+    );
+  }
+  const balance = round2(order.payment.balanceDue || 0);
+  if (!(balance > 0)) throw new MembershipError('Nothing is owed on this order.', 409, 'NO_BALANCE');
+
+  const value = typeof amount === 'number' ? amount : parseAmount(amount);
+  if (value === null || !Number.isFinite(value) || round2(value) <= 0) {
+    throw new MembershipError('The payment must be more than 0', 400, 'INVALID_PAYMENT');
+  }
+  const paying = round2(value);
+  if (paying > balance) {
+    throw new MembershipError(`The balance due is ${balance}; a payment cannot be more than that.`, 400, 'OVERPAYMENT');
+  }
+  const { method: how, problem } = readDeskMethod(method, {
+    fallback: readDeskMethod(order.payment.method).method || 'cash'
+  });
+  if (problem) throw new MembershipError(problem, 422, 'PAYMENT_METHOD_INVALID');
+
+  const parts = partsSoFar(order.payment, { firstAt: order.createdAt });
+  parts.push({
+    ...nextPart(order.payment, parts, paying),
+    method: how,
+    at: now,
+    by: by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null,
+    note: String(note || '').trim().slice(0, 200)
+  });
+
+  const updated = await PackageOrder.findOneAndUpdate(
+    { _id: order._id, 'payment.status': 'paid', 'payment.balanceDue': order.payment.balanceDue },
+    {
+      $set: {
+        'payment.installments': parts,
+        'payment.amountPaid': round2(paidSoFar(order.payment) + paying),
+        'payment.balanceDue': round2(balance - paying),
+        'payment.lastPaidAt': now
+      }
+    },
+    { new: true }
+  );
+  if (!updated) {
+    throw new MembershipError('The balance changed while this payment was being recorded. Reload the order and try again.', 409, 'BALANCE_CHANGED');
+  }
+  return updated;
 }
 
 /* --------------------------- bank transfers ---------------------------- */
@@ -1009,7 +1127,7 @@ async function resume(order, { by = null } = {}) {
  */
 async function renew(
   order,
-  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride } = {}
+  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride, amountPaid, paidBy } = {}
 ) {
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(order.packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
@@ -1027,6 +1145,8 @@ async function renew(
     discountAmount,
     discountNote,
     amountOverride,
+    amountPaid,
+    paidBy,
     durationMonths: months,
     startDate: start,
     notes: notes || `Renewal of ${order.orderNumber}`,
@@ -1044,6 +1164,15 @@ async function renew(
  */
 async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by } = {}) {
   assertActive(order);
+  // The credit is for days already paid for; with money still owed it
+  // would be worked out on money that never came in.
+  if (round2(order.payment.balanceDue) > 0) {
+    throw new MembershipError(
+      `${round2(order.payment.balanceDue)} is still owed on this membership. Record that payment first, then change the package.`,
+      409,
+      'BALANCE_DUE'
+    );
+  }
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
   if (!pkg) throw new MembershipError('Package not found', 404);
@@ -1300,7 +1429,11 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
   if (order.payment.status === 'refunded') throw new MembershipError('This order has already been refunded', 400);
   if (order.payment.status !== 'paid') throw new MembershipError('Only a paid order can be refunded', 400);
 
-  const paidAmount = round2(order.payment.amount);
+  // What came in, which on an order paid in part is less than its total.
+  const paidAmount = paidSoFar(order.payment);
+  if (!(paidAmount > 0)) {
+    throw new MembershipError('Nothing has been paid on this order yet, so there is nothing to refund. Cancel it instead.', 400);
+  }
   let wanted = null;
   if (amount !== undefined && amount !== null && amount !== '') {
     wanted = parseAmount(amount);
@@ -1386,6 +1519,8 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
       {
         $set: {
           'payment.status': 'refunded',
+          // A refunded membership is over: nothing more is owed on it.
+          'payment.balanceDue': 0,
           status: 'cancelled',
           'subscription.isActive': false,
           'subscription.autoRenew': order.subscription.autoRenew,
@@ -1411,6 +1546,7 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
   }
 
   order.payment.status = 'refunded';
+  order.payment.balanceDue = 0;
   order.status = 'cancelled';
   order.subscription.isActive = false;
   order.refund = record;
@@ -1444,6 +1580,8 @@ module.exports = {
   readDeskTerms,
   commissionOn,
   createManualOrder,
+  stripeBilled,
+  recordPayment,
   createBankTransferOrder,
   submitTransferProof,
   approveTransfer,

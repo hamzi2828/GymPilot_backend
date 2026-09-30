@@ -154,6 +154,35 @@ payment row `admission`, `trainerFee` and `membership` beside `amount`,
 the payment's own `method`, and `kind` (`initial`, `installment` for later
 parts of an order paid in parts, `renewal` — which carries neither fee).
 
+### Paying in parts
+
+A membership sold at the desk may be paid for over time. `amountPaid` on
+assign or renew (less than the total; 0 = nothing yet) grants it at once —
+`payment.status` is `paid` and the order `active`, so everything that treats
+paid as live keeps working — with `payment.amountPaid` (money received so
+far; `null` on older orders, which were paid in full) and
+`payment.balanceDue`. `amountPaid` above the total, or on an order left
+pending, is a 400. Every order paid from now on records `amountPaid` (the
+whole amount when paid in full).
+
+`payment.installments[]` — `{ amount, joiningFee, trainerFee, method, at,
+by, note }` — are, when there are any, the money received for the order, the
+first payment included; each is allocated admission first, then trainer's
+fee, then membership. An order paid in full at once keeps none.
+
+| Route | Permission | Answer |
+|---|---|---|
+| `POST /package-orders/:id/payments { amount, method?, note? }` | package-orders · manage | `{ success, message, data: order }` — money received against the balance, recorded as an installment (the fees still owed first; `method` defaults to the order's). An order paid in part at once gets that first payment as its opening installment. Refused: `400 INVALID_PAYMENT` (not above 0), `400 OVERPAYMENT` (more than the balance), `422 PAYMENT_METHOD_INVALID`, `409 STRIPE_BILLED` (the order goes through Stripe), `409 NOT_PAID` (pending or refunded), `409 NO_BALANCE`, `409 BALANCE_CHANGED` (somebody recorded a payment at the same moment: one conditional write on the balance it started from). |
+| `GET /package-orders/dues?search=&page=&limit=` | package-orders · view | `{ success, data: [{ memberId, name, phone, email, gender, memberCode, currency, balanceDue, orders: [{ orderId, orderNumber, packageName, status, amount, amountPaid, balanceDue, startDate, endDate, lastPaidAt }] }], totals: [{ currency, balanceDue, members, orders }], pagination: { page, limit, total, pages } }` — one row per member and currency with money still owed on a granted order, largest balance first; `limit` at most 200 (default 50). Member fields come from the member's record, else the order's own copy (a guest). |
+| `GET /package-orders?hasDues=1` | package-orders · view | the orders list, only those with a balance due |
+
+A refund gives back at most what came in (`amountPaid`) and clears the
+balance; an order with nothing paid yet is cancelled, not refunded. Changing
+package is refused while money is owed (`409 BALANCE_DUE`): the credit for
+unused days would be worked out on money that never came in. The invoice
+shows the total, what was paid so far and the balance due, and lists the
+payments received.
+
 Orders from before `payment.joiningFee` existed read 0. Where their total
 did include the fee (subtotal = price + fee), fill it in per gym:
 

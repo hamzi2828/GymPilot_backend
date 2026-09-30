@@ -595,11 +595,13 @@ class GymfolioPaymentService {
   }
 
   async getAllOrders(options = {}) {
-    const { page = 1, limit = 20, status, paymentStatus, paymentMethod, search, sort = '-createdAt' } = options;
+    const { page = 1, limit = 20, status, paymentStatus, paymentMethod, search, hasDues = false, sort = '-createdAt' } = options;
     const query = {};
     if (status) query.status = status;
     if (paymentStatus) query['payment.status'] = paymentStatus;
     if (paymentMethod) query['payment.method'] = paymentMethod;
+    // Money still owed on a membership already granted (paid in part).
+    if (hasDues) query['payment.balanceDue'] = { $gt: 0 };
     if (search) {
       const term = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$or = [{ orderNumber: term }, { 'customerInfo.email': term }, { 'customerInfo.fullName': term }];

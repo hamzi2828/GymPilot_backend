@@ -57,4 +57,50 @@ function legacyJoiningFee(order) {
   return allocate(payment.amount, { joiningFee: fee }).joiningFee;
 }
 
-module.exports = { round2, allocate, legacyJoiningFee };
+/**
+ * The money received for an order so far: the recorded amountPaid, or --
+ * on an order from before part payments -- all of it once it was paid.
+ */
+function paidSoFar(payment = {}) {
+  if (payment.amountPaid !== undefined && payment.amountPaid !== null) return round2(payment.amountPaid);
+  return ['paid', 'refunded'].includes(payment.status) ? round2(payment.amount) : 0;
+}
+
+/**
+ * The order's payments as parts, for adding another: its installments, or
+ * -- when it has none but money was taken (paid at once, in full or in
+ * part) -- that first payment as one part, dated when it was paid, so the
+ * accounts keep counting it where it was received.
+ */
+function partsSoFar(payment = {}, { firstAt = null } = {}) {
+  const parts = Array.isArray(payment.installments) ? payment.installments.map((part) => (part.toObject ? part.toObject() : { ...part })) : [];
+  if (parts.length) return parts;
+  const taken = paidSoFar(payment);
+  if (!(taken > 0)) return [];
+  const shares = allocate(taken, { joiningFee: payment.joiningFee, trainerFee: payment.trainerFee });
+  return [
+    {
+      amount: taken,
+      joiningFee: shares.joiningFee,
+      trainerFee: shares.trainerFee,
+      method: payment.method || '',
+      at: payment.paidAt || firstAt || new Date(),
+      by: null,
+      note: 'Paid when the membership was sold'
+    }
+  ];
+}
+
+/**
+ * The next part of an order's money: `amount`, with whatever is still owed
+ * of the admission fee and the trainer's fee taken first.
+ */
+function nextPart(payment = {}, parts = [], amount) {
+  const sum = (key) => parts.reduce((total, part) => total + (Number(part[key]) || 0), 0);
+  const joiningOwed = Math.max(0, round2((payment.joiningFee || 0) - sum('joiningFee')));
+  const trainerOwed = Math.max(0, round2((payment.trainerFee || 0) - sum('trainerFee')));
+  const shares = allocate(amount, { joiningFee: joiningOwed, trainerFee: trainerOwed });
+  return { amount: round2(amount), joiningFee: shares.joiningFee, trainerFee: shares.trainerFee };
+}
+
+module.exports = { round2, allocate, legacyJoiningFee, paidSoFar, partsSoFar, nextPart };

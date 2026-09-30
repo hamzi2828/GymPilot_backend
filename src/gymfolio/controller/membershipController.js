@@ -233,7 +233,7 @@ module.exports = {
 
   // POST /api/gymfolio/package-orders/:id/renew  (staff)
   //   { paymentMethod, markPaid, months, notes, force,
-  //     startDate, discountAmount, discountNote, amountOverride }
+  //     startDate, discountAmount, discountNote, amountOverride, amountPaid }
   //
   // The pricing and start fields are read as on a sale (readDeskTerms; no
   // trainer on a renewal). Left out, the term starts when the current one
@@ -269,6 +269,8 @@ module.exports = {
         discountAmount: terms.discountAmount,
         discountNote: terms.discountNote,
         amountOverride: terms.amountOverride,
+        amountPaid: terms.amountPaid,
+        paidBy: userId(req),
         by: req.user && req.user.email
       });
       if (renewal.payment.status === 'paid') tell('membershipConfirmed', renewal);
@@ -298,6 +300,29 @@ module.exports = {
         data: result.order,
         previous: result.previous,
         credit: result.credit
+      });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // POST /api/gymfolio/package-orders/:id/payments  (staff)  { amount, method?, note? }
+  //
+  // Money received at the desk against an order's balance due; see
+  // membershipService.recordPayment for what is refused and why.
+  recordPayment: async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await PackageOrder.findById(req.params.id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const body = req.body || {};
+      const updated = await service.recordPayment(order, { amount: body.amount, method: body.method, note: body.note, by: userId(req) });
+      const currency = String(updated.payment.currency || '').toUpperCase();
+      const due = Number(updated.payment.balanceDue || 0);
+      return res.json({
+        success: true,
+        message: due > 0 ? `Payment recorded. ${currency} ${due.toFixed(2)} still due.` : 'Payment recorded. Paid in full.',
+        data: updated
       });
     } catch (error) {
       return fail(res, error);

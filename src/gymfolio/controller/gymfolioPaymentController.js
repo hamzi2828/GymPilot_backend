@@ -39,8 +39,8 @@ const gymfolioPaymentController = {
    *
    * { userId, packageId, paymentMethod?, markPaid?, couponCode?, durationMonths?,
    *   startDate? | startAfterDays?, discountAmount?, discountNote?,
-   *   amountOverride? (or amount), waiveJoiningFee?, trainerId?, trainerFee?,
-   *   trainerCommissionType?, trainerCommissionValue?, notes? }
+   *   amountOverride? (or amount), waiveJoiningFee?, amountPaid?, trainerId?,
+   *   trainerFee?, trainerCommissionType?, trainerCommissionValue?, notes? }
    * -- the desk terms are read and checked by membershipService.readDeskTerms
    * (400 INVALID_TERMS naming the field).
    */
@@ -69,6 +69,7 @@ const gymfolioPaymentController = {
         markPaid: markPaid !== false && markPaid !== 'false',
         durationMonths,
         couponCode,
+        paidBy: userIdOf(req),
         by: req.user && req.user.email
       });
 
@@ -245,10 +246,10 @@ const gymfolioPaymentController = {
     }
   },
 
-  /** GET /api/gymfolio/package-orders (staff) */
+  /** GET /api/gymfolio/package-orders (staff)  ?hasDues=1: only orders with a balance due */
   async getAllOrders(req, res) {
     try {
-      const { page, limit, status, paymentStatus, paymentMethod, search, sort } = req.query;
+      const { page, limit, status, paymentStatus, paymentMethod, search, sort, hasDues } = req.query;
       await sweepIfDue();
       const result = await gymfolioPaymentService.getAllOrders({
         page: page ? parseInt(page, 10) : 1,
@@ -257,6 +258,7 @@ const gymfolioPaymentController = {
         paymentStatus,
         paymentMethod,
         search,
+        hasDues: hasDues === '1' || hasDues === 'true',
         sort
       });
       return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });

@@ -16,6 +16,7 @@ const Counter = require('../gymfolio/models/counterModel');
 const Settings = require('../models/settings');
 const { currentTenant } = require('../platform/tenantContext');
 const { methodLabel } = require('./paymentMethods');
+const { paidSoFar } = require('../gymfolio/services/orderMoney');
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -127,7 +128,7 @@ async function renderInvoicePdf(order, options = {}) {
 
   doc.fillColor(muted).fontSize(8).font('Helvetica-Bold').text('PAYMENT', 350, y, { width: 195, align: 'right' });
   doc.fillColor(dark).fontSize(10).font('Helvetica').text(
-    `${methodLabel(payment.method)} · ${payment.status || ''}`.trim(),
+    `${methodLabel(payment.method)} · ${round2(payment.balanceDue || 0) > 0 ? 'part paid' : payment.status || ''}`.trim(),
     350,
     y + 12,
     { width: 195, align: 'right' }
@@ -185,7 +186,17 @@ async function renderInvoicePdf(order, options = {}) {
     totals.push([`Subtotal (excl. ${invoice.taxLabel || 'tax'})`, money(subtotal, currency)]);
     totals.push([`${invoice.taxLabel || 'Tax'} ${invoice.taxRate}% (included)`, money(invoice.taxAmount, currency)]);
   }
-  totals.push(['Total paid', money(invoice.total !== undefined ? invoice.total : payment.amount, currency)]);
+  const total = invoice.total !== undefined ? invoice.total : payment.amount;
+  // Paid in part: what came in so far and what is still owed, the balance
+  // as the bottom line.
+  const due = round2(payment.balanceDue || 0);
+  if (due > 0) {
+    totals.push(['Total', money(total, currency)]);
+    totals.push(['Paid so far', money(paidSoFar(payment), currency)]);
+    totals.push(['Balance due', money(due, currency)]);
+  } else {
+    totals.push(['Total paid', money(total, currency)]);
+  }
   totals.forEach(([label, value], i) => {
     const isTotal = i === totals.length - 1;
     doc.fillColor(isTotal ? dark : muted).fontSize(isTotal ? 12 : 10).font(isTotal ? 'Helvetica-Bold' : 'Helvetica');
@@ -193,6 +204,20 @@ async function renderInvoicePdf(order, options = {}) {
     doc.text(value, 445, y, { width: 90, align: 'right' });
     y += isTotal ? 22 : 16;
   });
+
+  // Each payment received, when the order was paid in parts.
+  const parts = Array.isArray(payment.installments) ? payment.installments : [];
+  if (parts.length) {
+    y += 10;
+    doc.fillColor(muted).fontSize(8).font('Helvetica-Bold').text('PAYMENTS RECEIVED', left, y);
+    y += 14;
+    doc.font('Helvetica').fontSize(9);
+    for (const part of parts.slice(0, 12)) {
+      doc.fillColor(dark).text(`${dateLabel(part.at)} · ${methodLabel(part.method || payment.method)}${part.note ? ` · ${part.note}` : ''}`, left + 10, y, { width: 380 });
+      doc.text(money(part.amount, currency), 445, y, { width: 90, align: 'right' });
+      y += 14;
+    }
+  }
 
   // Footer
   const footer = inv.footerNote || 'Thank you for training with us.';

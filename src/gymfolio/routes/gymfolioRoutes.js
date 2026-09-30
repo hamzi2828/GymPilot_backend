@@ -220,6 +220,10 @@ router.post(
 router.post('/package-orders/assign', auth, requirePermission('package-orders'), gymfolioPaymentController.assignPackageToUser);
 router.get('/package-orders', auth, requirePermission('package-orders'), gymfolioPaymentController.getAllOrders);
 router.get('/package-orders/me', auth, gymfolioPaymentController.getUserOrders);
+// The desk's member lists (controller/membershipListsController.js). Before
+// '/package-orders/:id', which would otherwise take the name for an id.
+const membershipListsController = require('../controller/membershipListsController');
+router.get('/package-orders/dues', auth, requirePermission('package-orders', 'view'), membershipListsController.dues);
 router.get('/package-orders/:id', auth, gymfolioPaymentController.getOrderById);
 router.put('/package-orders/:id/status', auth, requirePermission('package-orders'), gymfolioPaymentController.updateOrderStatus);
 router.post('/package-orders/:id/cancel-subscription', auth, gymfolioPaymentController.cancelSubscription);
@@ -245,5 +249,6 @@ router.post('/package-orders/:id/renew', auth, requirePermission('package-orders
 router.post('/package-orders/:id/change-package', auth, requirePermission('package-orders', 'manage'), membershipController.changePackage);
 router.post('/package-orders/:id/use-session', auth, requirePermission('package-orders', 'manage'), membershipController.useSession);
 router.post('/package-orders/:id/refund', auth, requirePermission('package-orders', 'manage'), membershipController.refund);
+router.post('/package-orders/:id/payments', auth, requirePermission('package-orders', 'manage'), membershipController.recordPayment);
 
 module.exports = router;

@@ -105,6 +105,36 @@ const packageOrderSchema = new mongoose.Schema(
       joiningFee: { type: Number, default: 0 },
       trainerFee: { type: Number, default: 0 },
 
+      // ---- Paying in parts (membershipService.recordPayment) ----
+      // A membership sold at the desk may be paid for over time: it is
+      // granted -- status 'paid', so everything that treats paid as active
+      // keeps working -- while balanceDue > 0. amountPaid is the money
+      // received so far; null on orders from before part payments, which
+      // were paid in full.
+      amountPaid: { type: Number, default: null },
+      balanceDue: { type: Number, default: 0 },
+      // When non-empty, these ARE the money received for the order, the
+      // first payment included, each on the day it arrived with its own
+      // method and its admission / trainer-fee shares (admission first).
+      // An order paid in full at once keeps none.
+      installments: {
+        type: [
+          new mongoose.Schema(
+            {
+              amount: { type: Number, required: true },
+              joiningFee: { type: Number, default: 0 },
+              trainerFee: { type: Number, default: 0 },
+              method: { type: String, default: '' },
+              at: { type: Date, required: true },
+              by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+              note: { type: String, default: '' }
+            },
+            { _id: false }
+          )
+        ],
+        default: []
+      },
+
       // ---- Discounts ----
       subtotal: { type: Number, default: null },        // list price (+ joining and trainer fees) before discount
       discountAmount: { type: Number, default: 0 },
@@ -363,6 +393,9 @@ packageOrderSchema.index({ 'payment.stripePaymentIntentId': 1 }, { sparse: true 
 // and each renewal (see accounts/services/ledger.js).
 packageOrderSchema.index({ 'payment.paidAt': -1 });
 packageOrderSchema.index({ 'subscription.renewals.at': -1 });
+packageOrderSchema.index({ 'payment.installments.at': -1 }, { sparse: true });
+// Who still owes money: only the few orders with a balance are indexed.
+packageOrderSchema.index({ 'payment.balanceDue': 1 }, { partialFilterExpression: { 'payment.balanceDue': { $gt: 0 } } });
 
 // Virtual for subscription duration
 packageOrderSchema.virtual('subscriptionDuration').get(function() {
