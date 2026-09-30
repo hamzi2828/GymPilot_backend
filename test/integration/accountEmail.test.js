@@ -90,9 +90,9 @@ test('nor the admin form, for a new account', async () => {
 test('a staff account with no email is told why at sign-in, and no code is sent anywhere', async () => {
   const before = h.calls.emails.length;
   const res = await h.inGym(gym, () => h.call(users.loginUser, { body: { email: legacyStaff.username, password: PASSWORD } }));
-  assert.notEqual(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
   assert.equal(res.body.token, undefined);
-  assert.match(JSON.stringify(res.body), /no email address/);
+  assert.match(res.body.message, /no email address/);
   assert.equal(h.calls.emails.length, before, 'nothing emailed to nobody');
 
   const stored = await h.inGym(gym, () => User.findById(legacyStaff._id).lean());

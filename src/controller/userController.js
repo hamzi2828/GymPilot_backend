@@ -810,6 +810,9 @@ const userController = {
             const twoFactor = require('../services/twoFactorService');
             if (await twoFactor.required(user)) {
                 const challenge = await twoFactor.startChallenge(user);
+                // Nothing is broken, the account just has no address: say so
+                // (409), as the Google and phone-app sign-ins do, not "try later".
+                if (challenge.noEmail) return res.status(409).json({ message: twoFactor.NO_EMAIL_SIGN_IN });
                 if (!challenge.emailed) {
                     return res.status(503).json({
                         message: 'We could not email your sign-in code. Please contact the gym.',
