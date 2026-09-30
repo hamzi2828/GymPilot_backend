@@ -147,6 +147,18 @@ test('the owner downloads the whole gym as one archive, named for the gym', asyn
   assert.equal(manifest.documents, events.filter((e) => e.type === 'documents').reduce((n, e) => n + e.documents.length, 0));
 });
 
+test('the counters are read last, after everything numbered from them', async () => {
+  // The gym keeps running while its collections are read one by one. Read
+  // before the sales and orders, a counter could miss a number handed out
+  // meanwhile -- and after a restore, the next receipt or invoice would
+  // repeat it. Read last, it can only be ahead of them (a gap, never a repeat).
+  await h.inGym(gym, () => h.src('gymfolio/models/counterModel').next('invoice'));
+  const events = await read((await download(gym)).bytes());
+  const names = events.filter((e) => e.type === 'collection').map((e) => e.collection.name);
+  assert.ok(names.includes('users'), names.join());
+  assert.equal(names[names.length - 1], 'gym_counters', names.join());
+});
+
 test('nothing of the platform or of another gym is in it', async () => {
   const events = await read((await download(gym)).bytes());
   const names = events.filter((e) => e.type === 'collection').map((e) => e.collection.name);
