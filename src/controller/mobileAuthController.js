@@ -191,6 +191,8 @@ module.exports = {
         const twoFactor = require('../services/twoFactorService');
         if (await twoFactor.required(user)) {
           const challenge = await twoFactor.startChallenge(user);
+          // No address to send a code to: a clear answer, not "try later".
+          if (challenge.noEmail) return { status: 409, body: { success: false, message: twoFactor.NO_EMAIL_SIGN_IN } };
           if (!challenge.emailed) {
             return { status: 503, body: { success: false, message: 'We could not email your sign-in code. Please contact your gym.' } };
           }

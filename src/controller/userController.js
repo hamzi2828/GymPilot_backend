@@ -266,6 +266,8 @@ async function twoFactorStep(user) {
   const twoFactor = require('../services/twoFactorService');
   if (!(await twoFactor.required(user))) return null;
   const challenge = await twoFactor.startChallenge(user);
+  // Nothing is broken, the account just has no address: say so, not "try later".
+  if (challenge.noEmail) return { status: 409, body: { message: twoFactor.NO_EMAIL_SIGN_IN } };
   if (!challenge.emailed) {
     return {
       status: 503,
@@ -382,6 +384,13 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
         // own. Emailing it to the person stays as it was.
         const revealRefusal = await resetRefusal(req, { role: assignedRole });
         if (revealRefusal && initial.mode !== 'email') return fail(403, revealRefusal);
+
+        // A staff role needs an address for the emailed sign-in code
+        // (services/twoFactorService.js needsEmail).
+        const { needsEmail } = require('../services/twoFactorService');
+        if (!normalisedEmail && needsEmail({ role: assignedRole, employment: { isStaff: !!(requestedRole && requestedRole.isStaff) } })) {
+            return fail(400, 'Staff need an email address: two-factor sign-in emails them a code.');
+        }
 
         // The gym's platform plan may cap how many accounts it can hold.
         const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
@@ -1373,6 +1382,17 @@ const userController = {
             // "manager" for the weeks it has left to run.
             const roleChanges = current.role !== target.slug
                 || !!(current.employment && current.employment.isStaff) !== !!target.isStaff;
+
+            // Staff are sent a sign-in code by email once the gym requires
+            // two-factor, so a member with no address stays a member until
+            // they add one (services/twoFactorService.js needsEmail).
+            const twoFactor = require('../services/twoFactorService');
+            if (roleChanges
+                && twoFactor.needsEmail({ role: target.slug, employment: { isStaff: !!target.isStaff } })
+                && !(await User.exists({ _id: id, email: { $type: 'string' } }))) {
+                return res.status(409).json({ message: twoFactor.STAFF_NEED_EMAIL });
+            }
+
             const change = { $set: { role: target.slug, ...employmentPatch } };
             if (roleChanges) change.$inc = { tokenVersion: 1 };
 
