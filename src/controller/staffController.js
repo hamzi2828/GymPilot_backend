@@ -6,12 +6,12 @@
 // is one indexed query rather than a join against the roles collection.
 //
 // A staff member is created the same way an admin-created member is: the
-// password is generated server-side and emailed. A plaintext password is never
-// accepted over the wire, so an admin filling in this form cannot choose one
-// (and cannot learn one they should not know).
+// password is generated server-side and emailed -- or, when the admin asks
+// (or the email cannot be sent), generated and shown to them once, or typed
+// by them. Who may choose or see whose password is the set-password rule in
+// services/adminPasswords.js, so nobody learns one they should not know.
 
 const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
 const mongoose = require('mongoose');
 
 const User = require('../models/user');
@@ -30,6 +30,7 @@ const guards = require('../services/roleGuards');
 const { payChangeProblem } = require('../services/payGuards');
 const { gymSiteName } = require('../services/gymName');
 const { forgetSession } = require('../middleware/auth');
+const { initialPassword, resetRefusal, setPasswordHandler } = require('../services/adminPasswords');
 
 // The live role requirePermission just read, never the token's claim.
 const actorRole = (req) => req.roleSlug || (req.user && req.user.role) || '';
@@ -40,25 +41,6 @@ const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Satur
 const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'intern', 'casual'];
 const PAY_CYCLES = ['monthly', 'biweekly', 'weekly'];
 const STAFF_PREFIX = 'TR-';
-
-// Same generator as admin user creation: readable enough to retype from an
-// email, without the glyphs that get misread doing it.
-function generatePassword(length = 14) {
-  const upper = 'ABCDEFGHJKMNPQRSTUVWXYZ';
-  const lower = 'abcdefghijkmnpqrstuvwxyz';
-  const digits = '23456789';
-  const symbols = '!@#$%^&*';
-  const all = upper + lower + digits + symbols;
-  const pick = (set) => set[crypto.randomInt(0, set.length)];
-
-  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
-  while (chars.length < length) chars.push(pick(all));
-  for (let i = chars.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(0, i + 1);
-    [chars[i], chars[j]] = [chars[j], chars[i]];
-  }
-  return chars.join('');
-}
 
 function staffWelcomeEmail({ firstName, email, password, roleName, siteName, loginUrl }) {
   return `
@@ -391,6 +373,11 @@ module.exports = {
   },
 
   // POST /api/staff
+  //
+  // Beside the staff fields: credentials?: 'email' | 'show' | 'set' and
+  // password? -- the same first-password choices as the Users screen
+  // (services/adminPasswords.js initialPassword). A generated password the
+  // email could not deliver comes back in `password`, shown once.
   create: async (req, res) => {
     try {
       await ensureDefaultRoles();
@@ -420,6 +407,19 @@ module.exports = {
       const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: roleDoc.slug });
       if (refusal) return res.status(403).json({ message: refusal });
 
+      const initial = initialPassword(req.body || {}, { canEmail: true });
+      if (initial.problem) return res.status(400).json({ message: initial.problem });
+
+      // Choosing or seeing a new account's password is being able to sign
+      // in as it: not for a role that reaches further than the admin's own,
+      // nor for a front-desk grant they do not hold themselves.
+      const revealRefusal = await resetRefusal(req, {
+        role: roleDoc.slug,
+        allowAttendanceApp: !!req.body.allowAttendanceApp,
+        allowFingerprintEnrollment: !!req.body.allowFingerprintEnrollment
+      });
+      if (revealRefusal && initial.mode !== 'email') return res.status(403).json({ message: revealRefusal });
+
       const existing = await User.findOne({ email: normalisedEmail });
       if (existing) {
         return res.status(409).json({
@@ -433,7 +433,7 @@ module.exports = {
       const limit = await checkLimit('staff');
       if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
 
-      const password = generatePassword();
+      const { password } = initial;
       const hashed = await bcrypt.hash(password, await bcrypt.genSalt(10));
 
       const user = await User.create({
@@ -452,40 +452,54 @@ module.exports = {
       });
 
       // The account exists whether or not the email lands, so a send failure is
-      // reported rather than rolled back -- the admin can read the address back
-      // to them instead.
+      // reported rather than rolled back -- and the password is handed to the
+      // admin instead of being thrown away with the failed send.
       let emailed = false;
       let emailError = null;
-      try {
-        const siteName = await gymSiteName();
-        const loginUrl = `${tenantOrigin()}/authentication`;
-        const result = await sendEmail(
-          normalisedEmail,
-          `Your ${siteName} staff account`,
-          staffWelcomeEmail({
-            firstName: user.firstName,
-            email: normalisedEmail,
-            password,
-            roleName: roleDoc.name,
-            siteName,
-            loginUrl
-          })
-        );
-        emailed = !!result.success;
-        if (!result.success) emailError = result.error;
-      } catch (err) {
-        emailError = err.message;
+      if (initial.mode === 'email') {
+        try {
+          const siteName = await gymSiteName();
+          const loginUrl = `${tenantOrigin()}/authentication`;
+          const result = await sendEmail(
+            normalisedEmail,
+            `Your ${siteName} staff account`,
+            staffWelcomeEmail({
+              firstName: user.firstName,
+              email: normalisedEmail,
+              password,
+              roleName: roleDoc.name,
+              siteName,
+              loginUrl
+            })
+          );
+          emailed = !!result.success;
+          if (!result.success) emailError = result.error;
+        } catch (err) {
+          emailError = err.message;
+        }
       }
 
       invalidate();
 
+      const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed && !revealRefusal);
+      let message = `${user.firstName} was registered with the password you chose.`;
+      if (initial.mode === 'show') message = `${user.firstName} was registered. Hand them the password below: it is shown only once.`;
+      if (initial.mode === 'email') {
+        message = emailed
+          ? `${user.firstName} was registered and their sign-in details emailed.`
+          : reveal
+            ? `${user.firstName} was registered, but the credentials email could not be sent. Hand them the password below: it is shown only once.`
+            : `${user.firstName} was registered, but the credentials email could not be sent. Ask an administrator to set their password.`;
+      }
+
+      if (reveal) res.setHeader('Cache-Control', 'no-store');
       return res.status(201).json({
         success: true,
-        message: emailed
-          ? `${user.firstName} was registered and their sign-in details emailed.`
-          : `${user.firstName} was registered, but the credentials email could not be sent.`,
+        message,
         emailed,
         emailError,
+        credentials: initial.mode,
+        ...(reveal ? { password } : {}),
         staff: shapeStaff(user.toObject(), roleDoc.name)
       });
     } catch (error) {
@@ -601,6 +615,17 @@ module.exports = {
       return res.status(400).json({ message: 'Could not update this staff member', error: error.message });
     }
   },
+
+  // POST /api/staff/:id/password   { password? }
+  //
+  // The Staff screen's "Set password": typed, or generated and returned
+  // once. Only for someone on the staff list -- a member's password is the
+  // Users screen's business. Rules and session ending:
+  // services/adminPasswords.js.
+  setPassword: setPasswordHandler({
+    load: (id) => User.findOne({ _id: id, 'employment.isStaff': true }),
+    notFound: 'Staff member not found'
+  }),
 
   // PATCH /api/staff/:id/status
   setStatus: async (req, res) => {

@@ -129,26 +129,6 @@ async function subscriptionsBlockDeletion(userId, { self, by = null }) {
     return live ? refusal('') : null;
 }
 
-/** Generates a readable but strong temporary password. */
-function generatePassword(length = 14) {
-  // Ambiguous glyphs (0/O, 1/l/I) omitted so the password survives being read
-  // out of an email and retyped.
-  const upper = 'ABCDEFGHJKMNPQRSTUVWXYZ';
-  const lower = 'abcdefghijkmnpqrstuvwxyz';
-  const digits = '23456789';
-  const symbols = '!@#$%^&*';
-  const all = upper + lower + digits + symbols;
-  const pick = (set) => set[crypto.randomInt(0, set.length)];
-  // Guarantee one of each class, then fill and shuffle.
-  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
-  while (chars.length < length) chars.push(pick(all));
-  for (let i = chars.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(0, i + 1);
-    [chars[i], chars[j]] = [chars[j], chars[i]];
-  }
-  return chars.join('');
-}
-
 function welcomeEmailHtml({ firstName, email, username, password, siteName, loginUrl }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
@@ -195,18 +175,9 @@ function hashResetToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-// Minimum that is worth enforcing. Deliberately a length rule and nothing
-// else: composition rules push people towards "Password1!" and no further.
-const MIN_PASSWORD_LENGTH = 8;
-
-function passwordProblem(password) {
-  if (!password || typeof password !== 'string') return 'A new password is required';
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
-  }
-  if (password.length > 200) return 'Password is too long';
-  return null;
-}
+// The password rule (a length, nothing else) and the generator live with the
+// admin set-password code, so every screen applies the same ones.
+const { passwordProblem, initialPassword, resetRefusal, setPasswordHandler } = require('../services/adminPasswords');
 
 // Stores a fresh reset token on the account and emails the link. Run after
 // the response has gone (see forgotPassword), so it reports trouble in the
@@ -319,7 +290,16 @@ function googleErrorCode(error) {
 const userController = {
 
 
-    // POST /admin/users - Admin creates a user and emails them their password
+    // POST /admin/users - Admin creates a user
+    //
+    // { firstName, lastName, email, role, phone,
+    //   credentials?: 'email' | 'show' | 'set', password? }
+    //
+    // How the first password reaches the person (services/adminPasswords.js
+    // initialPassword): emailed (the default), generated and shown to the
+    // admin once, or typed by the admin. An email that cannot be sent no
+    // longer throws the password away: it comes back in `password`, shown
+    // once, so a gym whose mail is down can still hand it over.
     adminCreateUser: async (req, res) => {
         try {
             const { firstName, lastName, email, role, phone } = req.body;
@@ -355,13 +335,23 @@ const userController = {
             const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: assignedRole });
             if (refusal) return res.status(403).json({ message: refusal });
 
+            const initial = initialPassword(req.body, { canEmail: true });
+            if (initial.problem) return res.status(400).json({ message: initial.problem });
+
+            // Knowing a new account's password is being able to sign in as
+            // it, so choosing or seeing one is held to the set-password rule:
+            // not for an account whose role reaches further than the admin's
+            // own. Emailing it to the person stays as it was.
+            const revealRefusal = await resetRefusal(req, { role: assignedRole });
+            if (revealRefusal && initial.mode !== 'email') {
+                return res.status(403).json({ message: revealRefusal });
+            }
+
             // The gym's platform plan may cap how many accounts it can hold.
             const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
             if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
 
-            // Generated server-side so a plaintext password is never accepted
-            // over the wire or persisted anywhere but the outbound email.
-            const password = generatePassword();
+            const { password } = initial;
             const salt = await bcrypt.genSalt(10);
             const hashed = await bcrypt.hash(password, salt);
 
@@ -382,26 +372,42 @@ const userController = {
             // send failure is reported rather than failing the whole request.
             let emailed = false;
             let emailError = null;
-            try {
-                const siteName = await gymSiteName();
-                const loginUrl = `${tenantOrigin()}/authentication`;
-                const result = await sendEmail(
-                    normalisedEmail,
-                    `Your ${siteName} account`,
-                    welcomeEmailHtml({ firstName: user.firstName, email: normalisedEmail, username: user.username, password, siteName, loginUrl })
-                );
-                emailed = !!result.success;
-                if (!result.success) emailError = result.error;
-            } catch (err) {
-                emailError = err.message;
+            if (initial.mode === 'email') {
+                try {
+                    const siteName = await gymSiteName();
+                    const loginUrl = `${tenantOrigin()}/authentication`;
+                    const result = await sendEmail(
+                        normalisedEmail,
+                        `Your ${siteName} account`,
+                        welcomeEmailHtml({ firstName: user.firstName, email: normalisedEmail, username: user.username, password, siteName, loginUrl })
+                    );
+                    emailed = !!result.success;
+                    if (!result.success) emailError = result.error;
+                } catch (err) {
+                    emailError = err.message;
+                }
             }
 
-            return res.status(201).json({
-                message: emailed
+            // Shown to the admin once: a generated password nobody else will
+            // ever see -- asked for, or left over from an email that failed.
+            const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed && !revealRefusal);
+            let message = 'User created with the password you chose';
+            if (initial.mode === 'show') message = 'User created. Hand them the password below: it is shown only once';
+            if (initial.mode === 'email') {
+                message = emailed
                     ? 'User created and credentials emailed'
-                    : 'User created, but the credentials email could not be sent',
+                    : reveal
+                        ? 'User created, but the credentials email could not be sent. Hand them the password below: it is shown only once'
+                        : 'User created, but the credentials email could not be sent. Ask an administrator to set their password';
+            }
+
+            if (reveal) res.setHeader('Cache-Control', 'no-store');
+            return res.status(201).json({
+                message,
                 emailed,
                 emailError,
+                credentials: initial.mode,
+                ...(reveal ? { password } : {}),
                 data: publicUserView(user),
             });
         } catch (error) {
@@ -411,6 +417,17 @@ const userController = {
             return res.status(400).json({ message: 'Error creating user', error: error.message });
         }
     },
+
+    // POST /admin/users/:id/password   { password? }
+    //
+    // An admin sets (or, with no password, generates) a member's or staff
+    // member's password -- the way in when there is no email to reset from,
+    // or the email is down. Ends every session the account had. Who may do
+    // it to whom: services/adminPasswords.js resetProblem.
+    setUserPassword: setPasswordHandler({
+        load: (id) => User.findById(id),
+        notFound: 'User not found'
+    }),
 
     // POST /admin/users/:id/username - Issue a fresh username
     //

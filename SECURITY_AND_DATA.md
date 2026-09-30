@@ -11,7 +11,9 @@ every request, re-reading the account at most every 30 seconds per process:
 * a deactivated account is out within 30 seconds;
 * bumping `tokenVersion` ends every session at once — `POST /user/logout-all`
   (the member, from **Security & privacy** on their account page), a
-  password change or reset, staff **Sign out** on the Users screen
+  password change or reset, staff setting it (**Set password** on the Users
+  and Staff screens, which also signs out the front-desk app), staff
+  **Sign out** on the Users screen
   (`POST /admin/users/:id/logout-all`), and any change of role or of being
   on the staff list (the Users role picker, a Staff edit, removing someone
   from staff). A token names the role it was signed in with, so a demoted
