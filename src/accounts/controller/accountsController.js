@@ -15,6 +15,7 @@ const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const Attendance = require('../../attendance/models/attendanceModel');
 const L = require('../services/ledger');
+const categories = require('../services/categories');
 const T = require('../../attendance/services/timeUtils');
 
 // The sales list shows at most this many payments; the totals above it are
@@ -166,7 +167,7 @@ module.exports = {
 
       // Till sales (shop / POS) are money in beside memberships.
       const Sale = require('../../models/saleModel');
-      const [payments, refundRows, expenses, assets, payroll, sales] = await Promise.all([
+      const [payments, refundRows, expenses, assets, payroll, sales, expenseHeads] = await Promise.all([
         // Every membership payment received in the period -- first payments
         // and renewals -- including those on orders refunded since: the
         // refund is counted on its own, below.
@@ -185,7 +186,10 @@ module.exports = {
         Sale.find({ status: 'paid', paidAt: { $gte: range.start, $lt: range.end } })
           .select('total currency paidAt paymentMethod items')
           .lean()
-          .catch(() => [])
+          .catch(() => []),
+
+        // The gym's own expense heads, to name them in the breakdown.
+        categories.headsFor('expense')
       ]);
 
       // ---- Money in ----
@@ -240,7 +244,7 @@ module.exports = {
 
         const entry = byCategory.get(expense.category) || {
           category: expense.category,
-          label: Expense.CATEGORY_LABELS[expense.category] || expense.category,
+          label: expenseHeads.labelOf(expense.category),
           count: 0,
           totals: {}
         };

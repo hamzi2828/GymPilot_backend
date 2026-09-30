@@ -11,6 +11,7 @@ const Expense = require('../models/expenseModel');
 const Asset = require('../models/assetModel');
 const User = require('../../models/user');
 const L = require('../services/ledger');
+const categories = require('../services/categories');
 const T = require('../../attendance/services/timeUtils');
 
 const METHODS = ['cash', 'bank_transfer', 'card', 'cheque', 'online', 'other'];
@@ -33,13 +34,15 @@ async function nextReference(incurredOn) {
   return prefix + String(sequence).padStart(4, '0');
 }
 
-function shape(expense) {
+// `heads` (services/categories.headsFor('expense')) names the gym's own heads;
+// without it only the built-in ones have a label.
+function shape(expense, heads = null) {
   return {
     id: String(expense._id),
     reference: expense.reference,
     title: expense.title,
     category: expense.category,
-    category_label: Expense.CATEGORY_LABELS[expense.category] || expense.category,
+    category_label: heads ? heads.labelOf(expense.category) : Expense.CATEGORY_LABELS[expense.category] || expense.category,
     amount: L.round(expense.amount),
     currency: expense.currency,
     incurred_on: expense.incurredOn,
@@ -75,12 +78,14 @@ function readDate(value, fallback = null) {
   return L.localInstant(text, 12, 0);
 }
 
-async function readBody(body, existing = {}) {
+async function readBody(body, existing = {}, heads = null) {
   const amount = Number(body.amount);
   if (!body.title || !String(body.title).trim()) throw new Error('Give the expense a title');
   if (!Number.isFinite(amount) || amount < 0) throw new Error('Enter a valid amount');
 
-  const category = Expense.CATEGORIES.includes(body.category) ? body.category : 'other';
+  // A built-in head or one of the gym's own that is not archived; a row
+  // already filed under an archived head keeps it.
+  const category = categories.pickCategory(heads || (await categories.headsFor('expense')), body.category, existing.category);
   const status = STATUSES.includes(body.status) ? body.status : 'paid';
   const incurredOn = readDate(body.incurredOn, existing.incurredOn || new Date());
 
@@ -141,6 +146,7 @@ module.exports = {
     try {
       const range = L.readRange(req.query);
       const base = await L.baseCurrency();
+      const heads = await categories.headsFor('expense');
 
       const filter = { incurredOn: { $gte: range.start, $lt: range.end } };
       if (req.query.category && req.query.category !== 'all') filter.category = String(req.query.category);
@@ -166,7 +172,7 @@ module.exports = {
         if (row.status === 'cancelled') continue;
         const entry = byCategory.get(row.category) || {
           category: row.category,
-          label: Expense.CATEGORY_LABELS[row.category] || row.category,
+          label: heads.labelOf(row.category),
           count: 0,
           totals: {}
         };
@@ -182,7 +188,10 @@ module.exports = {
         record_currency: await L.recordCurrency(),
         currency_notice: await L.currencyNotice(),
         range: { from: range.from, to: range.to, label: range.label, today: range.today },
-        categories: Expense.CATEGORIES.map((key) => ({ key, label: Expense.CATEGORY_LABELS[key] })),
+        // What a new expense can be filed under; the archived heads are listed
+        // apart, for the filter -- old rows are still filed under them.
+        categories: heads.active.map((head) => ({ key: head.key, label: head.label, built_in: head.built_in })),
+        archived_categories: heads.archived.map((head) => ({ key: head.key, label: head.label })),
         methods: METHODS,
         summary: {
           paid: L.presentTotals(paid, base),
@@ -192,7 +201,7 @@ module.exports = {
             .map((entry) => ({ ...entry, totals: L.presentTotals(entry.totals, base) }))
             .sort((a, b) => b.totals.base_amount - a.totals.base_amount)
         },
-        expenses: rows.map(shape)
+        expenses: rows.map((row) => shape(row, heads))
       });
     } catch (error) {
       console.error('[accounts] expenses list failed:', error);
@@ -203,7 +212,8 @@ module.exports = {
   // POST /api/accounts/expenses
   create: async (req, res) => {
     try {
-      const patch = await readBody(req.body || {});
+      const heads = await categories.headsFor('expense');
+      const patch = await readBody(req.body || {}, {}, heads);
       const expense = await Expense.create({
         ...patch,
         reference: await nextReference(patch.incurredOn),
@@ -221,7 +231,7 @@ module.exports = {
         success: true,
         message: `${expense.reference} recorded.`,
         suggest_asset: suggestsAsset,
-        expense: shape(expense)
+        expense: shape(expense, heads)
       });
     } catch (error) {
       console.error('[accounts] expense create failed:', error);
@@ -238,11 +248,12 @@ module.exports = {
       const expense = await Expense.findById(id);
       if (!expense) return res.status(404).json({ message: 'Expense not found' });
 
-      const patch = await readBody(req.body || {}, expense.toObject());
+      const heads = await categories.headsFor('expense');
+      const patch = await readBody(req.body || {}, expense.toObject(), heads);
       Object.assign(expense, patch);
       await expense.save();
 
-      return res.json({ success: true, message: `${expense.reference} updated.`, expense: shape(expense) });
+      return res.json({ success: true, message: `${expense.reference} updated.`, expense: shape(expense, heads) });
     } catch (error) {
       console.error('[accounts] expense update failed:', error);
       return res.status(400).json({ message: error.message || 'Could not update this expense' });

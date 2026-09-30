@@ -10,6 +10,7 @@ const mongoose = require('mongoose');
 const Asset = require('../models/assetModel');
 const Expense = require('../models/expenseModel');
 const L = require('../services/ledger');
+const categories = require('../services/categories');
 const T = require('../../attendance/services/timeUtils');
 
 const CONDITIONS = ['new', 'good', 'fair', 'poor', 'unusable'];
@@ -44,7 +45,9 @@ function dateInput(value) {
   return value ? T.dateKey(new Date(value)) : '';
 }
 
-function shape(asset, now = new Date()) {
+// `heads` (services/categories.headsFor('asset')) names the gym's own heads;
+// without it only the built-in ones have a label.
+function shape(asset, now = new Date(), heads = null) {
   const value = L.depreciate(asset, now);
   const dueDate = asset.nextServiceDue ? new Date(asset.nextServiceDue) : null;
   const daysToService = dueDate ? Math.ceil((dueDate.getTime() - now.getTime()) / L.DAY_MS) : null;
@@ -54,7 +57,7 @@ function shape(asset, now = new Date()) {
     tag: asset.tag,
     name: asset.name,
     category: asset.category,
-    category_label: Asset.CATEGORY_LABELS[asset.category] || asset.category,
+    category_label: heads ? heads.labelOf(asset.category) : Asset.CATEGORY_LABELS[asset.category] || asset.category,
 
     quantity: asset.quantity || 1,
     unit_cost: L.round(asset.unitCost),
@@ -111,10 +114,12 @@ function amount(value, current) {
   return value !== undefined ? Math.max(0, Number(value) || 0) : Number(current) || 0;
 }
 
-async function readBody(body, existing = {}) {
+async function readBody(body, existing = {}, heads = null) {
   if (!body.name || !String(body.name).trim()) throw new Error('Give the asset a name');
 
-  const category = Asset.CATEGORIES.includes(body.category) ? body.category : 'other';
+  // A built-in head or one of the gym's own that is not archived; an asset
+  // already filed under an archived head keeps it.
+  const category = categories.pickCategory(heads || (await categories.headsFor('asset')), body.category, existing.category);
   const purchasedOn = readDate(body.purchasedOn, existing.purchasedOn || null);
 
   const patch = {
@@ -140,7 +145,7 @@ async function readBody(body, existing = {}) {
     usefulLifeYears:
       body.usefulLifeYears !== undefined && body.usefulLifeYears !== ''
         ? Math.max(0, Number(body.usefulLifeYears) || 0)
-        : existing.usefulLifeYears || Asset.DEFAULT_LIFE_YEARS[category] || 5,
+        : existing.usefulLifeYears || Asset.DEFAULT_LIFE_YEARS[category] || categories.CUSTOM_ASSET_LIFE_YEARS,
     salvageValue: amount(body.salvageValue, existing.salvageValue),
     serviceIntervalDays: amount(body.serviceIntervalDays, existing.serviceIntervalDays),
     lastServicedOn: readDate(body.lastServicedOn, existing.lastServicedOn || null),
@@ -168,6 +173,7 @@ module.exports = {
     try {
       const base = await L.baseCurrency();
       const now = new Date();
+      const heads = await categories.headsFor('asset');
 
       const filter = {};
       if (req.query.category && req.query.category !== 'all') filter.category = String(req.query.category);
@@ -181,7 +187,7 @@ module.exports = {
       }
 
       let rows = await Asset.find(filter).sort({ createdAt: -1 }).lean();
-      const shaped = rows.map((row) => shape(row, now));
+      const shaped = rows.map((row) => shape(row, now, heads));
 
       // Applied after shaping because "overdue" is derived, not stored.
       const due = String(req.query.service || 'all');
@@ -218,11 +224,15 @@ module.exports = {
         // What a new asset is recorded in: the Settings currency.
         record_currency: await L.recordCurrency(),
         currency_notice: await L.currencyNotice(),
-        categories: Asset.CATEGORIES.map((key) => ({
-          key,
-          label: Asset.CATEGORY_LABELS[key],
-          default_life: Asset.DEFAULT_LIFE_YEARS[key]
+        // What a new asset can be filed under; the archived heads are listed
+        // apart, for the filter -- items already filed under them keep them.
+        categories: heads.active.map((head) => ({
+          key: head.key,
+          label: head.label,
+          default_life: head.default_life,
+          built_in: head.built_in
         })),
+        archived_categories: heads.archived.map((head) => ({ key: head.key, label: head.label })),
         conditions: CONDITIONS,
         statuses: STATUSES,
         summary: {
@@ -250,7 +260,8 @@ module.exports = {
   // POST /api/accounts/assets
   create: async (req, res) => {
     try {
-      const patch = await readBody(req.body || {});
+      const heads = await categories.headsFor('asset');
+      const patch = await readBody(req.body || {}, {}, heads);
       const asset = await Asset.create({
         ...patch,
         tag: await nextTag(),
@@ -295,7 +306,7 @@ module.exports = {
         message: expense
           ? `${asset.tag} added to the register, and ${expense.reference} recorded as an expense.`
           : `${asset.tag} added to the register.`,
-        asset: shape(asset)
+        asset: shape(asset, new Date(), heads)
       });
     } catch (error) {
       console.error('[accounts] asset create failed:', error);
@@ -312,11 +323,12 @@ module.exports = {
       const asset = await Asset.findById(id);
       if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-      const patch = await readBody(req.body || {}, asset.toObject());
+      const heads = await categories.headsFor('asset');
+      const patch = await readBody(req.body || {}, asset.toObject(), heads);
       Object.assign(asset, patch);
       await asset.save();
 
-      return res.json({ success: true, message: `${asset.tag} updated.`, asset: shape(asset) });
+      return res.json({ success: true, message: `${asset.tag} updated.`, asset: shape(asset, new Date(), heads) });
     } catch (error) {
       console.error('[accounts] asset update failed:', error);
       return res.status(400).json({ message: error.message || 'Could not update this asset' });
@@ -359,7 +371,7 @@ module.exports = {
         message: asset.nextServiceDue
           ? `${asset.tag} serviced. Next due ${T.dateLabel(asset.nextServiceDue)}.`
           : `${asset.tag} serviced.`,
-        asset: shape(asset)
+        asset: shape(asset, new Date(), await categories.headsFor('asset'))
       });
     } catch (error) {
       console.error('[accounts] service log failed:', error);

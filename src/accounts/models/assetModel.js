@@ -68,7 +68,9 @@ const assetSchema = new mongoose.Schema(
     tag: { type: String, required: true, unique: true, trim: true, index: true },
 
     name: { type: String, required: true, trim: true },
-    category: { type: String, enum: CATEGORIES, default: 'other', index: true },
+    // A built-in key below or one of the gym's own heads (categoryModel.js,
+    // services/categories.js).
+    category: { type: String, default: 'other', trim: true, index: true },
 
     quantity: { type: Number, default: 1, min: 1 },
     // Cost of ONE unit. Total is quantity x this, computed where it is shown,
