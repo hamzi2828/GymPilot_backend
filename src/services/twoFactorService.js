@@ -41,8 +41,31 @@ async function required(user) {
   return !!(settings && settings.twoFactorAuth);
 }
 
-/** Creates a challenge for the user and emails the code. */
+// The code goes by email, so an account this step can apply to needs an
+// address to send it to. The Staff screen asks for one, but a member without
+// one (a phone-only desk sign-up) could still be given a staff role from the
+// Users tab -- and then, the day the gym requires two-factor, never sign in
+// again. Checked wherever an account is given a role, whether or not the gym
+// requires two-factor today: it can be switched on at any time.
+const STAFF_NEED_EMAIL = 'This account has no email address, and staff need one: two-factor sign-in emails them a code. Ask them to add an email to their profile first.';
+
+// What such an account is told at sign-in (one made before the rule above):
+// only its owner can add an address, so they need to get in without the code.
+const NO_EMAIL_SIGN_IN = 'Your sign-in code is sent by email, and this account has no email address. Ask an administrator to turn off two-factor sign-in while you sign in and add one to your profile.';
+
+/** Whether `account`, as it will be after a change, must keep an email address. */
+function needsEmail(account) {
+  if (!account) return false;
+  return isStaff(account) || !!(account.twoFactor && account.twoFactor.enabled);
+}
+
+/**
+ * Creates a challenge for the user and emails the code. An account with no
+ * email gets `noEmail` and no challenge: there is nowhere to send a code.
+ */
 async function startChallenge(user) {
+  if (!user.email) return { challengeId: null, emailed: false, noEmail: true, error: NO_EMAIL_SIGN_IN };
+
   const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
   const challengeId = crypto.randomBytes(16).toString('hex');
 
@@ -111,4 +134,15 @@ async function verify(challengeId, code) {
   return user;
 }
 
-module.exports = { required, startChallenge, verify, maskEmail, isStaff, CODE_TTL_MS, MAX_ATTEMPTS };
+module.exports = {
+  required,
+  startChallenge,
+  verify,
+  maskEmail,
+  isStaff,
+  needsEmail,
+  STAFF_NEED_EMAIL,
+  NO_EMAIL_SIGN_IN,
+  CODE_TTL_MS,
+  MAX_ATTEMPTS
+};

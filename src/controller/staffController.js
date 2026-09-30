@@ -604,6 +604,15 @@ module.exports = {
       // re-reads the live one: a new role ends the old sessions rather than
       // leaving a demoted manager weeks of "manager".
       const roleChanged = user.role !== wasRole || !!(user.employment && user.employment.isStaff) !== wasStaff;
+
+      // Staff are emailed a sign-in code once the gym requires two-factor,
+      // so an account with no address is not moved onto a staff role
+      // (services/twoFactorService.js needsEmail).
+      const { needsEmail, STAFF_NEED_EMAIL } = require('../services/twoFactorService');
+      if (roleChanged && !user.email && needsEmail(user)) {
+        return res.status(409).json({ message: STAFF_NEED_EMAIL });
+      }
+
       if (roleChanged) user.tokenVersion = (user.tokenVersion || 0) + 1;
 
       await user.save();

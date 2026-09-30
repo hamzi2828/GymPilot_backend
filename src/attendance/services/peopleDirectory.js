@@ -37,8 +37,14 @@ function fullName(user) {
 // bring "GP-A12" across from an old system, and reading that as the highest
 // code would restart the series at GP-0001 on every call. `offset` is how
 // many codes past the highest to go -- a retry after losing a race.
+//
+// Highest by number, not by string: an import can bring "GP-101" across
+// beside the series' own "GP-0102", and as a string "GP-101" sorts above
+// even "GP-0999" -- so the next code, and every retry after it, landed on
+// one already taken. numericOrdering compares the digits as a number.
 async function nextSequentialCode(Model, field, prefix, offset = 0) {
   const last = await Model.findOne({ [field]: new RegExp('^' + prefix + '\\d+$') })
+    .collation({ locale: 'en', numericOrdering: true })
     .sort({ [field]: -1 })
     .select(field)
     .lean();
@@ -59,8 +65,9 @@ async function nextSequentialCode(Model, field, prefix, offset = 0) {
 async function ensureMemberCode(user) {
   if (user.memberCode) return user.memberCode;
 
+  let code = '';
   for (let attempt = 0; attempt < 3; attempt++) {
-    const code = await nextSequentialCode(User, 'memberCode', MEMBER_PREFIX, attempt);
+    code = await nextSequentialCode(User, 'memberCode', MEMBER_PREFIX, attempt);
     try {
       await User.updateOne({ _id: user._id, memberCode: null }, { $set: { memberCode: code } });
       const saved = await User.findById(user._id).select('memberCode').lean();
@@ -69,6 +76,9 @@ async function ensureMemberCode(user) {
       if (err.code !== 11000) throw err;
     }
   }
+  // Said out loud: callers carry on without an ID (the desk tries again on
+  // first sight), so without this a series that has stopped goes unnoticed.
+  console.error('[people] no free member ID for', String(user._id), 'after 3 tries; the last was', code);
   return '';
 }
 

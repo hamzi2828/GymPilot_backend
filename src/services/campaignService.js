@@ -131,28 +131,43 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
     MessageLog.distinct('to', failedFilter)
   ]);
   const already = new Set([...reached, ...failedThisPass]);
-  const pending = recipients.filter((r) => {
-    const address = addressFor(r, channel);
-    return !address || !already.has(address);
-  });
+
+  // Nobody without an address on this channel is pending: they can never be
+  // reached, and while they stayed in the queue a batch made only of them
+  // came round again on every call -- fifty members with no email at the
+  // front of the list, and nobody behind them was ever sent the campaign.
+  const unreachable = [];
+  const pending = [];
+  for (const recipient of recipients) {
+    const address = addressFor(recipient, channel);
+    if (!address) unreachable.push(recipient);
+    else if (!already.has(address)) pending.push(recipient);
+  }
   const batch = pending.slice(0, limit);
 
   let sent = 0;
   let failed = 0;
   let skipped = 0;
 
+  // They are counted as skipped and logged once, by the campaign's first
+  // batch: the counts are added up call by call, and a retry pass is the
+  // same people. Logged under a synthetic address so the rows are visible
+  // but never matched as "already sent" -- in one write, as there can be
+  // thousands, and (like MessageLog.record) never failing the send.
+  if (unreachable.length && !(await MessageLog.exists({ campaignId: campaign._id, status: 'skipped' }))) {
+    skipped = unreachable.length;
+    const error = `no ${channel === 'email' ? 'email address' : channel === 'push' ? 'account' : 'phone number'}`;
+    const body = String(campaign.body || '').slice(0, 500);
+    await MessageLog.insertMany(
+      unreachable.map((recipient) => ({ channel, to: '', userId: recipient.userId || null, subject: campaign.subject, body, context: 'campaign', campaignId: campaign._id, status: 'skipped', error })),
+      { ordered: false }
+    ).catch((err) => console.error('[campaigns] could not log the skipped recipients:', err.message));
+  }
+
   for (const recipient of batch) {
     const address = addressFor(recipient, channel);
     const vars = campaignVars(recipient, b);
     const meta = { context: 'campaign', campaignId: campaign._id, userId: recipient.userId || null, sentBy: actorId };
-
-    if (!address) {
-      skipped += 1;
-      // Logged under a synthetic address so the row is visible but never
-      // matched as "already sent".
-      MessageLog.record({ channel, to: '', userId: recipient.userId || null, subject: campaign.subject, body: campaign.body, context: 'campaign', campaignId: campaign._id, status: 'skipped', error: `no ${channel === 'email' ? 'email address' : channel === 'push' ? 'account' : 'phone number'}` });
-      continue;
-    }
 
     let result;
     if (channel === 'email') {

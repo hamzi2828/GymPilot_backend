@@ -266,6 +266,8 @@ async function twoFactorStep(user) {
   const twoFactor = require('../services/twoFactorService');
   if (!(await twoFactor.required(user))) return null;
   const challenge = await twoFactor.startChallenge(user);
+  // Nothing is broken, the account just has no address: say so, not "try later".
+  if (challenge.noEmail) return { status: 409, body: { message: twoFactor.NO_EMAIL_SIGN_IN } };
   if (!challenge.emailed) {
     return {
       status: 503,
@@ -383,6 +385,13 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
         const revealRefusal = await resetRefusal(req, { role: assignedRole });
         if (revealRefusal && initial.mode !== 'email') return fail(403, revealRefusal);
 
+        // A staff role needs an address for the emailed sign-in code
+        // (services/twoFactorService.js needsEmail).
+        const { needsEmail } = require('../services/twoFactorService');
+        if (!normalisedEmail && needsEmail({ role: assignedRole, employment: { isStaff: !!(requestedRole && requestedRole.isStaff) } })) {
+            return fail(400, 'Staff need an email address: two-factor sign-in emails them a code.');
+        }
+
         // The gym's platform plan may cap how many accounts it can hold.
         const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
         if (!limit.ok) return fail(403, limit.message, { code: limit.code });
@@ -457,6 +466,23 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
         if (error && error.code === 11000) return fail(409, duplicateMessage(error));
         return fail(400, 'Error creating user', { error: error.message });
     }
+}
+
+// Why `account` may not remove its own email address, or null. A member may:
+// email is optional, and they sign in with their username. Not an account
+// that two-factor sign-in sends a code to (staff, or anyone who switched it
+// on), and not a Google sign-in, which finds its account by this address.
+function emailRemovalProblem(account) {
+    const { needsEmail, isStaff } = require('../services/twoFactorService');
+    if (needsEmail(account)) {
+        return isStaff(account)
+            ? 'Staff accounts keep an email address: two-factor sign-in sends the sign-in code to it.'
+            : 'Two-factor sign-in sends your code to this address. Turn it off before removing the address.';
+    }
+    if (account.provider === 'google' || account.googleId || !account.password) {
+        return 'This address is how you sign in with Google, so it cannot be removed.';
+    }
+    return null;
 }
 
 const userController = {
@@ -1083,13 +1109,31 @@ const userController = {
                 if (userData[key] !== undefined) safeUpdates[key] = userData[key];
             }
             if (typeof safeUpdates.email === 'string') safeUpdates.email = safeUpdates.email.toLowerCase().trim();
-            if (!Object.keys(safeUpdates).length) {
+
+            // An empty box is "remove my email". The model reads '' as no
+            // email at all, so a $set of it quietly kept the old address while
+            // answering "updated"; it is an $unset, for an account that may
+            // go without one (emailRemovalProblem).
+            let removedEmail = false;
+            if (safeUpdates.email === '' || safeUpdates.email === null) {
+                delete safeUpdates.email;
+                const me = await User.findById(currentUser.id).select('email role employment.isStaff twoFactor.enabled provider googleId password').lean();
+                if (me && me.email) {
+                    const problem = emailRemovalProblem(me);
+                    if (problem) return res.status(409).json({ message: problem });
+                    removedEmail = true;
+                }
+            }
+            if (!Object.keys(safeUpdates).length && !removedEmail) {
                 return res.status(400).json({ message: 'Nothing to update' });
             }
+            const update = {};
+            if (Object.keys(safeUpdates).length) update.$set = safeUpdates;
+            if (removedEmail) update.$unset = { email: 1 };
             
             const updatedUser = await User.findByIdAndUpdate(
                 currentUser.id,
-                { $set: safeUpdates },
+                update,
                 { new: true, runValidators: true }
             );
             
@@ -1099,7 +1143,9 @@ const userController = {
 
             // Remove sensitive data from response
             res.status(200).json({
-                message: 'User updated successfully',
+                message: removedEmail
+                    ? `Your email address was removed. Sign in with your username${updatedUser.username ? `, ${updatedUser.username},` : ''} from now on.`
+                    : 'User updated successfully',
                 data: publicUserView(updatedUser)
             });
         } catch (error) {
@@ -1373,6 +1419,17 @@ const userController = {
             // "manager" for the weeks it has left to run.
             const roleChanges = current.role !== target.slug
                 || !!(current.employment && current.employment.isStaff) !== !!target.isStaff;
+
+            // Staff are sent a sign-in code by email once the gym requires
+            // two-factor, so a member with no address stays a member until
+            // they add one (services/twoFactorService.js needsEmail).
+            const twoFactor = require('../services/twoFactorService');
+            if (roleChanges
+                && twoFactor.needsEmail({ role: target.slug, employment: { isStaff: !!target.isStaff } })
+                && !(await User.exists({ _id: id, email: { $type: 'string' } }))) {
+                return res.status(409).json({ message: twoFactor.STAFF_NEED_EMAIL });
+            }
+
             const change = { $set: { role: target.slug, ...employmentPatch } };
             if (roleChanges) change.$inc = { tokenVersion: 1 };
 
