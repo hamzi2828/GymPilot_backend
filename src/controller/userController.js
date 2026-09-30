@@ -468,6 +468,23 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
     }
 }
 
+// Why `account` may not remove its own email address, or null. A member may:
+// email is optional, and they sign in with their username. Not an account
+// that two-factor sign-in sends a code to (staff, or anyone who switched it
+// on), and not a Google sign-in, which finds its account by this address.
+function emailRemovalProblem(account) {
+    const { needsEmail, isStaff } = require('../services/twoFactorService');
+    if (needsEmail(account)) {
+        return isStaff(account)
+            ? 'Staff accounts keep an email address: two-factor sign-in sends the sign-in code to it.'
+            : 'Two-factor sign-in sends your code to this address. Turn it off before removing the address.';
+    }
+    if (account.provider === 'google' || account.googleId || !account.password) {
+        return 'This address is how you sign in with Google, so it cannot be removed.';
+    }
+    return null;
+}
+
 const userController = {
 
 
@@ -1092,13 +1109,31 @@ const userController = {
                 if (userData[key] !== undefined) safeUpdates[key] = userData[key];
             }
             if (typeof safeUpdates.email === 'string') safeUpdates.email = safeUpdates.email.toLowerCase().trim();
-            if (!Object.keys(safeUpdates).length) {
+
+            // An empty box is "remove my email". The model reads '' as no
+            // email at all, so a $set of it quietly kept the old address while
+            // answering "updated"; it is an $unset, for an account that may
+            // go without one (emailRemovalProblem).
+            let removedEmail = false;
+            if (safeUpdates.email === '' || safeUpdates.email === null) {
+                delete safeUpdates.email;
+                const me = await User.findById(currentUser.id).select('email role employment.isStaff twoFactor.enabled provider googleId password').lean();
+                if (me && me.email) {
+                    const problem = emailRemovalProblem(me);
+                    if (problem) return res.status(409).json({ message: problem });
+                    removedEmail = true;
+                }
+            }
+            if (!Object.keys(safeUpdates).length && !removedEmail) {
                 return res.status(400).json({ message: 'Nothing to update' });
             }
+            const update = {};
+            if (Object.keys(safeUpdates).length) update.$set = safeUpdates;
+            if (removedEmail) update.$unset = { email: 1 };
             
             const updatedUser = await User.findByIdAndUpdate(
                 currentUser.id,
-                { $set: safeUpdates },
+                update,
                 { new: true, runValidators: true }
             );
             
@@ -1108,7 +1143,9 @@ const userController = {
 
             // Remove sensitive data from response
             res.status(200).json({
-                message: 'User updated successfully',
+                message: removedEmail
+                    ? `Your email address was removed. Sign in with your username${updatedUser.username ? `, ${updatedUser.username},` : ''} from now on.`
+                    : 'User updated successfully',
                 data: publicUserView(updatedUser)
             });
         } catch (error) {

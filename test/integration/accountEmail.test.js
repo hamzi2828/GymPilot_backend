@@ -109,3 +109,48 @@ test('taking the staff role away needs no email', async () => {
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.equal((await roleOf(legacyStaff)).role, 'user');
 });
+
+// ---- removing one's own email (PUT /update/user) --------------------------
+
+const updateMe = (actor, body) => h.inGym(gym, () => h.call(users.updateUser, { headers: { authorization: bearer(actor) }, body }));
+const storedOf = (actor) => h.rawDb(gym.database.name).collection('users').findOne({ _id: actor._id });
+
+async function account(fields) {
+  return h.inGym(gym, async () => User.create({ password: await bcrypt.hash(PASSWORD, 4), ...fields }));
+}
+
+test('a member can remove their email, and signs in with their username after', async () => {
+  const mia = await account({ firstName: 'Mia', lastName: 'Member', email: 'mia@account-email.test' });
+  const res = await updateMe(mia, { firstName: 'Mia', email: '' });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.match(res.body.message, new RegExp(mia.username));
+  assert.equal('email' in (await storedOf(mia)), false, 'the address is gone, not kept or stored as ""');
+  assert.equal(res.body.data.email, undefined);
+
+  const login = await h.inGym(gym, () => h.call(users.loginUser, { body: { email: mia.username, password: PASSWORD } }));
+  assert.equal(login.statusCode, 200, JSON.stringify(login.body));
+  assert.ok(login.body.token);
+});
+
+test('staff, anyone with two-factor on and a Google sign-in keep theirs, and are told why', async () => {
+  const rae = await account({ firstName: 'Rae', lastName: 'Desk', email: 'rae@account-email.test', role: 'receptionist', employment: { isStaff: true } });
+  const tess = await account({ firstName: 'Tess', lastName: 'Twofactor', email: 'tess@account-email.test', twoFactor: { enabled: true } });
+  const gus = await h.inGym(gym, () => User.create({ firstName: 'Gus', lastName: 'Google', email: 'gus@account-email.test', provider: 'google', googleId: 'google-gus', password: null }));
+
+  for (const [who, reason] of [[rae, /two-factor/i], [tess, /two-factor/i], [gus, /Google/]]) {
+    const res = await updateMe(who, { email: '' });
+    assert.equal(res.statusCode, 409, `${who.firstName}: ${JSON.stringify(res.body)}`);
+    assert.match(res.body.message, reason);
+    assert.equal((await storedOf(who)).email, who.email, `${who.firstName} keeps the address`);
+  }
+});
+
+test('a member who has no email can still save the rest of their profile', async () => {
+  const nat = await account({ firstName: 'Nat', lastName: 'Noemail', phone: '0300 1110004' });
+  // The profile form always sends the email box, empty or not.
+  const res = await updateMe(nat, { firstName: 'Nat', lastName: 'Noemail', email: '', phone: '0300 1110005' });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const stored = await storedOf(nat);
+  assert.equal(stored.phone, '0300 1110005');
+  assert.equal('email' in stored, false);
+});
