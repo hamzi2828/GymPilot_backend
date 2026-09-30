@@ -209,9 +209,10 @@ module.exports = {
           .lean(),
 
         // Today's money by the same rules as the month's above. The admission
-        // (joining) fee is part of a payment's amount; it is summed on its own
-        // too so the tile can show it, and reads as 0 on payments recorded
-        // before the ledger split it out.
+        // (joining) fee and the trainer's fee are part of a payment's amount;
+        // each is summed on its own too so the tile can show it, as Daily
+        // sales and the P&L do, and reads as 0 on payments recorded before
+        // the ledger split them out.
         PackageOrder.aggregate([
           ...L.membershipPaymentStages(todayRange),
           {
@@ -219,6 +220,7 @@ module.exports = {
               _id: '$currency',
               total: { $sum: '$amount' },
               admission: { $sum: { $ifNull: ['$admission', 0] } },
+              trainerFee: { $sum: { $ifNull: ['$trainerFee', 0] } },
               n: { $sum: 1 }
             }
           }
@@ -266,12 +268,13 @@ module.exports = {
         shopSales += row.n;
       }
 
-      // Today: memberships (net of refunds given today), admission fees and
-      // shop takings -- the whole in one per-currency total, and the three
-      // parts in the base currency for the tile's breakdown.
+      // Today: memberships (net of refunds given today), admission fees,
+      // trainer fees and shop takings -- the whole in one per-currency total,
+      // and the four parts in the base currency for the tile's breakdown.
       const todayRevenue = {};
       let todayMembership = 0;
       let todayAdmission = 0;
+      let todayTrainerFees = 0;
       let todayShop = 0;
       let todayPayments = 0;
       let todaySales = 0;
@@ -281,7 +284,8 @@ module.exports = {
         todayPayments += row.n;
         if (code === base) {
           todayAdmission += row.admission || 0;
-          todayMembership += (row.total || 0) - (row.admission || 0);
+          todayTrainerFees += row.trainerFee || 0;
+          todayMembership += (row.total || 0) - (row.admission || 0) - (row.trainerFee || 0);
         }
       }
       for (const row of todayRefundRows) {
@@ -350,6 +354,7 @@ module.exports = {
           ...L.presentTotals(todayRevenue, base),
           memberships: L.round(todayMembership),
           admission: L.round(todayAdmission),
+          trainer_fees: L.round(todayTrainerFees),
           shop: L.round(todayShop),
           payments: todayPayments,
           sales: todaySales,

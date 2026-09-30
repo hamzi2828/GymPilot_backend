@@ -62,8 +62,8 @@ function standingOf(row) {
 /**
  * Today's counts over the rows given (oldest first or not, it does not
  * matter): visits and who is in now, and the members -- each counted once,
- * by the latest of their visits -- who were paid up, not paid up, and owed
- * money. `isOpen(row)` answers "still inside".
+ * by the latest of their visits -- who were paid up, not paid up, and, of
+ * the paid, still owed money. `isOpen(row)` answers "still inside".
  */
 function tally(rows, isOpen) {
   const latest = new Map();
@@ -85,8 +85,15 @@ function tally(rows, isOpen) {
   let unpaid = 0;
   let balanceDue = 0;
   for (const row of latest.values()) {
-    if (isPaidVisit(row)) paid++;
-    else unpaid++;
+    if (!isPaidVisit(row)) {
+      unpaid++;
+      continue;
+    }
+    paid++;
+    // Of the paid, those still owing: the figure sits beside the paid count
+    // ("3 paid (1 owing)"). A lapsed member may owe on an old order too, but
+    // they are unpaid -- the status column ranks the problem first -- and
+    // counting them here read "0 paid (1 owing)".
     if (balanceOwed(row) > 0) balanceDue++;
   }
 
