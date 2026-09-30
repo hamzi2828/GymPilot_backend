@@ -22,6 +22,9 @@
 //   6. swap      each staging collection replaces its live one (rename with
 //                dropTarget), and live collections the backup does not have
 //                are dropped -- the gym is then exactly what the file holds.
+//   7. sign out  every session ends, everyone's (endEverySession): the
+//                accounts came back with the sign-ins the backup knew of,
+//                some of which were ended on purpose since.
 //
 // Never touched: MongoDB's and the platform's collections (see
 // backupService.isGymCollection), and the admin audit log, which keeps its
@@ -233,6 +236,40 @@ async function swapIn(db, loaded) {
   return dropped;
 }
 
+// The highest tokenVersion any account in the live `users` holds.
+async function highestTokenVersion(db) {
+  const top = await db.collection('users').find({}, { projection: { tokenVersion: 1 } }).sort({ tokenVersion: -1 }).limit(1).next();
+  return Number((top && top.tokenVersion) || 0);
+}
+
+// Step 7. A restore puts every account back as the backup had it,
+// tokenVersion included, and the desk sign-ins (gym_desktop_tokens) with
+// them. Left so, a session ended since the backup -- the password reset
+// after a token was stolen, a deactivation, "sign out everywhere" -- would
+// work again. So every session ends:
+//
+//   * every account's tokenVersion becomes one number above any a token
+//     can carry. A token carries the version its account had when it was
+//     issued, and there are tokens from every version between the backup
+//     and now, so the restored value plus one would bring some back. The
+//     number is above the highest version live before the swap
+//     (`liveHighest`) and in the backup, and above the time in seconds --
+//     far past any count of sign-outs -- which covers accounts deleted
+//     since the backup, whose later versions are nowhere left to read;
+//   * reset links and emailed sign-in codes pending in the backup go;
+//   * every desk sign-in is revoked;
+//   * this process forgets the gym's cached sessions (other instances
+//     re-read theirs within 30 seconds, middleware/auth.js).
+async function endEverySession(db, liveHighest) {
+  const users = db.collection('users');
+  const next = Math.max(liveHighest, await highestTokenVersion(db), Math.floor(Date.now() / 1000)) + 1;
+  await users.updateMany({}, { $set: { tokenVersion: next } });
+  await users.updateMany({ passwordResetTokenHash: { $ne: null } }, { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } });
+  await users.updateMany({ 'twoFactor.pending.challengeId': { $ne: null } }, { $set: { 'twoFactor.pending': null } });
+  await db.collection('gym_desktop_tokens').updateMany({ revokedAt: null }, { $set: { revokedAt: new Date() } });
+  require('../middleware/auth').forgetGymSessions();
+}
+
 // What this process remembers about the gym, read from the collections just
 // replaced. Other instances catch up as their caches expire (a minute at most).
 function forgetCachedState() {
@@ -284,12 +321,15 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
     }
 
     const loaded = await loadIntoStaging(db, await openBackup(entry), gym);
+    const liveHighest = await highestTokenVersion(db);
     let dropped;
     try {
       dropped = await swapIn(db, loaded);
     } catch (error) {
       console.error(`[restore] ${gym.slug}: the swap failed part-way:`, error);
       await dropStaging(db).catch(() => {});
+      // Whichever accounts are live now, nobody keeps a session from either side.
+      await endEverySession(db, liveHighest).catch((e) => console.error(`[restore] ${gym.slug}: could not end the sessions:`, e));
       throw refusal(
         500,
         'RESTORE_INCOMPLETE',
@@ -297,6 +337,12 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
       );
     }
     forgetCachedState();
+    try {
+      await endEverySession(db, liveHighest);
+    } catch (error) {
+      console.error(`[restore] ${gym.slug}: could not end the sessions:`, error);
+      throw refusal(500, 'RESTORE_SIGN_OUT_FAILED', 'The backup was restored, but not every session could be ended. Run the restore again to end them.');
+    }
 
     // An uploaded file has done its job.
     if (entry.kind === 'upload') {
@@ -308,7 +354,9 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
       documents: loaded.reduce((n, c) => n + c.documents, 0),
       dropped,
       kept: [...KEPT_ON_RESTORE],
-      safetyBackup: String(safety._id)
+      safetyBackup: String(safety._id),
+      // Everyone, the admin who ran it included, signs in again (step 7).
+      signedOut: true
     };
   } catch (error) {
     outcome.error = error;

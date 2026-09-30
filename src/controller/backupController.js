@@ -312,7 +312,7 @@ const backupController = {
       const entry = await findOwnBackup(req.body && req.body.backupId);
       if (!entry) return notFound(res);
       const data = await backupRestore.restoreBackup(entry, { confirm: req.body && req.body.confirm, actor: req.user });
-      return res.status(200).json({ success: true, message: 'Restored', data });
+      return res.status(200).json({ success: true, message: 'Restored. Everyone has been signed out, you included: sign in again.', data });
     } catch (error) {
       return sendError(res, error, 'The restore failed');
     }

@@ -90,7 +90,9 @@ const as = (extra = {}) => ({
 // Every collection a restore replaces, as it is in the database right now.
 // Empty ones are left out: mongoose creates a model's collection in the
 // background whenever the model is first compiled on a connection, so when
-// an empty one appears is not something a test can pin down.
+// an empty one appears is not something a test can pin down. An account's
+// tokenVersion is left out too: a restore moves every one on, on purpose,
+// so that every session ends (see the sessions test below).
 async function snapshot() {
   const db = h.rawDb(gym.database.name);
   const names = (await db.listCollections().toArray())
@@ -99,7 +101,7 @@ async function snapshot() {
     .sort();
   const out = {};
   for (const name of names) {
-    const docs = await db.collection(name).find({}).sort({ _id: 1 }).toArray();
+    const docs = await db.collection(name).find({}, name === 'users' ? { projection: { tokenVersion: 0 } } : {}).sort({ _id: 1 }).toArray();
     if (!docs.length) continue;
     const indexes = (await db.collection(name).indexes()).map((i) => `${i.name}:${JSON.stringify(i.key)}:${!!i.unique}`).sort();
     out[name] = { docs: EJSON.stringify(docs, { relaxed: false }), indexes };
@@ -362,5 +364,45 @@ test('one restore at a time: a running one refuses a second, a stale lock does n
     const lock = await runs.findOne({ job: 'restore', gymId: gym._id });
     assert.equal(lock.lastOutcome, 'ok');
     assert.ok(lock.lastRunAt >= lock.lastStartedAt);
+  });
+});
+
+test('a restore ends every session, including ones ended since the backup that it would bring back', async () => {
+  const auth = h.src('middleware/auth');
+  const DesktopToken = h.src('attendance/models/desktopTokenModel');
+  const ENDED = /session has ended/;
+  await h.inGym(gym, async () => {
+    await h.ensureIndexes(DesktopToken);
+    const member = await User.findOne({ email: 'm3@restore.test' }).lean();
+    const ownerNow = await User.findById(owner._id).lean();
+    // A token and a desk sign-in as the backup will remember them.
+    const stolen = member.tokenVersion || 0;
+    const desk = await DesktopToken.issue(member._id, { deviceLabel: 'DESK-9', ip: '127.0.0.1' });
+    const backupId = (await h.call(controller.run, as())).body.data.id;
+
+    // Then the token is found to be stolen and the password reset, which
+    // ends it and the desk sign-in; the member signs in again since.
+    await User.updateOne({ _id: member._id }, { $inc: { tokenVersion: 1 } });
+    await DesktopToken.revokeAllForUser(member._id);
+    auth.forgetSession(member._id);
+    const since = stolen + 1;
+    assert.match(await auth.sessionProblem({ id: String(member._id), tv: stolen }), ENDED);
+    assert.equal(await auth.sessionProblem({ id: String(member._id), tv: since }), null);
+
+    const done = await restore(backupId, 'restore-gym');
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+    assert.equal(done.body.data.signedOut, true);
+    assert.match(done.body.message, /sign in again/);
+
+    // Neither the stolen token the backup remembers nor the one from since
+    // works, nor the desk sign-in -- and that is everyone, the owner too.
+    assert.match(await auth.sessionProblem({ id: String(member._id), tv: stolen }), ENDED);
+    assert.match(await auth.sessionProblem({ id: String(member._id), tv: since }), ENDED);
+    assert.equal(await DesktopToken.findUsable(desk.token), null);
+    assert.match(await auth.sessionProblem({ id: String(owner._id), tv: ownerNow.tokenVersion || 0 }), ENDED);
+
+    // A sign-in after the restore is an ordinary one.
+    const restored = await User.findById(member._id).lean();
+    assert.equal(await auth.sessionProblem({ id: String(member._id), tv: restored.tokenVersion }), null);
   });
 });

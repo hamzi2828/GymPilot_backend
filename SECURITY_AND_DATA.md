@@ -185,6 +185,14 @@ downloaded. Administrators only, every step in the audit log:
    any failure drops the staging collections and leaves the gym as it was.
 6. Each staging collection replaces its live one (`renameCollection` with
    `dropTarget`), and live collections the backup does not have are dropped.
+7. Every session ends, everyone's: the accounts came back with the
+   sign-ins the backup knew of, some of them ended on purpose since (a
+   password reset after a stolen token). Every account's `tokenVersion`
+   becomes one above any a token could carry (above the highest before and
+   after, and above the time in seconds, for accounts deleted since the
+   backup); pending reset links and sign-in codes are cleared; every desk
+   sign-in is revoked; the session cache is dropped. The answer says
+   everyone, the admin included, must sign in again (`signedOut: true`).
 
 Never touched: the platform's and MongoDB's collections, and the admin audit
 log (`gym_admin_audit_logs`), which keeps its history — a restore must not be
@@ -193,8 +201,7 @@ per gym at a time (`platform_job_runs`, job `restore`; a lock older than 15
 minutes is taken over). The whole restore runs inside one request, so the
 function's time limit bounds the size of gym it can restore (DEPLOYMENT.md);
 this server's caches are reset afterwards, other instances' expire within a
-minute. Restored accounts keep the `tokenVersion` they had in the backup, so
-sessions issued since may end.
+minute.
 
 Uploading: Vercel refuses request bodies over 4.5 MB (streaming does not lift
 that), so the file goes from the browser straight to the Blob store with a
