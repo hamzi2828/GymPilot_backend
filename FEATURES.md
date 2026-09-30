@@ -34,6 +34,8 @@ setting is on the gym's `settings` document.
 | Reports & exports | `controller/reportsController.js`, `services/csv.js`, `services/xlsx.js` (every export as CSV, or as a real Excel workbook with `?format=xlsx` — amounts as numbers, dates as dates, bold header; written by hand on Node's zlib, no dependency). `registrations` = members who joined, per local day (the days with any); the Members export lists those who joined in the range, or everyone with `?all=1`. Net = the accounts screen's `result.net` for the same range: membership payments less refunds given in the range, plus paid shop sales, less **paid** expenses dated by `incurredOn` (the period a cost belongs to, not the day it was paid); pending expenses are shown (`expenses_pending`), never deducted; a row with no currency counts as the gym's own | `/admin/reports` (Overview and Daily sales tabs; Print / PDF — the browser's print, laid out as an A4 report with the gym's name and the range) | — | `reports` |
 | Daily sales report | `services/dailySales.js`, `controller/reportsController.js` (`GET /admin/reports/daily-sales?from=&to=`; `GET /admin/reports/export/daily-sales` as CSV — totals as the last row — or `?format=xlsx` — a Daily sales sheet with a bold totals row and a By payment method sheet). Every day in the range: new sign-ups (first payments' membership share), renewals (membership share), admission fees, trainer fees, dues collected (instalments, whole), membership refunds given that day (negative), POS sales still paid; the columns add up to the day's total, which is that day's income on the accounts screen. Totals by payment method (memberships, refunds and the till together; cash, card, online card, bank transfer, JazzCash, Easypaisa, other mobile wallet). The split is read from the ledger's payment rows (`admission`, `trainerFee`, `membership`, `kind`, per-payment `method`); a row without it counts wholly as membership money. Gym currency only; other currencies counted and left out | `/admin/reports?tab=daily` | — | `reports` |
 | Website: SEO, map, hours, language, embed, domains | `settings.seo/maps/openingHours/locale`, `platform/vercelDomains.js` | Settings → General → Website; platform panel domains | `/embed/timetable`, JSON-LD, language switcher | `settings` |
+| Data & backup | `services/backupService.js` (the archive, both ways), `backupCrypto.js`, `backupStorage.js`, `backupJobs.js`, `platform/models/platformBackupModel.js`, `controller/backupController.js`, `routes/backupRoutes.js` (`POST /api/backups/download` — the whole gym as a streamed `.tar.gz`; `GET /api/backups` — stored backups and whether this server can store them; `POST /api/backups/run` — back up now; `POST /api/backups/:id/download`; restore: `POST /api/backups/uploads` + `/uploads/:id/complete` — a file sent straight to Blob, encrypted in the browser; `POST /api/backups/restore/preview`, `POST /api/backups/restore` — `services/backupRestore.js`), `scripts/backupGym.js` — see SECURITY_AND_DATA.md → *Backups* and *Daily backup* below | Settings → Data & backup | — | `settings` at manage **and** the administrator role |
+| Business details (name, contact, description, social links) | `settings.siteName/contactEmail/mobileNumber/address/siteDescription` and `facebookUrl/instagramUrl/twitterUrl/youtubeUrl/tiktokUrl` — the same names in `PUT /settings`, `GET /settings`, `GET /settings/public` and `services/branding.js`; a social link must be http(s) (a bare `instagram.com/…` gains `https://`), anything else is a `400` | Settings → General → Business | Footer links, contact page, JSON-LD (`siteDescription` stands in for an empty `seo.description`), member app "contact us" | `settings` |
 | PWA | — | — | `manifest.ts`, `public/sw.js` | — |
 | Marketing site + platform panel (plans, gyms, demo requests, self-serve sign-up) | `platform/routes/platformRoutes.js`, `platform/controllers/{gymsController,plansController,demoRequestsController,signupController}.js`, `platform/services/signupProvisioning.js`, `platform/models/demoRequestModel.js` — sign-up in BILLING.md → *Self-serve sign-up* | `GymPilot_frontendAdmin` (`/` landing, `/checkout`, `/super-admin` panel) | — | super admin session (public routes under `/api/platform/public`) |
 
@@ -69,6 +71,25 @@ so a gym left over today is first tomorrow.
   failed, deferred, took_ms } }`. A gym the budget did not reach reads
   `{ skipped: 'time budget used; first in line next run' }` and its slug is in
   `schedule.deferred`.
+
+## Daily backup
+
+`GET/POST /api/jobs/backups` (`Authorization: Bearer <CRON_SECRET>`; Vercel
+Cron calls it daily at 02:00 UTC, `vercel.json`) stores an encrypted backup
+of every active gym (`services/backupJobs.js`, SECURITY_AND_DATA.md →
+*Backups*), paced exactly as the daily job is — the same
+`DAILY_JOB_CONCURRENCY` / `DAILY_JOB_BUDGET_MS`, gyms least recently backed up
+first (`platform_job_runs`, job `backups`), `?dryRun=1` and `?gym=<slug>` as
+above. A gym with a daily backup from the last 20 hours is skipped
+(`{ skipped: 'backed up in the last 20 hours' }`), so a retried or repeated
+call makes no second one. After each backup the gym's older ones beyond the
+newest `BACKUP_KEEP_DAILY` (default 7) of each kind are deleted from the store
+and the list.
+
+Without `BLOB_READ_WRITE_TOKEN` or `BACKUP_ENCRYPTION_KEY` nothing is stored:
+the answer is `200 { success: true, skipped: '<which one is missing>' }`, and
+Settings → Data & backup shows the owner the same reason and points at the
+download instead.
 
 ## Tests
 

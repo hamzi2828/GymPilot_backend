@@ -22,10 +22,12 @@ it is code.
 | `FINGERPRINT_ENCRYPTION_KEY` | if already set: **leave as it is**; if unset: the **current** `JWT_SECRET` value, copied | Encrypts fingerprint templates at rest, falling back to `JWT_SECRET` while unset. Existing templates were encrypted with whichever secret was in effect when they were enrolled; changing it makes them all unreadable (`/api/desktop/templates` then counts them as `unreadable`, and every enrolled person must be enrolled again). Copying today's `JWT_SECRET` in keeps them readable and decouples them from it. |
 | `JWT_SECRET` | **do not rotate** until the two keys above are set | Rotating it signs everyone out — and, while `SETTINGS_ENCRYPTION_KEY` or `FINGERPRINT_ENCRYPTION_KEY` is unset, also makes the data that key protects unreadable. |
 | `SMTP_*` | working credentials | The current ones are rejected (`535`). Nothing emails until this is fixed — including 2FA codes and password resets. |
-| `CRON_SECRET` | already set | The daily job now also rolls platform subscriptions, resumes freezes and closes visits nobody checked out of (FEATURES.md → *Daily job*). |
+| `CRON_SECRET` | already set | The daily job now also rolls platform subscriptions, resumes freezes and closes visits nobody checked out of (FEATURES.md → *Daily job*). The daily backup (`/api/jobs/backups`, 02:00 UTC) uses the same secret. |
 | `DAILY_JOB_BUDGET_MS` | `45000` (default) for a 60-second function; `240000` for a 300-second one | How long after the cron fired the daily job still starts new gyms. Gyms already running are left to finish, so keep it below the function's maximum duration by about one gym's run. Gyms not reached are listed under `schedule.deferred` and go first on the next run. |
 | `DAILY_JOB_CONCURRENCY` | `3` (default; 1–10) | Gyms the daily job works on side by side. |
-| `BLOB_READ_WRITE_TOKEN` | the Vercel Blob store's read-write token | Vercel has no writable disk: without it every upload fails there ("set BLOB_READ_WRITE_TOKEN"). It is also what lets the admin pages send a file too big for the API straight to the store (`POST /api/uploads/blob`). |
+| `BLOB_READ_WRITE_TOKEN` | the Vercel Blob store's read-write token | Vercel has no writable disk: without it every upload fails there ("set BLOB_READ_WRITE_TOKEN"). It is also what lets the admin pages send a file too big for the API straight to the store (`POST /api/uploads/blob`), and where the daily backups are kept. |
+| `BACKUP_ENCRYPTION_KEY` | a fresh random 64-char string, **never changed** once set | Encrypts every stored backup (the Blob store is public). No fallback on purpose: without it the daily backup stores nothing and says so, and owners see "daily backups are not running". Changing it makes every backup stored before unreadable. Keep a copy somewhere other than Vercel: a backup is only as recoverable as its key. |
+| `BACKUP_KEEP_DAILY` | `7` (default; 1–90) | Stored backups kept per gym, of each kind (daily, "back up now", taken before a restore). |
 | `UPLOAD_MAX_FILE_SIZE_MB` / `UPLOAD_MAX_VIDEO_SIZE_MB` | `5` / `100` (defaults) | Per-file ceilings for images and videos through the API. On Vercel anything sent through the API stops at **4 MB** whatever these say (Vercel refuses bodies over 4.5 MB). Bigger files go straight to Blob when the token is set: images up to 20 MB, videos up to `UPLOAD_MAX_VIDEO_SIZE_MB`. |
 
 Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
@@ -34,8 +36,10 @@ Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).t
 runs with the project's (Vercel → Project → Settings → Functions). Two things
 run long inside one request: the daily job, which paces itself by
 `DAILY_JOB_BUDGET_MS`, and a self-serve sign-up's webhook, which builds a
-whole gym before it answers. Give the function as long as the plan allows and
-set `DAILY_JOB_BUDGET_MS` to match.
+whole gym before it answers. The daily backup paces itself by the same
+budget, and a restore (Settings → Data & backup) rewrites a whole gym inside
+one request. Give the function as long as the plan allows and set
+`DAILY_JOB_BUDGET_MS` to match.
 
 Everything else the API reads, with its default or an example in `.env.example`:
 
@@ -116,8 +120,15 @@ online or staff recorded consent under Users.
    platform's Stripe account (§2) are set up: `GET /api/platform/public/config`
    answers `self_serve_signup: true` when they are. Until then checkout sends
    a request to **Demo requests** for you to set up.
-4. Schedule backups: `node scripts/backupGym.js --all --out /some/where` (cron
-   or a GitHub Action) and copy the folder off the server.
+4. Backups: with `BLOB_READ_WRITE_TOKEN` and `BACKUP_ENCRYPTION_KEY` set, the
+   `vercel.json` cron backs up every gym at 02:00 UTC (FEATURES.md → *Daily
+   backup*); check the first run with
+   `curl -H "Authorization: Bearer $CRON_SECRET" "https://<api>/api/jobs/backups?dryRun=1"`.
+   Those copies live in the same Vercel account as everything else, so also
+   run `node scripts/backupGym.js --all --out /some/where` somewhere else now
+   and then (cron or a GitHub Action) — it is the only copy of the platform's
+   own collections. Each gym's owner can download the whole gym at any time
+   from Settings → Data & backup (SECURITY_AND_DATA.md → *Backups*).
 
 ## 6. Merging
 

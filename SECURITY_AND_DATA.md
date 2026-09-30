@@ -84,12 +84,129 @@ fingerprint metadata (not the templates) and enquiries as a JSON download;
 
 ## Backups
 
+**Download.** Settings → **Data & backup** → *Download full backup*
+(`POST /api/backups/download`). Administrators only — `settings` at manage
+*and* the administrator role (`src/routes/backupRoutes.js`) — and every call
+is in the audit log (a POST, so the permission gate records it; a download
+that breaks part-way is recorded by the controller). The archive is made on
+the spot and streamed to the browser as it is read from the database: Vercel
+refuses a function response over 4.5 MB unless it is streamed, and streaming
+is on for every Node.js function, so neither that cap nor the function's
+memory limits how big a gym can be.
+
+**The archive** (`src/services/backupService.js`) is a `.tar.gz` any archive
+tool opens:
+
+* `backup.json` — format, version, the gym (id, slug, name), when, and why
+  (`download`, `daily`, `pre-restore`, `cli`);
+* per collection, `collections/<name>.json` (its options and index
+  definitions), then `collections/<name>.jsonl` — one document per line in
+  canonical Extended JSON, in parts of about 8 MB (`<name>.2.jsonl`, …), each
+  a file `mongoimport` takes as it is;
+* `manifest.json` last, with each collection's document count. A file
+  without it did not finish, and is refused.
+
+Every collection of the gym's database is in it except MongoDB's
+(`system.*`) and the platform's (`gyms`, `super_admins`, `platform_*`): the
+first gym shares the platform's database, and its backup must carry neither
+the other gyms' records nor the super admins. Collections are read one after
+another while the gym runs, so it is not a point-in-time snapshot across
+collections (as `mongodump` without `--oplog`).
+
+**Secrets inside a backup stay sealed.** Documents are copied exactly as
+stored, so the Settings secrets (Stripe, SMTP, SMS/WhatsApp tokens, push
+key) and fingerprint templates are in the archive as ciphertext under this
+deployment's `SETTINGS_ENCRYPTION_KEY` / `FINGERPRINT_ENCRYPTION_KEY`, salted
+with the gym's id; a Settings secret still in plaintext from before sealing
+existed is sealed on its way into the archive. A downloaded backup therefore
+holds no working key, and those values only open again when it is restored
+into the same gym on a deployment with the same keys (otherwise they read as
+empty and are typed in again). Everything else — members' details, health
+answers, password hashes — is in the file as it is in the database: treat a
+downloaded backup as the members' personal data it is.
+
+**Stored backups** — made every night for every active gym (FEATURES.md →
+*Daily backup*), or with *Back up now* — are that same archive, encrypted on
+the server as it is written (`src/services/backupCrypto.js`) and stored in
+the Vercel Blob store as it is encrypted (`backupStorage.js`, under
+`<slug>/backups/<kind>/`), so no step holds the whole file. They are listed
+in the platform database (`platform_backups`), not the gym's, so a restore
+can never roll back the list of backups. Settings → Data & backup shows date,
+kind, size and record count; *Download* has the server decrypt one and
+stream it back as the plain `.tar.gz`. The newest `BACKUP_KEEP_DAILY`
+(default 7) of each kind are kept per gym.
+
+Why encrypted: every file in the Blob store is public — the installed
+`@vercel/blob` (0.23) has no private access — so a stored backup is
+unreadable without a key the store never sees:
+
+* **The key is `BACKUP_ENCRYPTION_KEY`, with no fallback.** Borrowing
+  `JWT_SECRET` or `SETTINGS_ENCRYPTION_KEY` would tie every stored backup to a
+  secret that may one day be rotated for other reasons. Without it nothing is
+  stored and the reason is shown (the download needs no key and keeps
+  working). **Never change it once set**: backups made with the old value can
+  no longer be opened — each file carries a short key id, so that is reported
+  as "made before BACKUP_ENCRYPTION_KEY was changed", not as damage.
+* Per gym, scrypt of that key with a salt carrying the gym's id — one gym's
+  file cannot be opened as another's; per file, HKDF of that with 32 random
+  bytes kept in the file's header, so every file has its own AES-256-GCM key.
+* The file is sealed in 1 MiB chunks, each with its own tag, a counter nonce
+  and a last-chunk flag, and the header as additional data. Nothing is
+  released before it is authenticated, a changed byte anywhere fails, and so
+  does a file cut short even at a chunk boundary.
+
+**Restore** (Settings → Data & backup; `src/services/backupRestore.js`),
+from a stored backup or from a file the owner uploads — a `.tar.gz` this gym
+downloaded. Administrators only, every step in the audit log:
+
+1. *Preview* (`POST /api/backups/restore/preview { backupId }`): the whole
+   file is read — decrypted, every chunk authenticated, every count checked
+   against the manifest — and described: the gym it is of, when it was taken,
+   each collection and its record count. Nothing changes.
+2. The owner types the gym's slug (`POST /api/backups/restore { backupId,
+   confirm }`); anything else is `400 CONFIRMATION_MISMATCH`.
+3. A backup of another gym is refused (`409 BACKUP_OTHER_GYM`): its header
+   names the gym by id. An uploaded file is also encrypted with this gym's
+   key, and another gym's stored backups cannot be named at all.
+4. A backup of the gym as it is now is stored (kind `pre-restore`). If it
+   cannot be made, nothing is touched.
+5. Every collection in the file is loaded into a staging collection
+   (`__restoring__<name>`) with its options and indexes, beside the live one.
+   Until the whole file has been read and checked the live data is untouched;
+   any failure drops the staging collections and leaves the gym as it was.
+6. Each staging collection replaces its live one (`renameCollection` with
+   `dropTarget`), and live collections the backup does not have are dropped.
+
+Never touched: the platform's and MongoDB's collections, and the admin audit
+log (`gym_admin_audit_logs`), which keeps its history — a restore must not be
+a way to erase the record of what was done, the restore included. One restore
+per gym at a time (`platform_job_runs`, job `restore`; a lock older than 15
+minutes is taken over). The whole restore runs inside one request, so the
+function's time limit bounds the size of gym it can restore (DEPLOYMENT.md);
+this server's caches are reset afterwards, other instances' expire within a
+minute. Restored accounts keep the `tokenVersion` they had in the backup, so
+sessions issued since may end.
+
+Uploading: Vercel refuses request bodies over 4.5 MB (streaming does not lift
+that), so the file goes from the browser straight to the Blob store with a
+client token good for one path (`POST /api/backups/uploads`, the same
+client-upload mechanism as the admin pages' big images). The store is public
+and the file is the membership in plain text, so the browser encrypts it
+first, in the stored backups' own format, with a key the server derives for
+this gym and that one file; `POST /api/backups/uploads/:id/complete` accepts
+only the exact path granted. Uploads are never listed as backups and are
+removed once restored, or after a day. Largest upload: 500 MB.
+
+**By hand:**
+
     node scripts/backupGym.js --gym <slug> [--out backups]
     node scripts/backupGym.js --all
 
-One gzipped JSON-lines file per collection plus a manifest, under
-`backups/<slug>/<timestamp>/`. Restore with `mongoimport --gzip`. Copy the
-folder off the server; schedule it with cron / Task Scheduler / a GitHub Action.
+The same archive, as `backups/<slug>/<slug>-backup-<timestamp>.tar.gz`;
+`--all` also writes `backups/_platform/…` with the platform's own collections,
+which no gym's archive carries. To restore one collection by hand, extract
+the archive and `mongoimport --file collections/<name>.jsonl`. Copy the files
+off the server.
 
 ## Newsletter unsubscribe
 

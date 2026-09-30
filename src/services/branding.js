@@ -42,13 +42,13 @@ function siteOrigin() {
 }
 
 /**
- * An address a member can write to. Settings has no "support email" field of
- * its own; what it does carry is the address the gym's emails are sent
+ * An address a member can write to: the contact email from Settings →
+ * General → Business. Without one, the address the gym's emails are sent
  * FROM, which is where a reply to any of them lands anyway -- unless it is a
  * no-reply address, in which case there is nothing to offer.
  */
 function supportEmail(settings) {
-  const candidates = [settings.contactEmail, settings.supportEmail, settings.smtp && settings.smtp.fromEmail];
+  const candidates = [settings.contactEmail, settings.smtp && settings.smtp.fromEmail];
   const value = candidates.map((c) => String(c || '').trim()).find(Boolean) || '';
   return /^no-?reply/i.test(value) ? '' : value;
 }
@@ -63,7 +63,7 @@ async function branding(apiOrigin = '') {
   const theme = themeFor(settings.theme);
   const site = siteOrigin();
   const email = supportEmail(settings);
-  const phone = settings.contactPhone || settings.mobileNumber || '';
+  const phone = settings.mobileNumber || '';
 
   return {
     gym: gym ? { slug: gym.slug, name: gym.name } : null,
