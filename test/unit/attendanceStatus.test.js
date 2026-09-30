@@ -27,13 +27,15 @@ function user(email) {
   return { _id: oid(), email };
 }
 
-function order(owner, { status = 'active', endIn = 20, createdAgo = 10, sessions, email, byEmailOnly = false } = {}) {
+function order(owner, { status = 'active', startIn, endIn = 20, createdAgo = 10, sessions, email, byEmailOnly = false } = {}) {
+  const subscription = { endDate: endIn === null ? null : inDays(endIn) };
+  if (startIn !== undefined) subscription.startDate = inDays(startIn);
   return {
     _id: oid(),
     userId: byEmailOnly ? null : owner._id,
     customerInfo: { email: email === undefined ? owner.email : email },
     packageDetails: { name: 'Monthly' },
-    subscription: { endDate: endIn === null ? null : inDays(endIn) },
+    subscription,
     sessions,
     status,
     createdAt: inDays(-createdAgo)
@@ -138,4 +140,58 @@ test('a page of members is answered one by one exactly as membershipFor would', 
   assert.equal(index.get(String(a._id)).status, 'cancelled');
   assert.equal(index.get(String(b._id)).status, 'cancelled', 'the newest-ending order leads, as at the desk');
   assert.equal(index.get(String(c._id)).status, 'active');
+});
+
+test('a membership sold to start later is "pending, starts on" until it starts -- paid, but not covering today', () => {
+  const T = require('../../src/attendance/services/timeUtils');
+  const liv = user('liv@example.test');
+
+  // Only a term that has not begun: not active, not lapsed -- 'pending' with
+  // the date it starts, which is what the desk is told.
+  const later = order(liv, { startIn: 5, endIn: 35 });
+  const m = answer(liv, [later]);
+  assert.equal(m.status, 'pending');
+  assert.equal(m.orderId, later._id);
+  assert.equal(m.startsOn.getTime(), inDays(5).getTime());
+  const v = membershipVerdict(m);
+  assert.equal(v.status, 'membership_pending', 'a key the desk app already knows');
+  assert.equal(v.label, `Starts on ${T.dateLabel(inDays(5))}`);
+  assert.equal(v.warning, `MEMBERSHIP STARTS ON ${T.dateLabel(inDays(5)).toUpperCase()} — paid, not started yet`);
+
+  // The same after a term that has run out, and ahead of a transfer awaited
+  // since: what is paid for is what the desk needs to hear about.
+  const lapsedThenLater = answer(liv, [order(liv, { startIn: 2, endIn: 32 }), order(liv, { startIn: -40, endIn: -10, createdAgo: 40 })], [
+    order(liv, { status: 'pending', createdAgo: 1 })
+  ]);
+  assert.equal(lapsedThenLater.status, 'pending');
+  assert.equal(lapsedThenLater.startsOn.getTime(), inDays(2).getTime());
+
+  // Two booked ahead: the one starting soonest is named.
+  const soonest = answer(liv, [order(liv, { startIn: 40, endIn: 70 }), order(liv, { startIn: 3, endIn: 33 })]);
+  assert.equal(soonest.startsOn.getTime(), inDays(3).getTime());
+
+  // An order with no start date is from before the field: running, as ever.
+  assert.equal(answer(liv, [order(liv, { endIn: 20 })]).status, 'active');
+  assert.equal(answer(liv, [order(liv, { endIn: 20 })]).startsOn, undefined);
+});
+
+test('a renewal queued behind the running term keeps the member active to the later end, never "expires in 2 days"', () => {
+  const ren = user('ren@example.test');
+  const running = order(ren, { startIn: -28, endIn: 2, createdAgo: 28 });
+  const renewal = order(ren, { startIn: 2, endIn: 32, createdAgo: 1 });
+
+  const m = answer(ren, [running, renewal]);
+  assert.equal(m.status, 'active');
+  assert.equal(m.orderId, renewal._id);
+  assert.equal(m.endDate.getTime(), inDays(32).getTime());
+  assert.equal(m.daysLeft, 32);
+  assert.equal(m.startsOn, undefined);
+
+  const v = membershipVerdict(m);
+  assert.equal(v.status, 'membership_active');
+  assert.equal(v.label, 'Active · 32 days left');
+  assert.equal(v.warning, null);
+
+  // The office's roster (membershipsFromOrders) answers the same.
+  assert.deepEqual(membershipsFromOrders([ren], [running, renewal], [], now).get(String(ren._id)), m);
 });

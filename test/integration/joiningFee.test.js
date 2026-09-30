@@ -155,3 +155,48 @@ test('card checkout: a returning member is not sent a joining-fee line; a new on
     h.setStripe(null);
   }
 });
+
+test('the checkout summary asks whether the fee is due -- for the signed-in account only, never for an email', async () => {
+  const controller = h.src('gymfolio/controller/membershipController');
+  const ask = (req) => h.call(controller.joiningFeeDue, req);
+
+  await h.inGym(gym, async () => {
+    const fresh = await newMember('Asking');
+    const asFresh = { id: String(fresh._id), email: fresh.email, role: 'user' };
+    const first = await ask({ user: asFresh });
+    assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body, { success: true, data: { due: true } });
+
+    // Once they have joined, checkout leaves the fee off -- and so does the summary.
+    await service.createManualOrder({ user: fresh, pkg: monthly });
+    assert.equal((await ask({ user: asFresh })).body.data.due, false);
+
+    // A guest checkout they made before the account existed counts too: the
+    // account is matched by its own address, as checkout matches it.
+    const guest = await newMember('Guestfirst');
+    await PackageOrder.create({
+      orderNumber: 'FEE-GUEST-1',
+      userId: null,
+      packageId: monthly._id,
+      packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month' },
+      customerInfo: { fullName: 'Guest First', email: guest.email },
+      payment: { method: 'stripe', amount: 65, currency: 'GBP', status: 'paid', paidAt: new Date() },
+      status: 'active'
+    });
+    assert.equal((await ask({ user: { id: String(guest._id), role: 'user' } })).body.data.due, false);
+
+    // Signed out: not known, and no email in the request is ever looked up --
+    // otherwise anyone could ask whether an address has been a member here.
+    const signedOut = await ask({ user: null, query: { email: fresh.email }, body: { email: fresh.email } });
+    assert.deepEqual(signedOut.body, { success: true, data: { due: null } });
+    // Nor does a token for an account that is gone, or a malformed id.
+    assert.equal((await ask({ user: { id: String(new h.state.mongoose.Types.ObjectId()) } })).body.data.due, null);
+    assert.equal((await ask({ user: { id: 'not-an-id' } })).body.data.due, null);
+  });
+
+  // Public, but reads the session when there is one.
+  const router = h.src('gymfolio/routes/gymfolioRoutes');
+  const layer = router.stack.find((l) => l.route && l.route.path === '/membership/joining-fee-due' && l.route.methods.get);
+  assert.ok(layer, 'the route is mounted');
+  assert.deepEqual(layer.route.stack.map((l) => l.handle.name), ['optionalAuth', 'joiningFeeDue']);
+});

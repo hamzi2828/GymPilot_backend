@@ -226,3 +226,35 @@ test("the membership carries what is still owed on a paid order -- and only a pa
   assert.equal(pending.status, 'pending');
   assert.equal(pending.balanceDue, 0);
 });
+
+// A paid membership sold to start later (the desk's "start after N days"),
+// scanned before its first day: stored as 'membership_pending' with the date
+// it starts. Paid, so a warning rather than a problem, and the date said
+// aloud -- none of the gym's fee messages is true of it.
+function startsLater({ startsOn = new Date('2026-10-05T00:00:00Z'), balanceDue = 0 } = {}) {
+  return {
+    personType: 'member',
+    status: 'membership_pending',
+    membership: { status: 'pending', startsOn, endDate: new Date('2026-11-05T00:00:00Z'), balanceDue, currency: 'GBP' }
+  };
+}
+
+test('a membership that starts later: the warning sound, its start date said and written, never "awaiting payment"', async () => {
+  await runWithTenant(gym, () => {
+    assert.deepEqual(memberAlert(startsLater(), VOICE_DEFAULTS), { level: 'warning', speech: 'Your membership starts on 5 October' });
+    assert.equal(memberWarning(startsLater()), 'MEMBERSHIP STARTS ON 05 OCT 2026 — paid, not started yet');
+
+    // With money owing on it too: one line, both said.
+    assert.equal(memberWarning(startsLater({ balanceDue: 20 })), 'MEMBERSHIP STARTS ON 05 OCT 2026 · Balance due £20');
+    assert.deepEqual(memberAlert(startsLater({ balanceDue: 20 }), VOICE_DEFAULTS), {
+      level: 'warning',
+      speech: 'Your membership starts on 5 October. Please clear your balance.'
+    });
+
+    // The voice off: the sound and the line stay, the words go.
+    assert.deepEqual(memberAlert(startsLater(), voiceSettings({ enabled: false })), { level: 'warning', speech: null });
+
+    // A transfer still awaited is what it always was.
+    assert.equal(memberWarning(visit('membership_pending')), 'PAYMENT NOT CONFIRMED — check the transfer before admitting');
+  });
+});

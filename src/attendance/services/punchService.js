@@ -79,6 +79,14 @@ const WARNINGS = {
   membership_none: 'NO ACTIVE MEMBERSHIP — sell a package at the desk'
 };
 
+// A paid membership whose first day is still ahead (membershipFor's
+// 'pending' with `startsOn`). Not a refusal -- whether they train today is
+// the gym's call -- but not a covered visit either, so the desk is told when
+// it starts.
+function startsLaterWarning(startsOn) {
+  return `MEMBERSHIP STARTS ON ${T.dateLabel(startsOn).toUpperCase()} — paid, not started yet`;
+}
+
 function daysLeftOf(membership) {
   const days = membership.daysLeft;
   return days === null || days === undefined || Number.isNaN(Number(days)) ? null : Number(days);
@@ -106,6 +114,12 @@ function membershipVerdict(membership) {
   }
 
   if (m.status === 'pending') {
+    // Paid, starting later. The same key as waiting for the money -- amber
+    // on the desk, the kiosk and the office, and a key the Windows app
+    // already knows -- with its own words.
+    if (m.startsOn) {
+      return { status: 'membership_pending', label: `Starts on ${T.dateLabel(m.startsOn)}`, warning: startsLaterWarning(m.startsOn) };
+    }
     return { status: 'membership_pending', label: 'Awaiting payment confirmation', warning: WARNINGS.membership_pending };
   }
 
@@ -328,7 +342,10 @@ async function buildReceipt(record, action, person) {
   if (record.personType === 'member') {
     const m = record.membership || {};
     rows.push(row('Package', m.packageName || 'None'));
-    if (m.status === 'pending') {
+    if (m.status === 'pending' && m.startsOn) {
+      rows.push(row('Starts', T.dateLabel(m.startsOn)));
+      rows.push(row('Valid to', m.endDate ? T.dateLabel(m.endDate) : '—'));
+    } else if (m.status === 'pending') {
       // No dates to show yet: the term starts when staff confirm the money.
       rows.push(row('Payment', 'Awaiting payment confirmation'));
     } else {
@@ -640,6 +657,9 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
       packageName: membership.packageName,
       endDate: membership.endDate,
       status: membership.status,
+      // Kept so the check-out, the office and the day's board can tell a
+      // membership starting later from one waiting on its money.
+      startsOn: membership.startsOn || null,
       balanceDue,
       // The order's own currency; the gym's only when the order names none
       // and there is money to put a currency on.
@@ -719,6 +739,8 @@ function membershipWarningFor(record) {
       const days = end ? Math.ceil((new Date(end).getTime() - Date.now()) / 864e5) : 0;
       return days > 0 ? `CANCELLED — ACCESS ENDS IN ${plural(days, 'DAY').toUpperCase()}` : WARNINGS.membership_cancelled;
     }
+    case 'membership_pending':
+      return startsLater(record) ? startsLaterWarning(record.membership.startsOn) : WARNINGS.membership_pending;
     default:
       // Frozen, past due, pending, suspended, expired, none -- or nothing at
       // all for a plain active visit.
@@ -747,6 +769,18 @@ const PROBLEM_VERDICTS = new Set([
 // and pending get the sound but no words: the member has paid, or it is the
 // manager's call, and telling them to renew would be wrong.
 const SAY_EXPIRED = new Set(['membership_expired', 'membership_none', 'membership_past_due', 'membership_cancelled']);
+
+// The visit was on a paid membership that had not started yet: stored as
+// 'membership_pending' with the date it starts (see startsLaterWarning).
+function startsLater(record) {
+  return record.status === 'membership_pending' && !!(record.membership && record.membership.startsOn);
+}
+
+// '5 October' in the gym's zone: a date as it is said -- the printed
+// '05 Oct 2026' reads out as "oh five Oct".
+function spokenDate(date) {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: T.timezone(), day: 'numeric', month: 'long' }).format(new Date(date));
+}
 
 function joinSpeech(parts) {
   const said = parts.filter(Boolean).map((part) => String(part).trim()).filter(Boolean);
@@ -779,7 +813,12 @@ function memberAlert(record, voice) {
   let level = 'ok';
   let say = null;
 
-  if (PROBLEM_VERDICTS.has(status) || (status === 'membership_cancelled' && daysLeft <= 0)) {
+  if (startsLater(record)) {
+    // Paid, only not started: a word at the desk, not a problem. None of the
+    // gym's fee messages is true of it, so the start date is said instead.
+    level = 'warning';
+    say = `Your membership starts on ${spokenDate(record.membership.startsOn)}`;
+  } else if (PROBLEM_VERDICTS.has(status) || (status === 'membership_cancelled' && daysLeft <= 0)) {
     level = 'problem';
     if (SAY_EXPIRED.has(status)) say = settings.expiredMessage;
   } else if (status === 'membership_expiring' || status === 'membership_cancelled') {
