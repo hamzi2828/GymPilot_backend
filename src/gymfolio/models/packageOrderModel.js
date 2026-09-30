@@ -243,6 +243,26 @@ const packageOrderSchema = new mongoose.Schema(
         default: []
       }
     },
+    // The personal trainer sold with this membership at the desk, what the
+    // member pays for them (the same figure as payment.trainerFee), and the
+    // trainer's commission on it: `commissionValue` is a percentage of the
+    // fee ('percent') or a fixed sum ('amount'); `commissionAmount` is what
+    // that comes to, earned on the order's first payment date. null when the
+    // order was sold without one.
+    trainerAssignment: {
+      type: new mongoose.Schema(
+        {
+          trainerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Trainer', required: true },
+          trainerName: { type: String, default: '' },
+          fee: { type: Number, default: 0 },
+          commissionType: { type: String, enum: ['percent', 'amount'], default: 'percent' },
+          commissionValue: { type: Number, default: 0 },
+          commissionAmount: { type: Number, default: 0 }
+        },
+        { _id: false }
+      ),
+      default: null
+    },
     // The order this one renewed or replaced.
     renewedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageOrder', default: null },
     // Issued once the order is paid; see services/invoiceService.js.

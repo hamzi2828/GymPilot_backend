@@ -231,7 +231,13 @@ module.exports = {
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/renew  (staff)  { paymentMethod, markPaid, months, notes, force }
+  // POST /api/gymfolio/package-orders/:id/renew  (staff)
+  //   { paymentMethod, markPaid, months, notes, force,
+  //     startDate, discountAmount, discountNote, amountOverride }
+  //
+  // The pricing and start fields are read as on a sale (readDeskTerms; no
+  // trainer on a renewal). Left out, the term starts when the current one
+  // ends, at the package's price.
   //
   // A card subscription renews itself: a manual renewal on top would be paid
   // for twice. One whose card payment failed is Stripe's to collect, not a
@@ -253,11 +259,16 @@ module.exports = {
           'AUTO_RENEWS'
         );
       }
+      const terms = service.readDeskTerms(body, { trainer: false });
       const renewal = await service.renew(order, {
-        paymentMethod: body.paymentMethod,
+        paymentMethod: terms.paymentMethod,
         markPaid: body.markPaid !== false && body.markPaid !== 'false',
         months: body.months,
-        notes: body.notes,
+        notes: terms.notes,
+        startDate: terms.startDate,
+        discountAmount: terms.discountAmount,
+        discountNote: terms.discountNote,
+        amountOverride: terms.amountOverride,
         by: req.user && req.user.email
       });
       if (renewal.payment.status === 'paid') tell('membershipConfirmed', renewal);

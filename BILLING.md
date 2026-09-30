@@ -43,8 +43,24 @@ screen offers that on the refusal.
   staff **Confirm payment received** or **Reject** on Package Orders. The
   member is emailed at each step.
 * **At the desk** — **Assign Package** on Package Orders: cash, bank, a card
-  terminal or a mobile wallet (JazzCash, Easypaisa, other), with an optional
-  coupon, amount override and start date.
+  terminal or a mobile wallet (JazzCash, Easypaisa, other). `POST
+  /package-orders/assign` (package-orders · manage) `{ userId, packageId,
+  paymentMethod?, markPaid?, couponCode?, durationMonths?, startDate? |
+  startAfterDays?, discountAmount?, discountNote?, amountOverride? (or
+  amount), waiveJoiningFee?, trainerId?, trainerFee?,
+  trainerCommissionType? ('percent' | 'amount'), trainerCommissionValue?,
+  notes? }` → `201 { success, message, data: order }`. `startDate` (a bare
+  `YYYY-MM-DD` is the start of that day at the gym) or `startAfterDays`
+  (0–365: the start of that day from today; 0 = now) — not both — lets a
+  member register today and start later; the end date is worked out from
+  that start. Left out, a membership bought while another is live starts
+  when that one ends. The discount comes off the package price; a trainer
+  adds `trainerFee` to the total, records `trainerAssignment` (commission
+  as a percentage of the fee, or a fixed amount; `commissionAmount` is what
+  it comes to) and makes them the member's `assignedTrainerId`. Each field
+  is checked by `membershipService.readDeskTerms`: a value that cannot be
+  used is `400 INVALID_TERMS` naming it; an unknown trainer `404
+  TRAINER_NOT_FOUND`, an inactive one `409 TRAINER_INACTIVE`.
 
 `payment.method` is one of `src/services/paymentMethods.js`: `stripe` (Card
 (Stripe)), `card` (Card — the desk terminal), `bank_transfer`, `cash`,
@@ -80,8 +96,11 @@ issues the invoice number, redeems the coupon and activates the order.
   Members always cancel *at period end* (recurring: Stripe
   `cancel_at_period_end`; one-off: the term simply runs out). Staff may cancel
   immediately. `/resume` undoes a pending cancellation.
-* **Renew** — `POST /package-orders/:id/renew` (staff): a fresh term of the
-  same package, starting when the current one ends.
+* **Renew** — `POST /package-orders/:id/renew` (staff) `{ paymentMethod?,
+  markPaid?, months?, notes?, force?, startDate?, discountAmount?,
+  discountNote?, amountOverride? }`: a fresh term of the same package,
+  starting when the current one ends (or on `startDate`), priced like a
+  sale. Never a joining fee; no trainer (400).
 * **Change package** — `POST /package-orders/:id/change-package {packageId}`
   (staff): the unused days of the old package are credited pro rata against
   the new price; on a Stripe subscription the subscription item is switched

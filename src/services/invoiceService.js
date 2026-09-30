@@ -160,9 +160,10 @@ async function renderInvoicePdf(order, options = {}) {
   doc.fillColor(dark).fontSize(10).text(money(listPrice, currency), 445, y, { width: 90, align: 'right' });
   y += 34;
 
+  const trainerName = (order.trainerAssignment && order.trainerAssignment.trainerName) || '';
   for (const [label, amount] of [
     ['Admission fee (one-off)', joiningFee],
-    ['Personal trainer fee', trainerFee]
+    [`Personal trainer fee${trainerName ? ` (${trainerName})` : ''}`, trainerFee]
   ]) {
     if (!(amount > 0)) continue;
     doc.fillColor(dark).fontSize(10).text(label, left + 10, y);

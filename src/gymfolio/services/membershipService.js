@@ -6,9 +6,11 @@
 // approval path. The payment controllers and the Stripe webhook all come
 // through here, so an order changes state in one place whatever paid for it.
 
+const mongoose = require('mongoose');
 const PackageOrder = require('../models/packageOrderModel');
 const Package = require('../models/packageModel');
 const Coupon = require('../models/couponModel');
+const Trainer = require('../models/trainerModel');
 const User = require('../../models/user');
 const Settings = require('../../models/settings');
 const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
@@ -289,6 +291,125 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
   return order;
 }
 
+/* ------------------------------ desk terms ----------------------------- */
+//
+// What staff may set when they sell or renew a membership at the desk, read
+// from the request and checked before anything is written. A value that
+// cannot be used is a 400 naming the field -- never quietly dropped, which
+// would sell the member something other than what the desk agreed.
+
+const MAX_START_AHEAD_DAYS = 365;
+
+function present(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function truthy(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function money(value, field) {
+  if (!present(value)) return undefined;
+  const amount = typeof value === 'number' ? value : parseAmount(value);
+  if (amount === null || !Number.isFinite(amount) || amount < 0) {
+    throw new MembershipError(`${field} must be an amount of 0 or more`, 400, 'INVALID_TERMS');
+  }
+  return round2(amount);
+}
+
+/**
+ * A start date the desk sent. A bare 'YYYY-MM-DD' (a date input) is the
+ * start of that day at the gym; anything else must read as an instant.
+ * Starting more than a year ahead is refused as the typo it almost
+ * certainly is.
+ */
+function readStartDate(value, now = new Date()) {
+  let at = null;
+  if (T.isDateOnly(value)) at = T.startOfLocalDay(String(value).trim());
+  else if (typeof value === 'string' || value instanceof Date) at = new Date(value);
+  if (!at || Number.isNaN(at.getTime())) throw new MembershipError('startDate is not a date', 400, 'INVALID_TERMS');
+  if (at.getTime() > now.getTime() + MAX_START_AHEAD_DAYS * DAY_MS) {
+    throw new MembershipError(`A membership can start at most ${MAX_START_AHEAD_DAYS} days ahead`, 400, 'INVALID_TERMS');
+  }
+  return at;
+}
+
+/**
+ * The desk's terms from a request body, for createManualOrder.
+ *
+ *   startDate | startAfterDays   when the term starts: a date, or so many
+ *                                days from today (the start of that day at
+ *                                the gym; 0 = now). Not both. Left out, a
+ *                                membership starts when the current one
+ *                                ends. The end date follows from the start.
+ *   discountAmount, discountNote off the package price
+ *   amountOverride (or amount)   charge this total instead
+ *   waiveJoiningFee              no admission fee on this order
+ *   paymentMethod                checked by createManualOrder
+ *   trainerId, trainerFee,       a personal trainer sold with it (sale only,
+ *   trainerCommissionType,       not renewals): 'percent' of the fee, or a
+ *   trainerCommissionValue       fixed 'amount'
+ *   notes
+ *
+ * @param {object} body
+ * @param {{ trainer?: boolean, now?: Date }} [options] trainer: whether
+ *   trainer fields are accepted at all
+ * @throws {MembershipError} 400 INVALID_TERMS naming the field
+ */
+function readDeskTerms(body = {}, { trainer: allowTrainer = true, now = new Date() } = {}) {
+  const terms = {};
+
+  if (present(body.startDate) && present(body.startAfterDays)) {
+    throw new MembershipError('Send startDate or startAfterDays, not both', 400, 'INVALID_TERMS');
+  }
+  if (present(body.startDate)) terms.startDate = readStartDate(body.startDate, now);
+  if (present(body.startAfterDays)) {
+    const days = Number(body.startAfterDays);
+    if (!Number.isInteger(days) || days < 0 || days > MAX_START_AHEAD_DAYS) {
+      throw new MembershipError(`startAfterDays must be a whole number from 0 to ${MAX_START_AHEAD_DAYS}`, 400, 'INVALID_TERMS');
+    }
+    terms.startDate = days === 0 ? now : T.startOfLocalDay(T.shiftDateKey(T.dateKey(now), days));
+  }
+
+  const discount = money(body.discountAmount, 'discountAmount');
+  if (discount !== undefined) terms.discountAmount = discount;
+  if (present(body.discountNote)) terms.discountNote = String(body.discountNote).trim().slice(0, 200);
+
+  const override = money(present(body.amountOverride) ? body.amountOverride : body.amount, 'amountOverride');
+  if (override !== undefined) terms.amountOverride = override;
+
+  if (truthy(body.waiveJoiningFee)) terms.chargeJoiningFee = false;
+  if (present(body.paymentMethod)) terms.paymentMethod = body.paymentMethod;
+  if (present(body.notes)) terms.notes = String(body.notes).trim().slice(0, 1000);
+
+  const trainerFields = ['trainerId', 'trainerFee', 'trainerCommissionType', 'trainerCommissionValue'].filter((key) => present(body[key]));
+  if (trainerFields.length) {
+    if (!allowTrainer) throw new MembershipError('A trainer is chosen when the membership is sold, not on a renewal', 400, 'INVALID_TERMS');
+    if (!present(body.trainerId)) throw new MembershipError('Choose the trainer the fee or commission is for (trainerId)', 400, 'INVALID_TERMS');
+    if (!mongoose.Types.ObjectId.isValid(String(body.trainerId))) throw new MembershipError('trainerId is not a trainer', 400, 'INVALID_TERMS');
+    const commissionType = present(body.trainerCommissionType) ? body.trainerCommissionType : 'percent';
+    if (!['percent', 'amount'].includes(commissionType)) {
+      throw new MembershipError("trainerCommissionType must be 'percent' or 'amount'", 400, 'INVALID_TERMS');
+    }
+    const commissionValue = money(body.trainerCommissionValue, 'trainerCommissionValue') || 0;
+    if (commissionType === 'percent' && commissionValue > 100) {
+      throw new MembershipError('A percentage commission cannot be over 100', 400, 'INVALID_TERMS');
+    }
+    terms.trainer = {
+      trainerId: String(body.trainerId),
+      fee: money(body.trainerFee, 'trainerFee') || 0,
+      commissionType,
+      commissionValue
+    };
+  }
+  return terms;
+}
+
+/** What a trainer's commission on a fee comes to. */
+function commissionOn(fee, { commissionType, commissionValue }) {
+  return commissionType === 'amount' ? round2(commissionValue) : round2((Number(fee) || 0) * (Number(commissionValue) || 0) / 100);
+}
+
 /* ---------------------------- manual orders ---------------------------- */
 
 /**
@@ -298,6 +419,11 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
  * `chargeJoiningFee`: left out, the package's joining fee is added when the
  * member has never joined (joiningFeeDue); renewals and package changes
  * pass false.
+ *
+ * `trainer` ({ trainerId, fee, commissionType, commissionValue }, from
+ * readDeskTerms): a personal trainer sold with the membership. The fee is
+ * charged on top as payment.trainerFee, the commission is recorded on
+ * trainerAssignment, and the member's assigned trainer becomes this one.
  */
 async function createManualOrder({
   user,
@@ -314,6 +440,7 @@ async function createManualOrder({
   discountNote = '',
   renewedFrom = null,
   chargeJoiningFee,
+  trainer = null,
   by = null
 }) {
   const settings = await Settings.getSettings().catch(() => null);
@@ -332,7 +459,13 @@ async function createManualOrder({
   const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: user.email }) : !!chargeJoiningFee;
   const joiningFee = feeDue ? round2(snapshot.joiningFee) : 0;
 
-  const trainerFee = 0;
+  let coach = null;
+  if (trainer) {
+    coach = await Trainer.findById(trainer.trainerId).select('name isActive').lean();
+    if (!coach) throw new MembershipError('That trainer was not found', 404, 'TRAINER_NOT_FOUND');
+    if (coach.isActive === false) throw new MembershipError(`${coach.name} is not an active trainer`, 409, 'TRAINER_INACTIVE');
+  }
+  const trainerFee = coach ? round2(trainer.fee) : 0;
 
   let coupon = null;
   let discount = round2(discountAmount);
@@ -401,6 +534,17 @@ async function createManualOrder({
       renewalDate: end
     },
     sessions: snapshot.sessions > 0 ? { total: snapshot.sessions, used: 0 } : undefined,
+    // The commission is on the trainer's fee this order actually carries.
+    trainerAssignment: coach
+      ? {
+          trainerId: coach._id,
+          trainerName: coach.name || '',
+          fee: parts.trainerFee,
+          commissionType: trainer.commissionType,
+          commissionValue: trainer.commissionValue,
+          commissionAmount: commissionOn(parts.trainerFee, trainer)
+        }
+      : null,
     renewedFrom,
     status: paid ? 'active' : 'pending',
     notes: notes || `Created from the admin panel by ${by || 'an administrator'}`,
@@ -411,6 +555,11 @@ async function createManualOrder({
     await markPaidAndActivate(order, { paidAt: now, startDate: start, endDate: end });
   } else {
     await order.save();
+  }
+
+  // The member's trainer from now on (members pages, the trainer's list).
+  if (coach && user._id) {
+    await User.updateOne({ _id: user._id }, { $set: { assignedTrainerId: coach._id } });
   }
   return order;
 }
@@ -853,21 +1002,31 @@ async function resume(order, { by = null } = {}) {
   return order;
 }
 
-/** A fresh term of the same package, starting when the current one ends. */
-async function renew(order, { paymentMethod = 'cash', markPaid = true, months, notes, by } = {}) {
+/**
+ * A fresh term of the same package, starting when the current one ends --
+ * or on `startDate` when the desk says. `discountAmount` / `discountNote`
+ * and `amountOverride` price it as on a sale (readDeskTerms).
+ */
+async function renew(
+  order,
+  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride } = {}
+) {
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(order.packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
   if (!pkg) throw new MembershipError('The package no longer exists; assign a current one instead', 404);
 
   const now = new Date();
   const currentEnd = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
-  const start = currentEnd && currentEnd > now && ['active', 'frozen'].includes(order.status) ? currentEnd : now;
+  const start = startDate || (currentEnd && currentEnd > now && ['active', 'frozen'].includes(order.status) ? currentEnd : now);
 
   return createManualOrder({
     user,
     pkg,
     paymentMethod,
     markPaid,
+    discountAmount,
+    discountNote,
+    amountOverride,
     durationMonths: months,
     startDate: start,
     notes: notes || `Renewal of ${order.orderNumber}`,
@@ -1282,6 +1441,8 @@ module.exports = {
   redeemCoupon,
   assertNoActiveSubscription,
   markPaidAndActivate,
+  readDeskTerms,
+  commissionOn,
   createManualOrder,
   createBankTransferOrder,
   submitTransferProof,
