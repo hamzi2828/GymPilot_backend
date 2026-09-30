@@ -17,6 +17,7 @@
 const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
+const { defaultCurrency } = require('../../services/currency');
 
 const MEMBER_PREFIX = 'GP-';
 const STAFF_PREFIX = 'TR-';
@@ -283,6 +284,42 @@ function currencyOf(order) {
   return order.payment && order.payment.currency ? String(order.payment.currency).toUpperCase() : '';
 }
 
+// What a member owes is everything still owed on ANY of their paid orders,
+// as the Dues list counts it -- not only on the order the desk describes.
+// A member who renews early and pays the renewal in full still owes the
+// balance on the term before; the desk describes the renewal (it runs
+// latest), and reading the balance off that one order said nothing was
+// owed. Kept per currency: money is never added across them.
+function owedTotals(orders) {
+  const totals = new Map();
+  for (const order of orders || []) {
+    const due = balanceOf(order);
+    if (!(due > 0)) continue;
+    const code = currencyOf(order);
+    totals.set(code, Math.round(((totals.get(code) || 0) + due) * 100) / 100);
+  }
+  return totals;
+}
+
+// The one figure the desk says: the total in the gym's own currency
+// (`prefer`) when anything is owed in it -- an order naming no currency is
+// in the gym's -- otherwise the largest sum. Two currencies only arise when
+// a gym changed its currency with money still owed; the desk then names the
+// money it can actually collect, never a sum across the two. null when
+// nothing is owed.
+function owedIn(totals, prefer) {
+  const code = String(prefer || '').toUpperCase();
+  const merged = new Map(totals);
+  if (code && merged.has('')) {
+    merged.set(code, Math.round(((merged.get(code) || 0) + merged.get('')) * 100) / 100);
+    merged.delete('');
+  }
+  if (!merged.size) return null;
+  if (code && merged.has(code)) return { balanceDue: merged.get(code), currency: code };
+  const [currency, balanceDue] = [...merged.entries()].sort((a, b) => b[1] - a[1])[0];
+  return { balanceDue, currency };
+}
+
 function describeOrder(order, status, now) {
   const endDate = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
 
@@ -316,7 +353,7 @@ async function membershipFor(user) {
   const ownerClauses = [{ userId: user._id }];
   if (emailMatch) ownerClauses.push({ 'customerInfo.email': emailMatch });
 
-  const [paidOrders, unpaid] = await Promise.all([
+  const [paidOrders, unpaid, owing] = await Promise.all([
     PackageOrder.find({ $or: ownerClauses, ...PAID_ORDER })
       .sort({ 'subscription.endDate': -1, createdAt: -1 })
       .limit(RECENT_PAID_ORDERS)
@@ -324,17 +361,34 @@ async function membershipFor(user) {
     // The newest order still waiting for its money (see AWAITING_PAYMENT).
     PackageOrder.findOne({ $or: ownerClauses, ...AWAITING_PAYMENT })
       .sort({ createdAt: -1 })
+      .lean(),
+    // Every paid order with money still owed, however old (owedTotals).
+    PackageOrder.find({ $or: ownerClauses, ...PAID_ORDER, 'payment.balanceDue': { $gt: 0 } })
+      .select('payment.status payment.balanceDue payment.currency')
       .lean()
   ]);
 
-  return membershipFromOrders(paidOrders, unpaid, new Date());
+  // The gym's currency is only needed to choose between two.
+  const currency = owedTotals(owing).size > 1 ? await defaultCurrency() : null;
+  return membershipFromOrders(paidOrders, unpaid, new Date(), { owing, currency });
 }
 
 // membershipFor's answer from orders already in hand: `paidOrders` newest end
 // date first (then newest created), `unpaid` the newest order awaiting
 // payment, or null. Pure, so the desk, the office's roster (membershipsFor)
 // and the tests all reach the same verdict from the same orders.
-function membershipFromOrders(paidOrders, unpaid, now = new Date()) {
+//
+// `owing`: the paid orders whose balances make up what the member owes --
+// all of `paidOrders` unless given (membershipFor weighs only the latest few
+// for the verdict and fetches those owing apart). `currency`: the gym's, to
+// name when the money is owed in more than one (owedIn).
+function membershipFromOrders(paidOrders, unpaid, now = new Date(), { owing = paidOrders, currency = null } = {}) {
+  const answer = verdictFromOrders(paidOrders, unpaid, now);
+  const owed = owedIn(owedTotals(owing), currency);
+  return owed ? { ...answer, ...owed } : answer;
+}
+
+function verdictFromOrders(paidOrders, unpaid, now) {
   const recent = (paidOrders || []).slice(0, RECENT_PAID_ORDERS);
 
   // A paid membership that is in date wins over everything else: a renewal
@@ -435,7 +489,7 @@ function ordersByOwner(orders) {
  * all of them: each member is answered from exactly the orders membershipFor
  * would have fetched for them alone. Pure. Keyed by String(user._id).
  */
-function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date()) {
+function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date(), { currency = null } = {}) {
   const paidOf = ordersByOwner(paidOrders);
   const unpaidOf = ordersByOwner(unpaidOrders);
 
@@ -443,7 +497,8 @@ function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date()
   for (const user of users || []) {
     const paid = paidOf(user).sort(newestEndFirst);
     const unpaid = unpaidOf(user).sort(newestCreatedFirst)[0] || null;
-    index.set(String(user._id), membershipFromOrders(paid, unpaid, now));
+    // Every paid order of theirs is here, so what they owe is read off all of them.
+    index.set(String(user._id), membershipFromOrders(paid, unpaid, now, { currency }));
   }
   return index;
 }
@@ -472,7 +527,9 @@ async function membershipsFor(users, now) {
     PackageOrder.find({ ...owners, ...AWAITING_PAYMENT }).select(fields).lean()
   ]);
 
-  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date());
+  // The gym's currency is only needed when money is owed in more than one.
+  const currency = owedTotals(paidOrders).size > 1 ? await defaultCurrency() : null;
+  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date(), { currency });
 }
 
 // The directory's entries as they go out to the desk. `codes` -- every code

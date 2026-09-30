@@ -227,6 +227,53 @@ test("the membership carries what is still owed on a paid order -- and only a pa
   assert.equal(pending.balanceDue, 0);
 });
 
+test('the balance is everything owed on the paid orders, not only on the one the desk describes', () => {
+  const { membershipsFromOrders } = require('../../src/attendance/services/peopleDirectory');
+  const now = new Date('2026-09-21T12:00:00Z');
+  const user = { _id: '0000000000000000000000c2', email: 'renewed@example.test' };
+  let seq = 0;
+  const order = ({ startIn = -25, endIn, balanceDue = 0, currency = 'pkr', status = 'active' }) => ({
+    _id: `0000000000000000000000e${++seq}`,
+    userId: user._id,
+    customerInfo: { email: user.email },
+    packageDetails: { name: 'Monthly' },
+    subscription: { startDate: new Date(now.getTime() + startIn * DAY), endDate: new Date(now.getTime() + endIn * DAY) },
+    status,
+    createdAt: new Date(now.getTime() + startIn * DAY),
+    payment: { status: 'paid', balanceDue, currency }
+  });
+  const money = (m) => ({ balanceDue: m.balanceDue, currency: m.currency });
+
+  // Owes 2,000 on the running term; renewed early and paid the renewal in full.
+  const running = order({ endIn: 5, balanceDue: 2000 });
+  const renewal = order({ startIn: 5, endIn: 35 });
+  const answer = membershipFromOrders([renewal, running], null, now);
+  assert.equal(answer.orderId, renewal._id, 'the renewal, running latest, is the one described');
+  assert.deepEqual(money(answer), { balanceDue: 2000, currency: 'PKR' });
+
+  // Owing on several orders adds up -- an expired one's too, as the Dues list counts it.
+  const lapsed = order({ startIn: -70, endIn: -40, balanceDue: 500, status: 'expired' });
+  assert.deepEqual(money(membershipFromOrders([renewal, running, lapsed], null, now)), { balanceDue: 2500, currency: 'PKR' });
+  // The office's roster answers the same from its bulk fetch.
+  assert.deepEqual(money(membershipsFromOrders([user], [lapsed, running, renewal], [], now).get(String(user._id))), {
+    balanceDue: 2500,
+    currency: 'PKR'
+  });
+  // membershipFor weighs only the latest paid orders, and hands over what is
+  // owed on all of them apart.
+  assert.equal(membershipFromOrders([renewal], null, now, { owing: [running, lapsed] }).balanceDue, 2500);
+
+  // Two currencies are never added: the gym's own when it is owed in it,
+  // otherwise the larger sum.
+  const inPounds = order({ startIn: -130, endIn: -100, balanceDue: 25, currency: 'gbp', status: 'expired' });
+  assert.deepEqual(money(membershipFromOrders([renewal, running, inPounds], null, now, { currency: 'GBP' })), { balanceDue: 25, currency: 'GBP' });
+  assert.deepEqual(money(membershipFromOrders([renewal, running, inPounds], null, now)), { balanceDue: 2000, currency: 'PKR' });
+  assert.deepEqual(money(membershipFromOrders([renewal, running, inPounds], null, now, { currency: 'USD' })), { balanceDue: 2000, currency: 'PKR' });
+
+  // Nothing owed anywhere: nothing, in the described order's currency.
+  assert.deepEqual(money(membershipFromOrders([renewal], null, now)), { balanceDue: 0, currency: 'PKR' });
+});
+
 // A paid membership sold to start later (the desk's "start after N days"),
 // scanned before its first day: stored as 'membership_pending' with the date
 // it starts. Paid, so a warning rather than a problem, and the date said
