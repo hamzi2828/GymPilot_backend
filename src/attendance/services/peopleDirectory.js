@@ -218,7 +218,8 @@ async function trainerProfilesOf(userIds) {
 // cancelled | expired | none. Everything downstream (the punch verdict, the
 // attendance snapshot, class bookings, the member's own account page) reads
 // this shape, so a new answer here must also be storable there -- see the
-// status enums on attendanceModel and classBookingModel.
+// status enums on attendanceModel and classBookingModel. 'pending' with a
+// `startsOn` date is a paid membership that has not started yet.
 //
 // Guest checkouts are matched by email as well as by userId: someone can buy
 // a package before ever creating an account, then sign up with the same
@@ -238,6 +239,15 @@ function isLiveOrder(order, now) {
     // A pack with nothing left on it is not a live membership.
     !(order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total)
   );
+}
+
+// Whether the term has begun. The desk can sell a membership that starts in
+// a few days (subscription.startDate ahead); until then it is paid for but
+// covers nothing. An order with no start date is from before the field and
+// has always been running.
+function hasStarted(order, now) {
+  const start = order.subscription && order.subscription.startDate;
+  return !start || new Date(start) <= now;
 }
 
 // How many of a person's paid orders are weighed, newest end date first.
@@ -330,10 +340,30 @@ function membershipFromOrders(paidOrders, unpaid, now = new Date()) {
   // A paid membership that is in date wins over everything else: a renewal
   // sitting in the bank-transfer queue must not hide the term that is
   // running right now.
-  const live = recent.find((order) => isLiveOrder(order, now));
-  if (live) {
+  //
+  // Once any live term has begun, the newest-ending one is the answer even
+  // if it has not begun itself: that is a renewal queued behind the running
+  // term (it starts when that one ends), and the member is covered straight
+  // through to its end -- "active, 32 days left", never "expires in 2 days"
+  // to someone who has already renewed. (A term booked after a gap reads the
+  // same until the gap comes: today, the member is covered either way.)
+  const liveOrders = recent.filter((order) => isLiveOrder(order, now));
+  if (liveOrders.some((order) => hasStarted(order, now))) {
+    const live = liveOrders[0];
     const status = live.status === 'frozen' ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
     return describeOrder(live, status, now);
+  }
+
+  // Paid, but nothing has begun yet: a desk sale that starts in a few days.
+  // Not covered today, so 'pending' -- the answer every reader already treats
+  // as "not in force yet", never as lapsed -- with `startsOn` saying it is
+  // the start date being waited on rather than the money. The one starting
+  // soonest is the one the desk needs to name.
+  if (liveOrders.length) {
+    const next = liveOrders.reduce((soonest, order) =>
+      new Date(order.subscription.startDate) < new Date(soonest.subscription.startDate) ? order : soonest
+    );
+    return { ...describeOrder(next, 'pending', now), startsOn: new Date(next.subscription.startDate) };
   }
 
   // Nothing live. If the most recent thing that happened is an order awaiting

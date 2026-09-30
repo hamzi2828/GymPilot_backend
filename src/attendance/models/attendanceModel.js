@@ -104,7 +104,8 @@ const attendanceSchema = new mongoose.Schema(
       // none      -- never bought one
       // frozen / past_due / suspended / cancelled -- the order's own state,
       //           reported as such so the desk can say so
-      // pending   -- unpaid order awaiting payment confirmation (bank transfer)
+      // pending   -- unpaid order awaiting payment confirmation (bank transfer),
+      //             or, with `startsOn`, a paid one that has not started yet
       //
       // A superset of everything peopleDirectory.membershipFor can answer:
       // an enum narrower than the source crashed the punch with a validation
@@ -114,6 +115,10 @@ const attendanceSchema = new mongoose.Schema(
         enum: ['active', 'expiring', 'expired', 'none', 'frozen', 'past_due', 'pending', 'suspended', 'cancelled'],
         default: 'none'
       },
+      // When a paid membership that had not started yet was due to start
+      // (status 'pending'); null otherwise. Not covered, not lapsed: the
+      // check-out and the day's board say "starts on" from this.
+      startsOn: { type: Date, default: null },
       // Money still owed on that package when they walked in (the order's
       // payment.balanceDue) and the currency it is in. Kept with the visit so
       // the check-out repeats the check-in's "Balance due", and so the day's

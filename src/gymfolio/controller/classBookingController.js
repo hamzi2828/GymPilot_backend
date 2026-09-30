@@ -38,9 +38,31 @@ function fail(res, code, message, extra = {}) {
 function membershipGate(membership, rules) {
   if (!rules.requireActiveMembership || membership.status === 'active') return null;
   return (
-    MEMBERSHIP_PROBLEMS[membership.status] ||
+    membershipProblem(membership) ||
     'An active membership is needed to book classes — please speak to the front desk.'
   );
+}
+
+/**
+ * The membership as it will stand for a session on `sessionDate`: one paid
+ * for but not started yet (membershipFor's 'pending' with `startsOn`) is
+ * active for a class on or after its first day -- a member who has bought a
+ * term from Monday can book Monday's class.
+ */
+function membershipForSession(membership, sessionDate) {
+  if (membership.status === 'pending' && membership.startsOn && T.dateKey(membership.startsOn) <= sessionDate) {
+    return { ...membership, status: 'active' };
+  }
+  return membership;
+}
+
+// MEMBERSHIP_PROBLEMS' words for this membership: 'pending' is either money
+// awaited or, with `startsOn`, a paid term that begins later.
+function membershipProblem(membership) {
+  if (membership.status === 'pending' && membership.startsOn) {
+    return `Your membership starts on ${T.dateLabel(membership.startsOn)} — classes can be booked from then.`;
+  }
+  return MEMBERSHIP_PROBLEMS[membership.status];
 }
 
 // What to tell a member whose membership is not simply active, keyed by what
@@ -254,7 +276,7 @@ module.exports = {
         );
       }
 
-      const membership = await membershipFor(member);
+      const membership = membershipForSession(await membershipFor(member), date);
       const blocked = membershipGate(membership, rules);
       if (blocked) return fail(res, 402, blocked);
 
@@ -336,7 +358,7 @@ module.exports = {
         membership_warning:
           membership.status === 'active'
             ? null
-            : MEMBERSHIP_PROBLEMS[membership.status] || MEMBERSHIP_PROBLEMS.none,
+            : membershipProblem(membership) || MEMBERSHIP_PROBLEMS.none,
         data: bookingView(booking)
       });
     } catch (error) {

@@ -12,7 +12,8 @@ const { balanceDueLabel, currentVerdict } = require('./punchService');
 // still running: active (expiring soon included -- membershipFor answers
 // 'active' for it), frozen (paid, and on hold), or cancelled but still inside
 // what was paid for. Everything else is UNPAID: expired, never bought one,
-// a card payment that failed, a transfer not yet confirmed, suspended.
+// a card payment that failed, a transfer not yet confirmed, suspended, a
+// paid term that had not started yet (membershipFor's 'pending').
 //
 // Money still owed on a running package (balance due) is paid -- the
 // membership is live and the order is paid -- and counted separately.
@@ -32,7 +33,7 @@ function balanceOwed(row) {
 //
 //   key     paid | expiring | balance_due | frozen | cancelled | unpaid |
 //           suspended | staff -- what the pill is coloured by
-//   label   Paid, Expiring, Balance due £25, Frozen, Unpaid ...
+//   label   Paid, Expiring, Balance due £25, Frozen, Unpaid, Not started ...
 //
 // A problem outranks money owed (an expired member is "Unpaid" however much
 // else they owe); money owed outranks "expiring" -- the row carries the
@@ -46,6 +47,9 @@ function standingOf(row) {
 
   if (!isPaidVisit(row)) {
     if (row.status === 'membership_suspended') return { key: 'suspended', label: 'Suspended' };
+    // Paid for a term that had not started: not covered today, so counted
+    // unpaid, but "Unpaid" would tell the office the money never came.
+    if (row.membership && row.membership.startsOn) return { key: 'unpaid', label: 'Not started' };
     return { key: 'unpaid', label: 'Unpaid' };
   }
   if (row.status === 'membership_frozen') return { key: 'frozen', label: 'Frozen' };

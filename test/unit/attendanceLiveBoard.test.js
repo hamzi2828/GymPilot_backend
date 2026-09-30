@@ -94,3 +94,12 @@ test("the day's counts: visits and who is in, members once each by their latest 
   });
   assert.deepEqual(tally([], () => false), { visits: 0, members: 0, staff: 0, in_now: 0, paid: 0, unpaid: 0, balance_due: 0 });
 });
+
+test('a membership that had not started yet: counted unpaid, but called "Not started", not "Unpaid"', () => {
+  const early = visit('pending', 'membership_pending');
+  early.membership.startsOn = at('00:00');
+  assert.equal(isPaidVisit(early), false);
+  assert.deepEqual(standingOf(early), { key: 'unpaid', label: 'Not started' });
+  assert.deepEqual(standingOf(visit('pending', 'membership_pending')), { key: 'unpaid', label: 'Unpaid' }, 'a transfer awaited');
+  assert.equal(tally([early], () => false).unpaid, 1);
+});

@@ -311,3 +311,42 @@ test('the desk putting a no-show back into a place that has since gone: an overr
     assert.equal((await book(third, barre, tomorrow)).body.data.status, 'waitlisted');
   });
 });
+
+test('a membership sold to start later books the classes from its first day, and is told when it starts before then', async () => {
+  await h.inGym(gym, async () => {
+    const slot = [{ day: weekday, startTime: '18:00', endTime: '19:00', instructorName: 'Coach' }];
+    const stretch = await GymClass.create({ name: 'Stretch', description: 'Stretch class', capacity: 10, schedule: slot });
+
+    // A monthly membership (no sessions) paid today, starting on `startKey`.
+    async function startingOn(n, startKey) {
+      const user = await User.create({ firstName: `Later${n}`, lastName: 'Test', email: `later${n}@booking.test` });
+      const start = T.startOfLocalDay(startKey);
+      await PackageOrder.create({
+        orderNumber: `LATER-${n}`,
+        userId: user._id,
+        packageId: new h.state.mongoose.Types.ObjectId(),
+        packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month' },
+        customerInfo: { fullName: `Later${n} Test`, email: user.email },
+        payment: { method: 'cash', amount: 40, currency: 'GBP', status: 'paid', paidAt: new Date() },
+        subscription: { startDate: start, endDate: new Date(start.getTime() + 30 * 86400000), isActive: true },
+        status: 'active'
+      });
+      return { user };
+    }
+
+    // Starts tomorrow: tomorrow's class is inside it.
+    const fromTomorrow = await startingOn(1, tomorrow);
+    const covered = await book(fromTomorrow, stretch, tomorrow);
+    assert.equal(covered.statusCode, 201, JSON.stringify(covered.body));
+    assert.equal(covered.body.membership_warning, null);
+    assert.equal(covered.body.data.membership_status, 'active');
+
+    // Starts the day after: the booking is recorded, and the member is told
+    // when the membership starts -- not that a payment is awaited.
+    const dayAfter = T.shiftDateKey(tomorrow, 1);
+    const tooSoon = await book(await startingOn(2, dayAfter), stretch, tomorrow);
+    assert.equal(tooSoon.statusCode, 201, JSON.stringify(tooSoon.body));
+    assert.equal(tooSoon.body.membership_warning, `Your membership starts on ${T.dateLabelForKey(dayAfter)} — classes can be booked from then.`);
+    assert.equal(tooSoon.body.data.membership_status, 'pending');
+  });
+});

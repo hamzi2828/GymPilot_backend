@@ -675,7 +675,7 @@ test('the desk does not offer a renewal to a member whose subscription renews it
 });
 
 // A member with one paid order, `endIn` days from now (negative: ended).
-async function memberWithOrder(name, n, { endIn = 60, orderStatus = 'active', payment = {} } = {}) {
+async function memberWithOrder(name, n, { startIn = -30, endIn = 60, orderStatus = 'active', payment = {} } = {}) {
   const now = new Date();
   const user = await User.create({ firstName: name, lastName: 'Fixture', email: `${name.toLowerCase()}@attendance.test` });
   await PackageOrder.create({
@@ -685,7 +685,7 @@ async function memberWithOrder(name, n, { endIn = 60, orderStatus = 'active', pa
     packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month' },
     customerInfo: { fullName: `${name} Fixture`, email: user.email },
     payment: { method: 'cash', amount: 40, currency: 'GBP', status: 'paid', paidAt: now, ...payment },
-    subscription: { startDate: new Date(now.getTime() - 30 * 86400000), endDate: new Date(now.getTime() + endIn * 86400000), isActive: endIn > 0 },
+    subscription: { startDate: new Date(now.getTime() + startIn * 86400000), endDate: new Date(now.getTime() + endIn * 86400000), isActive: endIn > 0 },
     status: orderStatus
   });
   return user;
@@ -909,5 +909,61 @@ test("the office's live view of today: arrival numbers, contacts, package, expir
     const boardRow = board.body.entries.find((e) => e.name === 'Livepaid Fixture');
     assert.equal(boardRow.end_date_label, paidRow.end_date_label);
     assert.ok(board.body.entries.filter((e) => e.person_type === 'staff').every((e) => e.end_date_label === null));
+  });
+});
+
+test('a membership sold to start later: checked in and told when it starts, a warning not a problem, unpaid on the board; a queued renewal stays active', async () => {
+  await h.inGym(gym, async () => {
+    const early = await memberWithOrder('Early', 31, { startIn: 3, endIn: 33 });
+    const inside = await scan('member', early);
+    assert.equal(inside.success, true, inside.message);
+    assert.equal(inside.action, 'check_in', 'never refused: the gym decides');
+    assert.equal(inside.detail.status, 'membership_pending');
+    const starts = T.dateLabel(inside.record.membership.startsOn);
+    assert.equal(inside.detail.status_label, `Starts on ${starts}`);
+    assert.equal(inside.detail.warning, `MEMBERSHIP STARTS ON ${starts.toUpperCase()} — paid, not started yet`);
+    assert.equal(inside.detail.alert.level, 'warning');
+    assert.match(inside.detail.alert.speech, /^Your membership starts on \d{1,2} [A-Z][a-z]+$/);
+    assert.ok(inside.detail.rows.some((r) => r.caption === 'Starts' && r.value === starts), JSON.stringify(inside.detail.rows));
+    assert.ok(!inside.detail.rows.some((r) => r.caption === 'Payment'), 'not "awaiting payment": it is paid');
+    assert.equal(inside.record.membership.status, 'pending');
+
+    // The check-out says the same, from what was stored on the way in.
+    await backdate(early._id, 60);
+    const out = await scan('member', early);
+    assert.equal(out.action, 'check_out', out.message);
+    assert.equal(out.detail.warning, inside.detail.warning);
+    assert.deepEqual(out.detail.alert, inside.detail.alert);
+
+    // Renewed at the desk two days before the end: the new term starts when
+    // the running one ends. Active to the new end, and nothing to sell.
+    const renewed = await memberWithOrder('Renewed', 32, { endIn: 2 });
+    const running = await PackageOrder.findOne({ userId: renewed._id }).lean();
+    const renewalEnd = new Date(running.subscription.endDate.getTime() + 30 * 86400000);
+    await PackageOrder.create({
+      orderNumber: 'ATT-F32R',
+      userId: renewed._id,
+      packageId: running.packageId,
+      packageDetails: running.packageDetails,
+      customerInfo: running.customerInfo,
+      payment: { method: 'cash', amount: 40, currency: 'GBP', status: 'paid', paidAt: new Date() },
+      subscription: { startDate: running.subscription.endDate, endDate: renewalEnd, isActive: true },
+      status: 'active'
+    });
+    const back = await scan('member', renewed);
+    assert.equal(back.action, 'check_in', back.message);
+    assert.equal(back.detail.status, 'membership_active');
+    assert.equal(back.detail.warning, null);
+    assert.deepEqual(back.detail.alert, { level: 'ok', speech: null });
+    assert.equal(back.record.membership.endDate.getTime(), renewalEnd.getTime());
+
+    // The office's board and its counts: not started is not paid.
+    const res = await h.call(admin.live, { query: {}, user: asOperator() });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const row = (user) => res.body.records.find((r) => r.person_id === String(user._id));
+    assert.deepEqual(row(early).standing, { key: 'unpaid', label: 'Not started' });
+    assert.equal(row(early).paid, false);
+    assert.deepEqual(row(renewed).standing, { key: 'paid', label: 'Paid' });
+    assert.equal(row(renewed).paid, true);
   });
 });
