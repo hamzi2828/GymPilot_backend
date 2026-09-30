@@ -123,6 +123,36 @@ empty and are typed in again). Everything else — members' details, health
 answers, password hashes — is in the file as it is in the database: treat a
 downloaded backup as the members' personal data it is.
 
+**Stored backups** — made every night for every active gym (FEATURES.md →
+*Daily backup*), or with *Back up now* — are that same archive, encrypted on
+the server as it is written (`src/services/backupCrypto.js`) and stored in
+the Vercel Blob store as it is encrypted (`backupStorage.js`, under
+`<slug>/backups/<kind>/`), so no step holds the whole file. They are listed
+in the platform database (`platform_backups`), not the gym's, so a restore
+can never roll back the list of backups. Settings → Data & backup shows date,
+kind, size and record count; *Download* has the server decrypt one and
+stream it back as the plain `.tar.gz`. The newest `BACKUP_KEEP_DAILY`
+(default 7) of each kind are kept per gym.
+
+Why encrypted: every file in the Blob store is public — the installed
+`@vercel/blob` (0.23) has no private access — so a stored backup is
+unreadable without a key the store never sees:
+
+* **The key is `BACKUP_ENCRYPTION_KEY`, with no fallback.** Borrowing
+  `JWT_SECRET` or `SETTINGS_ENCRYPTION_KEY` would tie every stored backup to a
+  secret that may one day be rotated for other reasons. Without it nothing is
+  stored and the reason is shown (the download needs no key and keeps
+  working). **Never change it once set**: backups made with the old value can
+  no longer be opened — each file carries a short key id, so that is reported
+  as "made before BACKUP_ENCRYPTION_KEY was changed", not as damage.
+* Per gym, scrypt of that key with a salt carrying the gym's id — one gym's
+  file cannot be opened as another's; per file, HKDF of that with 32 random
+  bytes kept in the file's header, so every file has its own AES-256-GCM key.
+* The file is sealed in 1 MiB chunks, each with its own tag, a counter nonce
+  and a last-chunk flag, and the header as additional data. Nothing is
+  released before it is authenticated, a changed byte anywhere fails, and so
+  does a file cut short even at a chunk boundary.
+
 **By hand:**
 
     node scripts/backupGym.js --gym <slug> [--out backups]

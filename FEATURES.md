@@ -20,7 +20,7 @@ setting is on the gym's `settings` document.
 | Lockers | `models/lockerModel.js`, `controller/posController.js` | `/admin/lockers` | Locker on profile | `lockers` |
 | Reports & exports | `controller/reportsController.js`, `services/csv.js` | `/admin/reports` | — | `reports` |
 | Website: SEO, map, hours, language, embed, domains | `settings.seo/maps/openingHours/locale`, `platform/vercelDomains.js` | Settings → General → Website; platform panel domains | `/embed/timetable`, JSON-LD, language switcher | `settings` |
-| Data & backup | `services/backupService.js` (the archive, both ways), `controller/backupController.js`, `routes/backupRoutes.js` (`POST /api/backups/download` — the whole gym as a streamed `.tar.gz`), `scripts/backupGym.js` — see SECURITY_AND_DATA.md → *Backups* | Settings → Data & backup | — | `settings` at manage **and** the administrator role |
+| Data & backup | `services/backupService.js` (the archive, both ways), `backupCrypto.js`, `backupStorage.js`, `backupJobs.js`, `platform/models/platformBackupModel.js`, `controller/backupController.js`, `routes/backupRoutes.js` (`POST /api/backups/download` — the whole gym as a streamed `.tar.gz`; `GET /api/backups` — stored backups and whether this server can store them; `POST /api/backups/run` — back up now; `POST /api/backups/:id/download`), `scripts/backupGym.js` — see SECURITY_AND_DATA.md → *Backups* and *Daily backup* below | Settings → Data & backup | — | `settings` at manage **and** the administrator role |
 | Business details (name, contact, description, social links) | `settings.siteName/contactEmail/mobileNumber/address/siteDescription` and `facebookUrl/instagramUrl/twitterUrl/youtubeUrl/tiktokUrl` — the same names in `PUT /settings`, `GET /settings`, `GET /settings/public` and `services/branding.js`; a social link must be http(s) (a bare `instagram.com/…` gains `https://`), anything else is a `400` | Settings → General → Business | Footer links, contact page, JSON-LD (`siteDescription` stands in for an empty `seo.description`), member app "contact us" | `settings` |
 | PWA | — | — | `manifest.ts`, `public/sw.js` | — |
 | Marketing site + platform panel (plans, gyms, demo requests, self-serve sign-up) | `platform/routes/platformRoutes.js`, `platform/controllers/{gymsController,plansController,demoRequestsController,signupController}.js`, `platform/services/signupProvisioning.js`, `platform/models/demoRequestModel.js` — sign-up in BILLING.md → *Self-serve sign-up* | `GymPilot_frontendAdmin` (`/` landing, `/checkout`, `/super-admin` panel) | — | super admin session (public routes under `/api/platform/public`) |
@@ -57,6 +57,25 @@ so a gym left over today is first tomorrow.
   failed, deferred, took_ms } }`. A gym the budget did not reach reads
   `{ skipped: 'time budget used; first in line next run' }` and its slug is in
   `schedule.deferred`.
+
+## Daily backup
+
+`GET/POST /api/jobs/backups` (`Authorization: Bearer <CRON_SECRET>`; Vercel
+Cron calls it daily at 02:00 UTC, `vercel.json`) stores an encrypted backup
+of every active gym (`services/backupJobs.js`, SECURITY_AND_DATA.md →
+*Backups*), paced exactly as the daily job is — the same
+`DAILY_JOB_CONCURRENCY` / `DAILY_JOB_BUDGET_MS`, gyms least recently backed up
+first (`platform_job_runs`, job `backups`), `?dryRun=1` and `?gym=<slug>` as
+above. A gym with a daily backup from the last 20 hours is skipped
+(`{ skipped: 'backed up in the last 20 hours' }`), so a retried or repeated
+call makes no second one. After each backup the gym's older ones beyond the
+newest `BACKUP_KEEP_DAILY` (default 7) of each kind are deleted from the store
+and the list.
+
+Without `BLOB_READ_WRITE_TOKEN` or `BACKUP_ENCRYPTION_KEY` nothing is stored:
+the answer is `200 { success: true, skipped: '<which one is missing>' }`, and
+Settings → Data & backup shows the owner the same reason and points at the
+download instead.
 
 ## Tests
 

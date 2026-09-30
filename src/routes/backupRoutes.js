@@ -19,5 +19,14 @@ const router = express.Router();
 const ownerOnly = [auth, requirePermission('settings', 'manage'), requireAdmin];
 
 router.post('/api/backups/download', ...ownerOnly, backupController.download);
+router.get('/api/backups', ...ownerOnly, backupController.list);
+router.post('/api/backups/run', ...ownerOnly, backupController.run);
+router.post('/api/backups/:id/download', ...ownerOnly, backupController.downloadStored);
+
+// The daily backup of every gym, for Vercel Cron (which only sends GET) and
+// anything else holding CRON_SECRET. /api/jobs/* is exempt from the tenant
+// gate (index.js): it loops over every gym itself.
+router.get('/api/jobs/backups', backupController.runDaily);
+router.post('/api/jobs/backups', backupController.runDaily);
 
 module.exports = router;

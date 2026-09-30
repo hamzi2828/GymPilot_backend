@@ -1,5 +1,10 @@
 // Settings → Data & backup against a real MongoDB: the owner's download is
-// the whole gym and nothing but the gym, with every secret still sealed.
+// the whole gym and nothing but the gym, with every secret still sealed;
+// stored backups are encrypted, kept for as long as they should be, and made
+// once a day for every gym -- or not at all, with the reason, when the server
+// has nowhere to keep them or no key to lock them with.
+//
+// The Blob store is replaced by a map in memory (useMemoryStore below).
 
 const assert = require('node:assert/strict');
 const { PassThrough, Readable } = require('stream');
@@ -13,6 +18,33 @@ let Settings;
 let backups;
 let controller;
 let secretBox;
+let storage;
+let PlatformBackup;
+
+// The Blob store, in memory: public-looking URLs, bytes kept as given.
+const blobs = new Map();
+let storeOn = true;
+function useMemoryStore() {
+  storage.configured = () => storeOn;
+  storage.save = async (pathname, body) => {
+    const chunks = [];
+    for await (const chunk of body) chunks.push(chunk);
+    const url = `https://teststore.public.blob.vercel-storage.com/${pathname.replace(/\.gpbackup$/, '')}-${blobs.size + 1}.gpbackup`;
+    blobs.set(url, Buffer.concat(chunks));
+    return { url, pathname };
+  };
+  storage.open = async (url) => {
+    if (!blobs.has(url)) {
+      const error = new Error('This backup is no longer in storage.');
+      error.status = 404;
+      throw error;
+    }
+    return Readable.from([blobs.get(url)]);
+  };
+  storage.remove = async (urls) => {
+    for (const url of [].concat(urls)) blobs.delete(url);
+  };
+}
 
 const test = h.suite(async () => {
   User = h.src('models/user');
@@ -20,6 +52,9 @@ const test = h.suite(async () => {
   backups = h.src('services/backupService');
   controller = h.src('controller/backupController');
   secretBox = h.src('services/secretBox');
+  storage = h.src('services/backupStorage');
+  PlatformBackup = h.src('platform/models/platformBackupModel');
+  useMemoryStore();
 
   gym = await h.createGym('backup-gym', { settings: { stripe: { secretKey: 'sk_test_backup_gym_secret', enabled: true } } });
   other = await h.createGym('other-gym');
@@ -140,4 +175,174 @@ test('each gym downloads its own data only', async () => {
   assert.equal(events[0].header.gym.slug, 'other-gym');
   const users = events.filter((e) => e.type === 'documents' && e.name === 'users').flatMap((e) => e.documents);
   assert.deepEqual(users.map((u) => u.email), ['stranger@other.test']);
+});
+
+/* ------------------------------ stored backups ------------------------------ */
+
+const ownerReq = (extra = {}) => ({
+  method: 'POST',
+  originalUrl: '/api/backups',
+  user: { id: String(owner._id), email: 'olive@backup.test' },
+  roleSlug: 'admin',
+  params: {},
+  query: {},
+  body: {},
+  headers: {},
+  ...extra
+});
+const cron = (query = {}, secret = 'backup-cron-secret') =>
+  h.call(controller.runDaily, { headers: secret ? { authorization: `Bearer ${secret}` } : {}, query });
+
+function setEnv(values) {
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+test('without a store or a key nothing is stored, and the owner and the cron are told why', async () => {
+  setEnv({ BACKUP_ENCRYPTION_KEY: undefined, CRON_SECRET: 'backup-cron-secret' });
+  storeOn = false;
+  await h.inGym(gym, async () => {
+    const list = await h.call(controller.list, ownerReq({ method: 'GET' }));
+    assert.equal(list.statusCode, 200);
+    assert.equal(list.body.data.ready, false);
+    assert.match(list.body.data.reason, /BLOB_READ_WRITE_TOKEN/);
+    const run = await h.call(controller.run, ownerReq());
+    assert.equal(run.statusCode, 409);
+    assert.equal(run.body.code, 'BACKUPS_NOT_CONFIGURED');
+  });
+  const skipped = await cron();
+  assert.equal(skipped.statusCode, 200);
+  assert.match(skipped.body.skipped, /BLOB_READ_WRITE_TOKEN/);
+
+  storeOn = true;
+  await h.inGym(gym, async () => {
+    const list = await h.call(controller.list, ownerReq({ method: 'GET' }));
+    assert.equal(list.body.data.ready, false);
+    assert.match(list.body.data.reason, /BACKUP_ENCRYPTION_KEY/);
+  });
+  assert.match((await cron()).body.skipped, /BACKUP_ENCRYPTION_KEY/);
+  assert.equal(blobs.size, 0);
+  assert.equal(await PlatformBackup.countDocuments({}), 0);
+});
+
+test('"Back up now" stores an encrypted backup, listed with its date, size and contents', async () => {
+  setEnv({ BACKUP_ENCRYPTION_KEY: 'integration-backup-key' });
+  await h.inGym(gym, async () => {
+    const run = await h.call(controller.run, ownerReq());
+    assert.equal(run.statusCode, 201, JSON.stringify(run.body));
+    const list = await h.call(controller.list, ownerReq({ method: 'GET' }));
+    assert.equal(list.body.data.ready, true);
+    assert.equal(list.body.data.keep, 7);
+    const [entry] = list.body.data.backups;
+    assert.equal(entry.kind, 'manual');
+    assert.ok(entry.size > 0);
+    assert.ok(entry.documents >= 3);
+    assert.equal(entry.createdBy, 'olive@backup.test');
+
+    // What the store holds is not readable: no member's address in it.
+    const row = await PlatformBackup.findById(entry.id).lean();
+    const stored = blobs.get(row.url);
+    assert.equal(stored.length, entry.size);
+    assert.equal(stored.subarray(0, 8).toString(), 'GPBKENC1');
+    assert.ok(!stored.includes(Buffer.from('olive@backup.test')));
+    assert.match(row.pathname, /^backup-gym\/backups\/manual\//);
+  });
+});
+
+test('a stored backup downloads as the same archive the owner would download now', async () => {
+  await h.inGym(gym, async () => {
+    const [entry] = (await h.call(controller.list, ownerReq({ method: 'GET' }))).body.data.backups;
+    const res = streamRes();
+    await controller.downloadStored(ownerReq({ params: { id: entry.id } }), res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.match(res.headers['content-disposition'], /backup-gym-backup-.*\.tar\.gz/);
+    const events = await read(res.bytes());
+    assert.equal(events[0].header.gym.slug, 'backup-gym');
+    assert.equal(events[0].header.trigger, 'manual');
+    const users = events.filter((e) => e.type === 'documents' && e.name === 'users').flatMap((e) => e.documents);
+    assert.ok(users.some((u) => u.email === 'olive@backup.test'));
+  });
+});
+
+test('a stored backup that cannot be opened is refused before the download starts', async () => {
+  await h.inGym(gym, async () => {
+    const [entry] = (await h.call(controller.list, ownerReq({ method: 'GET' }))).body.data.backups;
+    setEnv({ BACKUP_ENCRYPTION_KEY: 'a-different-key' });
+    try {
+      const res = streamRes();
+      await controller.downloadStored(ownerReq({ params: { id: entry.id } }), res);
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.body.code, 'BACKUP_WRONG_KEY');
+      assert.equal(res.headers['content-disposition'], undefined);
+    } finally {
+      setEnv({ BACKUP_ENCRYPTION_KEY: 'integration-backup-key' });
+    }
+  });
+});
+
+test('one gym cannot reach another gym\'s stored backup', async () => {
+  const id = (await PlatformBackup.findOne({ gymSlug: 'backup-gym' }).lean())._id;
+  await h.inGym(other, async () => {
+    const res = streamRes();
+    await controller.downloadStored(ownerReq({ params: { id: String(id) } }), res);
+    assert.equal(res.statusCode, 404);
+    const list = await h.call(controller.list, ownerReq({ method: 'GET' }));
+    assert.deepEqual(list.body.data.backups, []);
+  });
+});
+
+test('the daily job needs CRON_SECRET', async () => {
+  assert.equal((await cron({}, 'wrong-secret')).statusCode, 401);
+  assert.equal((await cron({}, null)).statusCode, 401);
+  setEnv({ CRON_SECRET: undefined });
+  try {
+    assert.equal((await cron()).statusCode, 503);
+  } finally {
+    setEnv({ CRON_SECRET: 'backup-cron-secret' });
+  }
+});
+
+test('the daily job backs up every active gym once a day and keeps the newest BACKUP_KEEP_DAILY', async () => {
+  setEnv({ BACKUP_KEEP_DAILY: '2' });
+  try {
+    const dry = await cron({ dryRun: '1' });
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body));
+    assert.deepEqual(dry.body.gyms['backup-gym'], { would: 'back up' });
+    assert.equal(await PlatformBackup.countDocuments({ kind: 'daily' }), 0);
+
+    const first = await cron();
+    assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+    assert.ok(first.body.gyms['backup-gym'].backup, JSON.stringify(first.body.gyms));
+    assert.ok(first.body.gyms['other-gym'].backup, JSON.stringify(first.body.gyms));
+    assert.equal(first.body.schedule.processed, 2);
+
+    // Called again the same day: nothing new.
+    const again = await cron();
+    assert.match(again.body.gyms['backup-gym'].skipped, /last 20 hours/);
+    assert.equal(await PlatformBackup.countDocuments({ kind: 'daily', gymSlug: 'backup-gym' }), 1);
+
+    // Three more days: two daily backups are kept, the older files are gone.
+    const raw = h.rawDb(h.PLATFORM_DB).collection('platform_backups');
+    for (let day = 1; day <= 3; day += 1) {
+      await raw.updateMany({ kind: 'daily' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
+      const res = await cron();
+      assert.ok(res.body.gyms['backup-gym'].backup, JSON.stringify(res.body.gyms));
+    }
+    const kept = await PlatformBackup.find({ kind: 'daily', gymSlug: 'backup-gym' }).lean();
+    assert.equal(kept.length, 2);
+    const everyUrl = (await PlatformBackup.find({}).lean()).map((row) => row.url).sort();
+    assert.deepEqual([...blobs.keys()].sort(), everyUrl, 'every stored file is listed, and every listed file is stored');
+    // The manual backup is kept under its own count.
+    assert.equal(await PlatformBackup.countDocuments({ kind: 'manual', gymSlug: 'backup-gym' }), 1);
+
+    // ?gym= runs that one gym only.
+    await raw.updateMany({ kind: 'daily' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
+    const one = await cron({ gym: 'other-gym' });
+    assert.deepEqual(Object.keys(one.body.gyms), ['other-gym']);
+    assert.equal((await cron({ gym: 'no-such-gym' })).statusCode, 404);
+  } finally {
+    setEnv({ BACKUP_KEEP_DAILY: undefined });
+  }
 });

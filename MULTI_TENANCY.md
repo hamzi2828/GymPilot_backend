@@ -219,7 +219,10 @@ owners whose trial is ending or whose payment is late
 (`sendOwnerBillingNotices`, see BILLING.md → *Platform billing*), and then
 runs the reminders for every active gym it can fit in its time budget, a few
 side by side; any left over go first on the next run (FEATURES.md → *Daily
-job*).
+job*). A second cron (`/api/jobs/backups`, an hour earlier) stores an
+encrypted backup of every active gym the same way (FEATURES.md → *Daily
+backup*); the list of them is kept in the platform database
+(`platform_backups`), never in the gym's own.
 
 ### The front-desk app
 
