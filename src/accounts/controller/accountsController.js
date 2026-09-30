@@ -1,11 +1,12 @@
 // src/accounts/controller/accountsController.js
 //
 // The two reads that answer "how is the gym doing": the overview (money in,
-// money out, what is left) and the sales report behind the money-in half.
+// money out, what is left -- the profit and loss, line by line, in
+// services/profitAndLoss.js) and the sales report behind the money-in half.
 //
-// Income here is membership sales, because that is the income this system
-// records. A gym also takes day passes, PT sessions and drinks over the
-// counter; until those are sold through this system they are not in these
+// Income here is membership sales and shop (POS) takings, because that is
+// the income this system records. A gym also takes day passes and PT paid at
+// the desk; until those are sold through this system they are not in these
 // numbers, and the response says so rather than quietly under-reporting.
 
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
@@ -16,6 +17,7 @@ const Trainer = require('../../gymfolio/models/trainerModel');
 const Attendance = require('../../attendance/models/attendanceModel');
 const L = require('../services/ledger');
 const categories = require('../services/categories');
+const pnl = require('../services/profitAndLoss');
 const T = require('../../attendance/services/timeUtils');
 
 // The sales list shows at most this many payments; the totals above it are
@@ -206,6 +208,16 @@ module.exports = {
         categories.headsFor('expense')
       ]);
 
+      // The profit and loss: every line, each cost counted once.
+      const profit = pnl.build({
+        base,
+        payments,
+        refunds: refundRows,
+        sales,
+        expenses,
+        extra: await pnl.gather(range, expenses)
+      });
+
       // ---- Money in ----
       const revenue = {};
       // Shop takings, kept as their own line and also folded into revenue so
@@ -268,29 +280,18 @@ module.exports = {
       }
 
       // ---- Trend ----
+      // The profit and loss's own amounts, by when each happened, so the
+      // chart's money in and out add up to the lines above it.
       const series = new Map(buckets.map((bucket) => [bucket.key, { ...bucket, revenue: 0, expense: 0 }]));
+      const bucketOf = (at) => (typeof at === 'string' ? (grain === 'day' ? at : at.slice(0, 7)) : L.bucketKeyFor(at, grain));
 
-      for (const payment of payments) {
-        if (String(payment.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(payment.at, grain));
-        if (point) point.revenue += Number(payment.amount) || 0;
+      for (const item of profit.items.revenue) {
+        const point = series.get(bucketOf(item.at));
+        if (point) point.revenue += item.amount;
       }
-      for (const row of refundRows) {
-        if (String(row.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(row.at, grain));
-        if (point) point.revenue -= Number(row.amount) || 0;
-      }
-      for (const sale of sales) {
-        if (String(sale.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(sale.paidAt, grain));
-        if (point) point.revenue += Number(sale.total) || 0;
-      }
-
-      for (const expense of expenses) {
-        if (expense.status === 'cancelled') continue;
-        if (String(expense.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(expense.incurredOn, grain));
-        if (point) point.expense += Number(expense.amount) || 0;
+      for (const item of profit.items.outflow) {
+        const point = series.get(bucketOf(item.at));
+        if (point) point.expense += item.amount;
       }
 
       // ---- Assets ----
@@ -307,10 +308,6 @@ module.exports = {
         if (asset.nextServiceDue && new Date(asset.nextServiceDue) <= now) serviceDue += 1;
       }
 
-      // Net is base-currency only and says so. Netting a GBP sale against a PKR
-      // bill would be a made-up number, and this system holds no exchange rate.
-      const bottomLine = L.netResult({ revenue, refunds, spent: spendPaid }, base);
-
       return res.json({
         success: true,
         base_currency: base,
@@ -321,10 +318,12 @@ module.exports = {
         income: {
           ...L.presentTotals(revenue, base),
           refunds: L.presentTotals(refunds, base),
+          // The shop's part of the figure above.
+          shop: L.presentTotals(shop, base),
           // Payments received: a renewal is a sale of its own.
           orders: payments.length,
           // Named so nobody reads this as the gym's total takings.
-          source: 'Membership and package sales recorded in this system'
+          source: 'Membership, package and shop sales recorded in this system'
         },
 
         spending: {
@@ -348,15 +347,35 @@ module.exports = {
           // warn that this total does not cover them.
           unlinked_trainers: payroll.unlinked_trainers,
           // A commitment, not a payment: it is what the roster and the rates
-          // add up to, and it is only an actual outflow once it is entered as
-          // a salaries expense.
+          // add up to, and it is only an actual outflow once it is paid -- on
+          // a payslip (the profit and loss's salaries line) or as an expense.
           note: 'Calculated from staff pay rates and hours worked, not from recorded payments'
         },
 
+        // The profit and loss, line by line (services/profitAndLoss.js).
+        profit_and_loss: {
+          currency: profit.currency,
+          revenue: profit.revenue,
+          outflow: profit.outflow,
+          total_revenue: profit.total_revenue,
+          total_outflow: profit.total_outflow,
+          net_profit: profit.net_profit,
+          margin: profit.margin,
+          mixed_currencies: profit.mixed_currencies,
+          set_aside: profit.set_aside
+        },
+
+        // The bottom line: revenue less refunds, less every outflow line.
+        // Base currency only, and says so -- netting a GBP sale against a PKR
+        // bill would be a made-up number, and this system holds no exchange
+        // rate.
         result: {
           currency: base,
-          ...bottomLine,
-          mixed_currencies: L.presentTotals(revenue, base).mixed || L.presentTotals(spendPaid, base).mixed
+          gross_income: profit.total_revenue,
+          expenses: profit.total_outflow,
+          net: profit.net_profit,
+          margin: profit.margin,
+          mixed_currencies: profit.mixed_currencies
         },
 
         assets: {
