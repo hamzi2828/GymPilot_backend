@@ -61,6 +61,10 @@ screen offers that on the refusal.
   is checked by `membershipService.readDeskTerms`: a value that cannot be
   used is `400 INVALID_TERMS` naming it; an unknown trainer `404
   TRAINER_NOT_FOUND`, an inactive one `409 TRAINER_INACTIVE`.
+  A new member can be registered and sold the membership in one request —
+  `POST /api/admin/members/register { ...member, membership: { packageId,
+  ...the terms above } }` (FEATURES.md → *Adding a member at the desk*):
+  the same sale, and the account is removed again when the sale fails.
 
 `payment.method` is one of `src/services/paymentMethods.js`: `stripe` (Card
 (Stripe)), `card` (Card — the desk terminal), `bank_transfer`, `cash`,

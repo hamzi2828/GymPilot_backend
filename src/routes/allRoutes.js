@@ -73,6 +73,10 @@ router.post('/admin/users/:id/password', auth, requirePermission('users', 'manag
 // messaging, package orders): any staff account, searched and bounded. See
 // controller/memberOptionsController.js.
 router.get('/admin/members/options', auth, requirePermission.requireStaff, require('../controller/memberOptionsController').options);
+// The desk's one-screen "Add member": account, membership and payment in one
+// request, all or nothing (controller/memberRegistrationController.js).
+// Selling the membership also needs package-orders · manage, checked inside.
+router.post('/api/admin/members/register', auth, requirePermission('users', 'manage'), require('../controller/memberRegistrationController').register);
 
 // ---------------------------------------------------------------------------
 // Member profiles (photo, health, agreement, documents, tags, notes) and the
