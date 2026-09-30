@@ -16,6 +16,7 @@
 // rather than failing, or worse, storing a backup anyone could read.
 
 const PlatformBackup = require('../platform/models/platformBackupModel');
+const PlatformJobRun = require('../platform/models/platformJobRunModel');
 const { currentTenant } = require('../platform/tenantContext');
 const backups = require('./backupService');
 const backupCrypto = require('./backupCrypto');
@@ -71,9 +72,11 @@ function stampOf(when) {
 /**
  * Makes, encrypts and stores a backup of the gym in context, and lists it.
  * `kind`: 'daily', 'manual' or 'pre-restore'. Resolves with the list entry.
+ * `spare`: list ids the tidy-up afterwards must leave alone -- a restore's
+ * source, which is read only after its safety backup has been stored.
  * Throws (status 409) when the server cannot store backups.
  */
-async function storeBackup({ kind, actor = null, now = new Date() }) {
+async function storeBackup({ kind, actor = null, now = new Date(), spare = [] }) {
   const state = readiness();
   if (!state.ready) throw notReady(state);
   const gym = currentTenant();
@@ -112,7 +115,7 @@ async function storeBackup({ kind, actor = null, now = new Date() }) {
     collections: manifest.collections.map((c) => ({ name: c.name, documents: c.documents })),
     createdBy: actor ? { id: String(actor.id || ''), email: String(actor.email || '') } : undefined
   });
-  await prune(gym);
+  await prune(gym, { spare });
   return entry;
 }
 
@@ -124,15 +127,17 @@ const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
  * uploaded files more than a day old (restored or not). The list entry goes
  * only once the file is gone from the store, so nothing is ever left in the
  * store unlisted; a file the store cannot remove now is tried again after
- * the next backup.
+ * the next backup. `spare` ids are left out altogether (a kind may then
+ * keep one more than its count until the next tidy-up).
  */
-async function prune(gym, { keep = keepCount(), now = new Date() } = {}) {
+async function prune(gym, { keep = keepCount(), now = new Date(), spare = [] } = {}) {
   const removed = [];
+  const notSpared = { $nin: spare };
   for (const kind of PlatformBackup.schema.statics.KINDS) {
     const old =
       kind === 'upload'
-        ? await PlatformBackup.find({ gymId: gym._id, kind, createdAt: { $lt: new Date(now.getTime() - UPLOAD_TTL_MS) } }).select('_id url').lean()
-        : await PlatformBackup.find({ gymId: gym._id, kind }).sort({ createdAt: -1 }).skip(keep).select('_id url').lean();
+        ? await PlatformBackup.find({ _id: notSpared, gymId: gym._id, kind, createdAt: { $lt: new Date(now.getTime() - UPLOAD_TTL_MS) } }).select('_id url').lean()
+        : await PlatformBackup.find({ _id: notSpared, gymId: gym._id, kind }).sort({ createdAt: -1 }).skip(keep).select('_id url').lean();
     if (!old.length) continue;
     try {
       await storage.remove(old.map((b) => b.url));
@@ -150,6 +155,28 @@ async function prune(gym, { keep = keepCount(), now = new Date() } = {}) {
 async function removeBackup(entry) {
   if (entry.url) await storage.remove(entry.url);
   await PlatformBackup.deleteOne({ _id: entry._id });
+}
+
+/**
+ * Every stored backup of a gym that is being deleted, gone from the store
+ * and the list. Nothing could open them again -- they are encrypted for
+ * that gym's id -- so they would only sit in the public store, members'
+ * data and all. As in prune, the list entries go only once the files have:
+ * when the store cannot remove them they stay listed (and the answer says
+ * so), rather than lying in the store unlisted. Never throws.
+ */
+async function removeGymBackups(gymId) {
+  let rows = [];
+  try {
+    rows = await PlatformBackup.find({ gymId }).select('_id url').lean();
+    if (!rows.length) return { removed: 0, left: 0 };
+    await storage.remove(rows.map((row) => row.url).filter(Boolean));
+    await PlatformBackup.deleteMany({ _id: { $in: rows.map((row) => row._id) } });
+    return { removed: rows.length, left: 0 };
+  } catch (error) {
+    console.error(`[backups] could not remove the backups of deleted gym ${gymId}:`, error.message);
+    return { removed: 0, left: rows.length, error: error.message };
+  }
 }
 
 /** The gym in context's stored backups, newest first, as the owner sees them. */
@@ -172,19 +199,84 @@ function publicBackup(row) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// One run of a job per gym at a time: a row per job and gym in
+// platform_job_runs. It is free when no run ever started, when the last one
+// finished (lastRunAt caught up with lastStartedAt), or when one started so
+// long ago that the function running it must have been stopped. Taking it
+// is one conditional write, so two runs cannot both get it.
+// ---------------------------------------------------------------------------
+
+const LOCK_MS = 15 * 60 * 1000;
+
+/** Takes the gym's lock for `job`; false when a run holds it. */
+async function takeLock(job, gym, now = new Date()) {
+  await PlatformJobRun.updateOne({ job, gymId: gym._id }, { $setOnInsert: { gymSlug: gym.slug, lastStartedAt: null } }, { upsert: true }).catch((error) => {
+    // Two first-ever runs racing to create the row: it exists now.
+    if (!error || error.code !== 11000) throw error;
+  });
+  const taken = await PlatformJobRun.updateOne(
+    {
+      job,
+      gymId: gym._id,
+      $or: [{ lastStartedAt: null }, { lastStartedAt: { $lt: new Date(now.getTime() - LOCK_MS) } }, { $expr: { $gte: ['$lastRunAt', '$lastStartedAt'] } }]
+    },
+    { $set: { gymSlug: gym.slug, lastStartedAt: now } }
+  );
+  return taken.matchedCount > 0;
+}
+
+/** Lets the lock go, recording how the run went. Never throws. */
+function releaseLock(job, gym, outcome, began) {
+  return PlatformJobRun.updateOne(
+    { job, gymId: gym._id },
+    {
+      $set: {
+        lastRunAt: new Date(),
+        lastOutcome: outcome.error ? 'error' : 'ok',
+        lastError: outcome.error ? String(outcome.error.message || outcome.error).slice(0, 500) : '',
+        lastDurationMs: Date.now() - began
+      }
+    }
+  ).catch((error) => console.error(`[backups] could not release the ${job} lock for ${gym.slug}:`, error.message));
+}
+
+function recentDaily(gym, now) {
+  return PlatformBackup.findOne({ gymId: gym._id, kind: 'daily', createdAt: { $gt: new Date(now.getTime() - DAILY_EVERY_MS) } })
+    .select('_id createdAt')
+    .lean();
+}
+
 /**
  * The daily run for one gym (inside its tenant context). Skips, with the
- * reason, a gym that already has today's backup.
+ * reason, a gym that already has today's backup -- or whose backup another
+ * run is making right now. Without that lock, two runs overlapping (a retry
+ * of the cron, two instances) both found no backup from today and both
+ * stored one, so fewer different days were kept.
  */
 async function dailyBackup({ dryRun = false, now = new Date() } = {}) {
   const gym = currentTenant();
-  const recent = await PlatformBackup.findOne({ gymId: gym._id, kind: 'daily', createdAt: { $gt: new Date(now.getTime() - DAILY_EVERY_MS) } })
-    .select('_id createdAt')
-    .lean();
+  const recent = await recentDaily(gym, now);
   if (recent) return { skipped: 'backed up in the last 20 hours', last: recent.createdAt };
   if (dryRun) return { would: 'back up' };
-  const entry = await storeBackup({ kind: 'daily', now });
-  return { backup: String(entry._id), size: entry.size, documents: entry.documents };
+
+  // The lock's own clock is the real one: it has to agree with every other
+  // run's, whatever `now` this one was asked to pretend.
+  const began = Date.now();
+  if (!(await takeLock('daily-backup', gym, new Date(began)))) return { skipped: 'another run is backing this gym up' };
+  const outcome = {};
+  try {
+    // Looked at again under the lock: a run that just finished has made it.
+    const made = await recentDaily(gym, now);
+    if (made) return { skipped: 'backed up in the last 20 hours', last: made.createdAt };
+    const entry = await storeBackup({ kind: 'daily', now });
+    return { backup: String(entry._id), size: entry.size, documents: entry.documents };
+  } catch (error) {
+    outcome.error = error;
+    throw error;
+  } finally {
+    await releaseLock('daily-backup', gym, outcome, began);
+  }
 }
 
 module.exports = {
@@ -193,7 +285,10 @@ module.exports = {
   storeBackup,
   prune,
   removeBackup,
+  removeGymBackups,
   listBackups,
   publicBackup,
+  takeLock,
+  releaseLock,
   dailyBackup
 };

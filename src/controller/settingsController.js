@@ -138,8 +138,11 @@ function mergeMessaging(existing = {}, incoming = {}, warnings = []) {
 // A social profile link as the footer and the structured data will use it.
 // Blank clears it; "instagram.com/ironworks" gains its https://; anything
 // with another scheme (javascript:, data:) is refused, since the value goes
-// straight into an <a href> on every page of the site. Returns null for a
-// refused value.
+// straight into an <a href> on every page of the site. What is stored is the
+// address as URL parsing normalised it (url.href), not the text typed:
+// characters such as < > " and spaces come back percent-encoded, so the link
+// cannot carry markup into the page or its structured data. Returns null for
+// a refused value.
 function webLink(value) {
   const text = String(value ?? '').trim();
   if (!text) return '';
@@ -151,7 +154,7 @@ function webLink(value) {
     return null;
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-  return withScheme.slice(0, 500);
+  return url.href.slice(0, 500);
 }
 
 // Loose on purpose: the address is shown and linked with mailto:, not

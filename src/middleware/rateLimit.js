@@ -54,28 +54,45 @@ const SHARED = {
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 
-// The account a sign-in or reset is aimed at, as it was typed: the email on
-// the website and the platform panel, the username on the phone app, the
-// challenge id at the emailed-code step. Lowercased, so "Ann@Gym.com" and
-// "ann@gym.com" are one bucket.
-function submittedIdentifier(req) {
+// The body fields each sign-in or reset handler takes the account from, in
+// the order it reads them. The limiter must read exactly the same: keyed on
+// any other field, a caller could put the real target in the field the
+// handler reads and a fresh decoy in the one the limiter reads, and every
+// request would land in a new bucket.
+const FIELDS = {
+  website: ['login', 'email', 'username'], // userController.loginUser
+  email: ['email'],                        // platform sign-in; email reset forms
+  username: ['username'],                  // the phone app (mobileAuthController)
+  challenge: ['challengeId']               // every emailed-code step
+};
+
+// The account a request is aimed at, as its handler will read it: the
+// first field that holds anything, trimmed and lowercased as every handler
+// does, so "Ann@Gym.com " and "ann@gym.com" are one bucket.
+function submittedIdentifier(req, fields = FIELDS.website) {
   const body = (req && req.body) || {};
-  const value = body.email || body.username || body.challengeId || '';
-  return String(value).toLowerCase().trim().slice(0, 200);
+  const field = fields.find((name) => body[name]);
+  return field ? String(body[field]).toLowerCase().trim().slice(0, 200) : '';
 }
 
 // One bucket per address AND account. A gym's members share one public
 // address on the gym Wi-Fi; keyed on the address alone, one member fumbling
-// a password locked every member out.
+// a password locked every member out. The fields are the route's, set by
+// perAddressAndAccount below (a key generator is handed only req and res).
 function identityKey(req) {
-  return `${clientKey(req)}|${submittedIdentifier(req)}`;
+  const fields = (req && req.limitFields) || FIELDS.website;
+  return `${clientKey(req)}|${submittedIdentifier(req, fields)}`;
 }
 
-// Two limiters run as one middleware, so every route that mounts
-// `loginLimiter` or `passwordResetLimiter` gets both without changing.
-function both(first, second) {
+// A per-address and a per-account limiter as one middleware, with the
+// account read from `fields`. The limiter instances are shared by every
+// route of a kind (all the sign-ins, all the reset requests), so a script
+// cannot multiply its allowance by spreading over the website, the app and
+// the platform panel.
+function perAddressAndAccount(perAddress, perAccount, fields) {
   return function limited(req, res, next) {
-    first(req, res, (error) => (error ? next(error) : second(req, res, next)));
+    req.limitFields = fields;
+    perAddress(req, res, (error) => (error ? next(error) : perAccount(req, res, next)));
   };
 }
 
@@ -87,48 +104,51 @@ function both(first, second) {
  * Twenty failures per address and account, the ceiling that stops a guessing
  * attack on one account; and a looser two hundred per address, which a whole
  * gym's Wi-Fi of members will not reach but a script working through a list
- * of accounts will.
+ * of accounts will. One limiter per way of naming the account (FIELDS).
  */
-const loginLimiter = both(
-  rateLimit({
-    ...SHARED,
-    windowMs: 15 * MINUTE,
-    max: 200,
-    skipSuccessfulRequests: true,
-    message: 'Too many sign-in attempts from this network. Please wait a few minutes and try again.'
-  }),
-  rateLimit({
-    ...SHARED,
-    keyGenerator: identityKey,
-    windowMs: 15 * MINUTE,
-    max: 20,
-    skipSuccessfulRequests: true,
-    message: 'Too many sign-in attempts. Please wait a few minutes and try again.'
-  })
-);
+const signInPerAddress = rateLimit({
+  ...SHARED,
+  windowMs: 15 * MINUTE,
+  max: 200,
+  skipSuccessfulRequests: true,
+  message: 'Too many sign-in attempts from this network. Please wait a few minutes and try again.'
+});
+const signInPerAccount = rateLimit({
+  ...SHARED,
+  keyGenerator: identityKey,
+  windowMs: 15 * MINUTE,
+  max: 20,
+  skipSuccessfulRequests: true,
+  message: 'Too many sign-in attempts. Please wait a few minutes and try again.'
+});
+const loginLimiter = perAddressAndAccount(signInPerAddress, signInPerAccount, FIELDS.website);
+const appLoginLimiter = perAddressAndAccount(signInPerAddress, signInPerAccount, FIELDS.username);
+const platformLoginLimiter = perAddressAndAccount(signInPerAddress, signInPerAccount, FIELDS.email);
+const twoFactorLimiter = perAddressAndAccount(signInPerAddress, signInPerAccount, FIELDS.challenge);
 
 /**
  * Password reset requests. Tighter, and it counts successes too: the thing
  * being limited here is how many emails one address can cause to be sent, and
  * a successful request is exactly what sends one. Five an hour per address
  * and account, thirty per address -- the same split as sign-in, for the same
- * shared-Wi-Fi reason.
+ * shared-Wi-Fi reason. By email on the website and the platform panel, by
+ * username on the phone app.
  */
-const passwordResetLimiter = both(
-  rateLimit({
-    ...SHARED,
-    windowMs: HOUR,
-    max: 30,
-    message: 'Too many password reset requests from this network. Please wait an hour and try again.'
-  }),
-  rateLimit({
-    ...SHARED,
-    keyGenerator: identityKey,
-    windowMs: HOUR,
-    max: 5,
-    message: 'Too many password reset requests. Please wait an hour and try again.'
-  })
-);
+const resetPerAddress = rateLimit({
+  ...SHARED,
+  windowMs: HOUR,
+  max: 30,
+  message: 'Too many password reset requests from this network. Please wait an hour and try again.'
+});
+const resetPerAccount = rateLimit({
+  ...SHARED,
+  keyGenerator: identityKey,
+  windowMs: HOUR,
+  max: 5,
+  message: 'Too many password reset requests. Please wait an hour and try again.'
+});
+const passwordResetLimiter = perAddressAndAccount(resetPerAddress, resetPerAccount, FIELDS.email);
+const appPasswordResetLimiter = perAddressAndAccount(resetPerAddress, resetPerAccount, FIELDS.username);
 
 /**
  * Consuming a reset token. Separate from the request limiter because this is
@@ -247,7 +267,11 @@ module.exports = {
   clientKey,
   identityKey,
   loginLimiter,
+  appLoginLimiter,
+  platformLoginLimiter,
+  twoFactorLimiter,
   passwordResetLimiter,
+  appPasswordResetLimiter,
   passwordResetConfirmLimiter,
   signupLimiter,
   googleLoginLimiter,

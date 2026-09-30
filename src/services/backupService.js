@@ -62,6 +62,14 @@ const PART_BYTES = 8 * 1024 * 1024;
 const PLATFORM_COLLECTIONS = new Set(['gyms', 'super_admins']);
 const PLATFORM_PREFIX = 'platform_';
 
+// Read after every other collection. The gym keeps running while a backup
+// reads its collections one by one; read first (as by name, before sales,
+// orders and payslips), the counters could miss a receipt or invoice number
+// handed out meanwhile, and after a restore the next one would repeat it.
+// Read last, they can only be ahead of what they numbered: a gap, never a
+// repeat.
+const READ_LAST = new Set(['gym_counters']);
+
 function isPlatformCollection(name) {
   return PLATFORM_COLLECTIONS.has(name) || String(name).startsWith(PLATFORM_PREFIX);
 }
@@ -177,9 +185,11 @@ async function* archiveEntries({ db, gym, trigger, now = new Date(), select = is
   };
   yield* tarEntry('backup.json', jsonBytes(header), mtime);
 
+  // By name, but the counters last (READ_LAST).
+  const order = (info) => `${READ_LAST.has(info.name) ? 1 : 0}${info.name}`;
   const infos = (await db.listCollections({}, { nameOnly: false }).toArray())
     .filter(select)
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    .sort((a, b) => (order(a) < order(b) ? -1 : order(a) > order(b) ? 1 : 0));
 
   const collections = [];
   let total = 0;

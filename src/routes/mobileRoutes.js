@@ -11,7 +11,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { loginLimiter, passwordResetLimiter } = require('../middleware/rateLimit');
+const { appLoginLimiter, twoFactorLimiter, appPasswordResetLimiter } = require('../middleware/rateLimit');
 const auth = require('../middleware/auth');
 const { warmPlatformModels } = require('../platform/models');
 const { resolveTenant } = require('../platform/middleware/resolveTenant');
@@ -24,9 +24,9 @@ router.use((req, res, next) => {
 
 // Before anyone is signed in. The username -- or, for the second step, the
 // gym slug the first step handed back -- says which gym.
-router.post('/auth/login', loginLimiter, mobileAuthController.login);
-router.post('/auth/login/2fa', loginLimiter, mobileAuthController.verifyTwoFactor);
-router.post('/auth/forgot', passwordResetLimiter, mobileAuthController.forgot);
+router.post('/auth/login', appLoginLimiter, mobileAuthController.login);
+router.post('/auth/login/2fa', twoFactorLimiter, mobileAuthController.verifyTwoFactor);
+router.post('/auth/forgot', appPasswordResetLimiter, mobileAuthController.forgot);
 router.get('/branding', mobileAuthController.branding);
 
 // Signed in. This router sits before the gate in index.js, so the gate's

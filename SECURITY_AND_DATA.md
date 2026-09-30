@@ -30,6 +30,20 @@ password.
 Platform (super admin) tokens have their own secret and are refused by every
 gym endpoint.
 
+## Who may act on whose account
+
+Below an administrator, nobody creates an account in, moves one into or out
+of, deactivates, deletes or sets the password of one whose role holds any tab
+at a higher level than their own, or switches on a front-desk grant they lack
+(`src/services/roleGuards.js`, `src/services/adminPasswords.js`). A new
+account's emailed password counts: it goes to whatever address was typed.
+Changing or regenerating somebody's username holds the same line (your own
+is yours to change). Only an administrator touches an administrator.
+
+Signing in with a name nobody has costs the same bcrypt work as a real
+account (`src/services/passwordCheck.js`), so the time an answer takes does
+not say which usernames or addresses exist.
+
 ## Staff pay
 
 Holding `staff: manage` does not let anyone below an administrator change
@@ -134,7 +148,10 @@ in the platform database (`platform_backups`), not the gym's, so a restore
 can never roll back the list of backups. Settings → Data & backup shows date,
 kind, size and record count; *Download* has the server decrypt one and
 stream it back as the plain `.tar.gz`. The newest `BACKUP_KEEP_DAILY`
-(default 7) of each kind are kept per gym.
+(default 7) of each kind are kept per gym. Deleting a gym deletes its stored
+backups (`provisioning.deleteGym`), whether or not its database is kept:
+encrypted for its id, nothing could open them again. A file the store will
+not remove stays listed, and the deletion's answer says how many.
 
 Why encrypted: every file in the Blob store is public — the installed
 `@vercel/blob` (0.23) has no private access — so a stored backup is
@@ -169,13 +186,26 @@ downloaded. Administrators only, every step in the audit log:
    names the gym by id. An uploaded file is also encrypted with this gym's
    key, and another gym's stored backups cannot be named at all.
 4. A backup of the gym as it is now is stored (kind `pre-restore`). If it
-   cannot be made, nothing is touched.
+   cannot be made, nothing is touched. The tidy-up of old backups after it
+   spares the file being restored, which is only read in the next step.
 5. Every collection in the file is loaded into a staging collection
    (`__restoring__<name>`) with its options and indexes, beside the live one.
    Until the whole file has been read and checked the live data is untouched;
    any failure drops the staging collections and leaves the gym as it was.
 6. Each staging collection replaces its live one (`renameCollection` with
    `dropTarget`), and live collections the backup does not have are dropped.
+7. Every session ends, everyone's: the accounts came back with the
+   sign-ins the backup knew of, some of them ended on purpose since (a
+   password reset after a stolen token). Every account's `tokenVersion`
+   becomes one above any a token could carry (above the highest before and
+   after, and above the time in seconds, for accounts deleted since the
+   backup); pending reset links and sign-in codes are cleared; every desk
+   sign-in is revoked; the session cache is dropped. The answer says
+   everyone, the admin included, must sign in again (`signedOut: true`).
+8. The phone app's usernames (`platform_member_logins`, not in a gym's
+   backup) are rebuilt from the restored accounts. A username another gym's
+   member has taken since stays theirs and is listed in `memberLogins.taken`,
+   for staff to give the restored member a new one.
 
 Never touched: the platform's and MongoDB's collections, and the admin audit
 log (`gym_admin_audit_logs`), which keeps its history — a restore must not be
@@ -184,8 +214,7 @@ per gym at a time (`platform_job_runs`, job `restore`; a lock older than 15
 minutes is taken over). The whole restore runs inside one request, so the
 function's time limit bounds the size of gym it can restore (DEPLOYMENT.md);
 this server's caches are reset afterwards, other instances' expire within a
-minute. Restored accounts keep the `tokenVersion` they had in the backup, so
-sessions issued since may end.
+minute.
 
 Uploading: Vercel refuses request bodies over 4.5 MB (streaming does not lift
 that), so the file goes from the browser straight to the Blob store with a
@@ -233,5 +262,9 @@ images 20 MB, member documents 10 MB, CSV imports 5 MB, videos 100 MB
 Sign-in, password reset, sign-up, the desk app's sign-in and the 2FA code
 endpoint are all rate-limited (`src/middleware/rateLimit.js`). Failed
 sign-ins and reset requests are counted per address **and** account (the
-email, username or 2FA challenge typed in), with a looser ceiling per
-address, so members sharing a gym's Wi-Fi do not lock each other out.
+email, username or 2FA challenge typed in, read from the same field, in
+the same order, as the handler behind the route reads it -- so a decoy in
+another field buys no fresh count), with a looser ceiling per address, so
+members sharing a gym's Wi-Fi do not lock each other out. The desk app
+counts its failures per account, whether it was named by email or by
+username. A sign-in name of spaces alone is refused (400), never looked up.

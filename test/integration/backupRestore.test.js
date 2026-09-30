@@ -90,7 +90,9 @@ const as = (extra = {}) => ({
 // Every collection a restore replaces, as it is in the database right now.
 // Empty ones are left out: mongoose creates a model's collection in the
 // background whenever the model is first compiled on a connection, so when
-// an empty one appears is not something a test can pin down.
+// an empty one appears is not something a test can pin down. An account's
+// tokenVersion is left out too: a restore moves every one on, on purpose,
+// so that every session ends (see the sessions test below).
 async function snapshot() {
   const db = h.rawDb(gym.database.name);
   const names = (await db.listCollections().toArray())
@@ -99,7 +101,7 @@ async function snapshot() {
     .sort();
   const out = {};
   for (const name of names) {
-    const docs = await db.collection(name).find({}).sort({ _id: 1 }).toArray();
+    const docs = await db.collection(name).find({}, name === 'users' ? { projection: { tokenVersion: 0 } } : {}).sort({ _id: 1 }).toArray();
     if (!docs.length) continue;
     const indexes = (await db.collection(name).indexes()).map((i) => `${i.name}:${JSON.stringify(i.key)}:${!!i.unique}`).sort();
     out[name] = { docs: EJSON.stringify(docs, { relaxed: false }), indexes };
@@ -363,4 +365,124 @@ test('one restore at a time: a running one refuses a second, a stale lock does n
     assert.equal(lock.lastOutcome, 'ok');
     assert.ok(lock.lastRunAt >= lock.lastStartedAt);
   });
+});
+
+test('a restore ends every session, including ones ended since the backup that it would bring back', async () => {
+  const auth = h.src('middleware/auth');
+  const DesktopToken = h.src('attendance/models/desktopTokenModel');
+  const ENDED = /session has ended/;
+  await h.inGym(gym, async () => {
+    await h.ensureIndexes(DesktopToken);
+    const member = await User.findOne({ email: 'm3@restore.test' }).lean();
+    const ownerNow = await User.findById(owner._id).lean();
+    // A token and a desk sign-in as the backup will remember them.
+    const stolen = member.tokenVersion || 0;
+    const desk = await DesktopToken.issue(member._id, { deviceLabel: 'DESK-9', ip: '127.0.0.1' });
+    const backupId = (await h.call(controller.run, as())).body.data.id;
+
+    // Then the token is found to be stolen and the password reset, which
+    // ends it and the desk sign-in; the member signs in again since.
+    await User.updateOne({ _id: member._id }, { $inc: { tokenVersion: 1 } });
+    await DesktopToken.revokeAllForUser(member._id);
+    auth.forgetSession(member._id);
+    const since = stolen + 1;
+    assert.match(await auth.sessionProblem({ id: String(member._id), tv: stolen }), ENDED);
+    assert.equal(await auth.sessionProblem({ id: String(member._id), tv: since }), null);
+
+    const done = await restore(backupId, 'restore-gym');
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+    assert.equal(done.body.data.signedOut, true);
+    assert.match(done.body.message, /sign in again/);
+
+    // Neither the stolen token the backup remembers nor the one from since
+    // works, nor the desk sign-in -- and that is everyone, the owner too.
+    assert.match(await auth.sessionProblem({ id: String(member._id), tv: stolen }), ENDED);
+    assert.match(await auth.sessionProblem({ id: String(member._id), tv: since }), ENDED);
+    assert.equal(await DesktopToken.findUsable(desk.token), null);
+    assert.match(await auth.sessionProblem({ id: String(owner._id), tv: ownerNow.tokenVersion || 0 }), ENDED);
+
+    // A sign-in after the restore is an ordinary one.
+    const restored = await User.findById(member._id).lean();
+    assert.equal(await auth.sessionProblem({ id: String(member._id), tv: restored.tokenVersion }), null);
+  });
+});
+
+test("a restore puts the phone app's usernames back as the restored accounts have them", async () => {
+  // The platform-wide directory the app signs in against is not in a gym's
+  // backup, so a restore used to leave it as it was: members deleted since
+  // came back unable to use the app, and accounts made since kept rows
+  // pointing at nobody.
+  const MemberDirectory = h.src('platform/models/memberDirectoryModel');
+  await h.ensureIndexes(MemberDirectory);
+  let backupId;
+  let leaving;
+  let renamed;
+  let renamedFrom;
+  let newcomer;
+  let clash;
+  await h.inGym(gym, async () => {
+    backupId = (await h.call(controller.run, as())).body.data.id;
+    leaving = await User.findOne({ email: 'm7@restore.test' }).lean();
+    clash = await User.findOne({ email: 'm9@restore.test' }).lean();
+    for (const gone of [leaving, clash]) {
+      await User.deleteOne({ _id: gone._id });
+      await MemberDirectory.withdraw(gone);
+    }
+    renamed = await User.findOne({ email: 'm8@restore.test' });
+    renamedFrom = renamed.username;
+    renamed.username = 'renamedsince1';
+    await renamed.save();
+    newcomer = await User.create({ firstName: 'Newer', lastName: 'Since', email: 'newer@restore.test', role: 'user' });
+  });
+  // A member of another gym is given a username freed since the backup.
+  await h.inGym(intruder, () => User.create({ firstName: 'Sam', lastName: 'Squatter', email: 'sam@intruder.test', role: 'user', username: clash.username }));
+
+  await h.inGym(gym, async () => {
+    const done = await restore(backupId, 'restore-gym');
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+
+    const back = await MemberDirectory.lookup(leaving.username);
+    assert.ok(back, 'the member deleted since is found by the app again');
+    assert.equal(String(back.userId), String(leaving._id));
+    assert.equal(String(back.gymId), String(gym._id));
+    assert.equal(String((await MemberDirectory.lookup(renamedFrom)).userId), String(renamed._id));
+    assert.equal(await MemberDirectory.lookup('renamedsince1'), null);
+    assert.equal(await MemberDirectory.lookup(newcomer.username), null, 'an account the backup does not have holds no username');
+
+    // Taken by another gym since: it stays theirs, and the restore says so.
+    assert.equal(String((await MemberDirectory.lookup(clash.username)).gymId), String(intruder._id));
+    assert.deepEqual(done.body.data.memberLogins.taken, [clash.username]);
+    assert.equal(await MemberDirectory.countDocuments({ gymId: gym._id }), (await User.countDocuments({ username: { $nin: [null, ''] } })) - 1);
+  });
+});
+
+test('the tidy-up after the safety backup never removes the backup being restored', async () => {
+  // Storing the safety backup prunes the gym's backups, which used to run
+  // before the file being restored was opened: an upload over a day old, or
+  // the oldest backup of a kind at its keep limit, was deleted for good and
+  // the restore failed on a file that was no longer there.
+  const previousKeep = process.env.BACKUP_KEEP_DAILY;
+  process.env.BACKUP_KEEP_DAILY = '1';
+  try {
+    const archive = await downloadNow(gym);
+    await h.inGym(gym, async () => {
+      const uploadId = await upload(archive);
+      await h.rawDb(h.PLATFORM_DB)
+        .collection('platform_backups')
+        .updateOne({ _id: new mongoose.Types.ObjectId(uploadId) }, { $set: { createdAt: new Date(Date.now() - 25 * 3600 * 1000) } });
+      const fromUpload = await restore(uploadId, 'restore-gym');
+      assert.equal(fromUpload.statusCode, 200, JSON.stringify(fromUpload.body));
+
+      // One 'Before a restore' is kept, and restoring it makes another.
+      const safety = fromUpload.body.data.safetyBackup;
+      assert.equal(await PlatformBackup.countDocuments({ gymId: gym._id, kind: 'pre-restore' }), 1);
+      const fromSafety = await restore(safety, 'restore-gym');
+      assert.equal(fromSafety.statusCode, 200, JSON.stringify(fromSafety.body));
+      const kept = await PlatformBackup.findById(safety).lean();
+      assert.ok(kept && blobs.has(kept.url), 'the backup restored from is still there');
+    });
+  } finally {
+    if (previousKeep === undefined) delete process.env.BACKUP_KEEP_DAILY;
+    else process.env.BACKUP_KEEP_DAILY = previousKeep;
+  }
 });

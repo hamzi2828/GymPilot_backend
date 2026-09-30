@@ -22,6 +22,9 @@
 //   6. swap      each staging collection replaces its live one (rename with
 //                dropTarget), and live collections the backup does not have
 //                are dropped -- the gym is then exactly what the file holds.
+//   7. sign out  every session ends, everyone's (endEverySession): the
+//                accounts came back with the sign-ins the backup knew of,
+//                some of which were ended on purpose since.
 //
 // Never touched: MongoDB's and the platform's collections (see
 // backupService.isGymCollection), and the admin audit log, which keeps its
@@ -32,7 +35,6 @@
 // 'restore', released when done or after 15 minutes).
 
 const { pipeline } = require('stream/promises');
-const PlatformJobRun = require('../platform/models/platformJobRunModel');
 const { currentTenant } = require('../platform/tenantContext');
 const backups = require('./backupService');
 const backupCrypto = require('./backupCrypto');
@@ -42,7 +44,6 @@ const storage = require('./backupStorage');
 const { STAGING_PREFIX } = backups;
 // Kept as they are, whatever the backup holds.
 const KEPT_ON_RESTORE = new Set(['gym_admin_audit_logs']);
-const LOCK_MS = 15 * 60 * 1000;
 
 // An error whose message is meant for the owner, whatever its status.
 function refusal(status, code, message) {
@@ -122,42 +123,12 @@ async function readHeader(entry) {
   }
 }
 
-// The gym's 'restore' row is free when no restore ever started, when the
-// last one finished (lastRunAt caught up with lastStartedAt), or when one
-// started so long ago that the function running it must have been stopped.
-// Taking it is one conditional write, so two restores cannot both get it.
+// The gym's 'restore' row in platform_job_runs (backupJobs.takeLock): two
+// restores cannot both get it, and one cut off lets go after 15 minutes.
 async function acquireLock(gym, now = new Date()) {
-  await PlatformJobRun.updateOne(
-    { job: 'restore', gymId: gym._id },
-    { $setOnInsert: { gymSlug: gym.slug, lastStartedAt: null } },
-    { upsert: true }
-  ).catch((error) => {
-    // Two first-ever restores racing to create the row: it exists now.
-    if (!error || error.code !== 11000) throw error;
-  });
-  const taken = await PlatformJobRun.updateOne(
-    {
-      job: 'restore',
-      gymId: gym._id,
-      $or: [{ lastStartedAt: null }, { lastStartedAt: { $lt: new Date(now.getTime() - LOCK_MS) } }, { $expr: { $gte: ['$lastRunAt', '$lastStartedAt'] } }]
-    },
-    { $set: { gymSlug: gym.slug, lastStartedAt: now } }
-  );
-  if (!taken.matchedCount) throw refusal(409, 'RESTORE_IN_PROGRESS', 'A restore of this gym is already running. Wait for it to finish.');
-}
-
-function releaseLock(gym, outcome, began) {
-  return PlatformJobRun.updateOne(
-    { job: 'restore', gymId: gym._id },
-    {
-      $set: {
-        lastRunAt: new Date(),
-        lastOutcome: outcome.error ? 'error' : 'ok',
-        lastError: outcome.error ? String(outcome.error.message || outcome.error).slice(0, 500) : '',
-        lastDurationMs: Date.now() - began
-      }
-    }
-  ).catch((error) => console.error(`[restore] could not release the lock for ${gym.slug}:`, error.message));
+  if (!(await backupJobs.takeLock('restore', gym, now))) {
+    throw refusal(409, 'RESTORE_IN_PROGRESS', 'A restore of this gym is already running. Wait for it to finish.');
+  }
 }
 
 async function dropStaging(db) {
@@ -233,6 +204,76 @@ async function swapIn(db, loaded) {
   return dropped;
 }
 
+// The highest tokenVersion any account in the live `users` holds.
+async function highestTokenVersion(db) {
+  const top = await db.collection('users').find({}, { projection: { tokenVersion: 1 } }).sort({ tokenVersion: -1 }).limit(1).next();
+  return Number((top && top.tokenVersion) || 0);
+}
+
+// Step 7. A restore puts every account back as the backup had it,
+// tokenVersion included, and the desk sign-ins (gym_desktop_tokens) with
+// them. Left so, a session ended since the backup -- the password reset
+// after a token was stolen, a deactivation, "sign out everywhere" -- would
+// work again. So every session ends:
+//
+//   * every account's tokenVersion becomes one number above any a token
+//     can carry. A token carries the version its account had when it was
+//     issued, and there are tokens from every version between the backup
+//     and now, so the restored value plus one would bring some back. The
+//     number is above the highest version live before the swap
+//     (`liveHighest`) and in the backup, and above the time in seconds --
+//     far past any count of sign-outs -- which covers accounts deleted
+//     since the backup, whose later versions are nowhere left to read;
+//   * reset links and emailed sign-in codes pending in the backup go;
+//   * every desk sign-in is revoked;
+//   * this process forgets the gym's cached sessions (other instances
+//     re-read theirs within 30 seconds, middleware/auth.js).
+async function endEverySession(db, liveHighest) {
+  const users = db.collection('users');
+  const next = Math.max(liveHighest, await highestTokenVersion(db), Math.floor(Date.now() / 1000)) + 1;
+  await users.updateMany({}, { $set: { tokenVersion: next } });
+  await users.updateMany({ passwordResetTokenHash: { $ne: null } }, { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } });
+  await users.updateMany({ 'twoFactor.pending.challengeId': { $ne: null } }, { $set: { 'twoFactor.pending': null } });
+  await db.collection('gym_desktop_tokens').updateMany({ revokedAt: null }, { $set: { revokedAt: new Date() } });
+  require('../middleware/auth').forgetGymSessions();
+}
+
+// The phone app finds a member's gym by username in the platform-wide
+// directory (platform_member_logins), which is not in a gym's backup and so
+// was left as it was: members deleted since the backup came back unable to
+// use the app, and accounts made since kept rows pointing at nobody. The
+// gym's rows are rebuilt from the restored accounts instead. A username a
+// member of another gym has taken since stays theirs -- usernames are
+// unique across the platform -- and is reported, so staff can give the
+// restored member a new one.
+async function rebuildMemberLogins(db, gym) {
+  const MemberDirectory = require('../platform/models/memberDirectoryModel');
+  const accounts = await db.collection('users').find({ username: { $nin: [null, ''] } }, { projection: { username: 1 } }).toArray();
+  await MemberDirectory.deleteMany({ gymId: gym._id });
+  const at = new Date();
+  const rows = accounts.map((user) => ({
+    username: String(user.username).toLowerCase().trim(),
+    gymId: gym._id,
+    gymSlug: gym.slug,
+    userId: user._id,
+    createdAt: at,
+    updatedAt: at
+  }));
+  const taken = [];
+  if (rows.length) {
+    try {
+      // Straight through the driver: one round trip, and every row that can
+      // go in does, whatever the others do.
+      await MemberDirectory.collection.insertMany(rows, { ordered: false });
+    } catch (error) {
+      const failures = error.writeErrors ? [].concat(error.writeErrors) : [];
+      if (!failures.length || failures.some((failure) => failure.code !== 11000)) throw error;
+      for (const failure of failures) taken.push(rows[failure.index].username);
+    }
+  }
+  return { published: rows.length - taken.length, taken };
+}
+
 // What this process remembers about the gym, read from the collections just
 // replaced. Other instances catch up as their caches expire (a minute at most).
 function forgetCachedState() {
@@ -277,19 +318,25 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
 
     let safety;
     try {
-      safety = await backupJobs.storeBackup({ kind: 'pre-restore', actor, now });
+      // The tidy-up after it must spare the file being restored, which is
+      // only opened below: an upload over a day old, or the oldest of a kind
+      // at its keep limit, would otherwise be deleted before it was read.
+      safety = await backupJobs.storeBackup({ kind: 'pre-restore', actor, now, spare: [entry._id] });
     } catch (error) {
       console.error(`[restore] ${gym.slug}: the backup before restoring failed:`, error);
       throw refusal(503, 'PRE_RESTORE_BACKUP_FAILED', 'Nothing was restored: the backup of the gym as it is now could not be made first. Please try again.');
     }
 
     const loaded = await loadIntoStaging(db, await openBackup(entry), gym);
+    const liveHighest = await highestTokenVersion(db);
     let dropped;
     try {
       dropped = await swapIn(db, loaded);
     } catch (error) {
       console.error(`[restore] ${gym.slug}: the swap failed part-way:`, error);
       await dropStaging(db).catch(() => {});
+      // Whichever accounts are live now, nobody keeps a session from either side.
+      await endEverySession(db, liveHighest).catch((e) => console.error(`[restore] ${gym.slug}: could not end the sessions:`, e));
       throw refusal(
         500,
         'RESTORE_INCOMPLETE',
@@ -297,6 +344,20 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
       );
     }
     forgetCachedState();
+    try {
+      await endEverySession(db, liveHighest);
+    } catch (error) {
+      console.error(`[restore] ${gym.slug}: could not end the sessions:`, error);
+      throw refusal(500, 'RESTORE_SIGN_OUT_FAILED', 'The backup was restored, but not every session could be ended. Run the restore again to end them.');
+    }
+    let memberLogins;
+    try {
+      memberLogins = await rebuildMemberLogins(db, gym);
+    } catch (error) {
+      // The gym itself is restored; only the app's lookup is behind.
+      console.error(`[restore] ${gym.slug}: could not rebuild the phone app's usernames:`, error);
+      memberLogins = { error: "The phone app's usernames could not be rebuilt: run scripts/assignUsernames.js --repair for this gym." };
+    }
 
     // An uploaded file has done its job.
     if (entry.kind === 'upload') {
@@ -308,13 +369,18 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
       documents: loaded.reduce((n, c) => n + c.documents, 0),
       dropped,
       kept: [...KEPT_ON_RESTORE],
-      safetyBackup: String(safety._id)
+      safetyBackup: String(safety._id),
+      // The phone app's usernames: how many were published, and any taken
+      // by another gym's member since the backup.
+      memberLogins,
+      // Everyone, the admin who ran it included, signs in again (step 7).
+      signedOut: true
     };
   } catch (error) {
     outcome.error = error;
     throw error;
   } finally {
-    await releaseLock(gym, outcome, began);
+    await backupJobs.releaseLock('restore', gym, outcome, began);
   }
 }
 

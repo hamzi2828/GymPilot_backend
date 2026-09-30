@@ -210,6 +210,25 @@ async function can(slug, tab, level = 'view') {
   return grants(await permissionsFor(slug), tab, level);
 }
 
+// The account behind an admin action, as services/roleGuards.js and
+// adminPasswords.js judge it: the live role requirePermission just read
+// (req.roleSlug) -- never the claim in a token that may predate a demotion
+// -- what that role reaches, and the account's own front-desk grants.
+async function actorAccess(req) {
+  const User = require('../models/user');
+  const actorId = req.user && (req.user.id || req.user._id);
+  const actor = actorId
+    ? await User.findById(actorId).select('role allowAttendanceApp allowFingerprintEnrollment').lean()
+    : null;
+  const actorRole = req.roleSlug || (actor && actor.role) || (req.user && req.user.role) || '';
+  return {
+    actorId,
+    actorRole,
+    actorPermissions: await permissionsFor(actorRole),
+    actorGrants: actor || {}
+  };
+}
+
 module.exports = {
   ADMIN_SLUG,
   MEMBER_SLUG,
@@ -218,5 +237,6 @@ module.exports = {
   permissionsFor,
   roleFor,
   can,
+  actorAccess,
   invalidate
 };

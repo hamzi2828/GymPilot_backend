@@ -147,6 +147,18 @@ test('the owner downloads the whole gym as one archive, named for the gym', asyn
   assert.equal(manifest.documents, events.filter((e) => e.type === 'documents').reduce((n, e) => n + e.documents.length, 0));
 });
 
+test('the counters are read last, after everything numbered from them', async () => {
+  // The gym keeps running while its collections are read one by one. Read
+  // before the sales and orders, a counter could miss a number handed out
+  // meanwhile -- and after a restore, the next receipt or invoice would
+  // repeat it. Read last, it can only be ahead of them (a gap, never a repeat).
+  await h.inGym(gym, () => h.src('gymfolio/models/counterModel').next('invoice'));
+  const events = await read((await download(gym)).bytes());
+  const names = events.filter((e) => e.type === 'collection').map((e) => e.collection.name);
+  assert.ok(names.includes('users'), names.join());
+  assert.equal(names[names.length - 1], 'gym_counters', names.join());
+});
+
 test('nothing of the platform or of another gym is in it', async () => {
   const events = await read((await download(gym)).bytes());
   const names = events.filter((e) => e.type === 'collection').map((e) => e.collection.name);
@@ -348,5 +360,69 @@ test('the daily job backs up every active gym once a day and keeps the newest BA
     assert.equal((await cron({ gym: 'no-such-gym' })).statusCode, 404);
   } finally {
     setEnv({ BACKUP_KEEP_DAILY: undefined });
+  }
+});
+
+test('two daily runs overlapping store one backup of a gym, not two', async () => {
+  // A retry of the cron while the first run is still going, or two
+  // instances: both used to find no backup from today and both store one,
+  // so fewer different days were kept.
+  const backupJobs = h.src('services/backupJobs');
+  const raw = h.rawDb(h.PLATFORM_DB).collection('platform_backups');
+  await raw.updateMany({ kind: 'daily', gymSlug: 'backup-gym' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
+  const before = await PlatformBackup.countDocuments({ kind: 'daily', gymSlug: 'backup-gym' });
+
+  const runs = await h.inGym(gym, () => Promise.all([backupJobs.dailyBackup(), backupJobs.dailyBackup()]));
+  assert.equal(runs.filter((run) => run.backup).length, 1, JSON.stringify(runs));
+  assert.equal(await PlatformBackup.countDocuments({ kind: 'daily', gymSlug: 'backup-gym' }), before + 1);
+
+  // The lock is let go: once today's is older than 20 hours, the next run backs up.
+  await raw.updateMany({ kind: 'daily', gymSlug: 'backup-gym' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
+  assert.ok((await h.inGym(gym, () => backupJobs.dailyBackup())).backup);
+});
+
+test('deleting a gym deletes its stored backups; a store that cannot does not stop the deletion', async () => {
+  // Nothing could open them again -- they are encrypted for that gym's id
+  // -- so they used to sit in the public store for ever, members' data and
+  // all, and in the list with nobody to see them.
+  const provisioning = h.src('platform/provisioning');
+  const Gym = h.src('platform/models/gymModel');
+  const theirs = await PlatformBackup.countDocuments({ gymId: gym._id });
+
+  const backUp = async (slug) => {
+    const doomed = await h.createGym(slug);
+    await h.inGym(doomed, async () => {
+      await User.create({ firstName: 'Last', lastName: 'Member', email: `last@${slug}.test`, role: 'user' });
+      for (let i = 0; i < 2; i += 1) assert.equal((await h.call(controller.run, ownerReq())).statusCode, 201);
+    });
+    return { doomed, rows: await PlatformBackup.find({ gymId: doomed._id }).lean() };
+  };
+
+  const { doomed, rows } = await backUp('doomed-gym');
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => blobs.has(row.url)));
+  const result = await provisioning.deleteGym(await Gym.findById(doomed._id), { confirmSlug: 'doomed-gym' });
+  assert.equal(result.deleted, true);
+  assert.equal(result.backupsRemoved, 2);
+  assert.equal(await PlatformBackup.countDocuments({ gymId: doomed._id }), 0);
+  assert.ok(rows.every((row) => !blobs.has(row.url)), 'the files are gone from the store');
+  assert.equal(await PlatformBackup.countDocuments({ gymId: gym._id }), theirs, 'another gym keeps its backups');
+
+  // The store refusing: the gym still goes, and its backups stay listed --
+  // nothing is ever in the store unlisted -- for the operator to clear.
+  const stuck = await backUp('stuck-gym');
+  const remove = storage.remove;
+  storage.remove = async () => {
+    throw new Error('store unavailable');
+  };
+  try {
+    const kept = await provisioning.deleteGym(await Gym.findById(stuck.doomed._id), { confirmSlug: 'stuck-gym' });
+    assert.equal(kept.deleted, true);
+    assert.equal(kept.backupsLeft, 2);
+    assert.match(kept.backupsError, /store unavailable/);
+    assert.equal(await Gym.countDocuments({ _id: stuck.doomed._id }), 0);
+    assert.equal(await PlatformBackup.countDocuments({ gymId: stuck.doomed._id }), 2);
+  } finally {
+    storage.remove = remove;
   }
 });

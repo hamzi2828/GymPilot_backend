@@ -642,6 +642,10 @@ async function replaceDomains(gym, input) {
 /**
  * Removes a gym from the platform. The database is kept unless asked for
  * explicitly, and even then only after the caller has typed the slug back.
+ * Its stored backups go either way (services/backupJobs.js
+ * removeGymBackups): encrypted for this gym's id, nothing could open them
+ * again, even for the same data registered anew. The answer says how many
+ * went, and how many the store would not remove.
  */
 async function deleteGym(gym, { confirmSlug, dropDatabase = false } = {}) {
   if (confirmSlug !== gym.slug) {
@@ -658,7 +662,15 @@ async function deleteGym(gym, { confirmSlug, dropDatabase = false } = {}) {
   }
   await Gym.deleteOne({ _id: gym._id });
   invalidateTenantCache();
-  return { deleted: true, databaseDropped: !!dropDatabase };
+  // After the gym is gone, so a deletion that fails never costs a live gym
+  // its backups.
+  const backups = await require('../services/backupJobs').removeGymBackups(gym._id);
+  return {
+    deleted: true,
+    databaseDropped: !!dropDatabase,
+    backupsRemoved: backups.removed,
+    ...(backups.left ? { backupsLeft: backups.left, backupsError: backups.error } : {})
+  };
 }
 
 module.exports = {

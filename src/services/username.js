@@ -137,12 +137,12 @@ function setUsernameHandler({ load, notFound = 'User not found' }) {
       const user = await load(req.params.id);
       if (!user) return res.status(404).json({ success: false, message: notFound });
 
-      // An administrator's sign-in name is an administrator's business.
-      const { isAdmin } = require('./roleGuards');
-      const actorRole = req.roleSlug || (req.user && req.user.role) || '';
-      if (isAdmin(user.role) && !isAdmin(actorRole)) {
-        return res.status(403).json({ success: false, message: "Only an administrator can change an administrator's username." });
-      }
+      // Held to the set-password line: an administrator's sign-in name is an
+      // administrator's business, and nobody renames an account that reaches
+      // further than their own (services/adminPasswords.js).
+      const { usernameRefusal } = require('./adminPasswords');
+      const refusal = await usernameRefusal(req, user);
+      if (refusal) return res.status(403).json({ success: false, message: refusal });
 
       const wanted = req.body && req.body.username;
       const problem = usernameProblem(wanted);

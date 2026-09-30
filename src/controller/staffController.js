@@ -8,8 +8,10 @@
 // A staff member is created the same way an admin-created member is: the
 // password is generated server-side and emailed -- or, when the admin asks
 // (or the email cannot be sent), generated and shown to them once, or typed
-// by them. Who may choose or see whose password is the set-password rule in
-// services/adminPasswords.js, so nobody learns one they should not know.
+// by them. Nobody may create (or move anyone into) a role that reaches
+// further than their own (services/roleGuards.js) -- the line the
+// set-password rule holds too -- so nobody learns a password they should
+// not know.
 
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
@@ -20,7 +22,7 @@ const Attendance = require('../attendance/models/attendanceModel');
 const Trainer = require('../gymfolio/models/trainerModel');
 const { sendEmail } = require('../services/emailService');
 const { defaultCurrency, FALLBACK: FALLBACK_CURRENCY } = require('../services/currency');
-const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate } = require('../services/roleService');
+const { ADMIN_SLUG, MEMBER_SLUG, ensureDefaultRoles, invalidate, permissionsFor, actorAccess } = require('../services/roleService');
 const T = require('../attendance/services/timeUtils');
 const { openVisitExpr } = require('../attendance/services/staleVisits');
 const { trainerProfilesOf } = require('../attendance/services/peopleDirectory');
@@ -30,7 +32,7 @@ const guards = require('../services/roleGuards');
 const { payChangeProblem } = require('../services/payGuards');
 const { gymSiteName } = require('../services/gymName');
 const { forgetSession } = require('../middleware/auth');
-const { initialPassword, resetRefusal, setPasswordHandler } = require('../services/adminPasswords');
+const { initialPassword, setPasswordHandler } = require('../services/adminPasswords');
 
 // The live role requirePermission just read, never the token's claim.
 const actorRole = (req) => req.roleSlug || (req.user && req.user.role) || '';
@@ -409,22 +411,25 @@ module.exports = {
         });
       }
 
-      // A manager with `staff: manage` must not be able to mint an admin.
-      const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: roleDoc.slug });
+      // Nobody creates a staff account whose role reaches further than their
+      // own -- an admin least of all -- nor gives it a front-desk grant they
+      // do not hold themselves. Knowing a new account's password is being
+      // able to sign in as it, and that holds however the password travels:
+      // emailed, it goes to whatever address the admin typed
+      // (services/roleGuards.js).
+      const refusal = guards.createRoleProblem({
+        ...(await actorAccess(req)),
+        role: roleDoc.slug,
+        rolePermissions: await permissionsFor(roleDoc.slug),
+        grants: {
+          allowAttendanceApp: !!req.body.allowAttendanceApp,
+          allowFingerprintEnrollment: !!req.body.allowFingerprintEnrollment
+        }
+      });
       if (refusal) return res.status(403).json({ message: refusal });
 
       const initial = initialPassword(req.body || {}, { canEmail: true });
       if (initial.problem) return res.status(400).json({ message: initial.problem });
-
-      // Choosing or seeing a new account's password is being able to sign
-      // in as it: not for a role that reaches further than the admin's own,
-      // nor for a front-desk grant they do not hold themselves.
-      const revealRefusal = await resetRefusal(req, {
-        role: roleDoc.slug,
-        allowAttendanceApp: !!req.body.allowAttendanceApp,
-        allowFingerprintEnrollment: !!req.body.allowFingerprintEnrollment
-      });
-      if (revealRefusal && initial.mode !== 'email') return res.status(403).json({ message: revealRefusal });
 
       const existing = await User.findOne({ email: normalisedEmail });
       if (existing) {
@@ -488,15 +493,13 @@ module.exports = {
 
       invalidate();
 
-      const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed && !revealRefusal);
+      const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed);
       let message = `${user.firstName} was registered with the password you chose.`;
       if (initial.mode === 'show') message = `${user.firstName} was registered. Hand them the password below: it is shown only once.`;
       if (initial.mode === 'email') {
         message = emailed
           ? `${user.firstName} was registered and their sign-in details emailed.`
-          : reveal
-            ? `${user.firstName} was registered, but the credentials email could not be sent. Hand them the password below: it is shown only once.`
-            : `${user.firstName} was registered, but the credentials email could not be sent. Ask an administrator to set their password.`;
+          : `${user.firstName} was registered, but the credentials email could not be sent. Hand them the password below: it is shown only once.`;
       }
 
       if (reveal) res.setHeader('Cache-Control', 'no-store');
@@ -550,13 +553,18 @@ module.exports = {
         if (!next) return res.status(400).json({ message: 'Unknown role' });
 
         // Nobody changes their own role, only an admin grants or revokes the
-        // admin role, and demoting the last administrator would leave the
-        // panel unreachable (services/roleGuards.js).
+        // admin role, nobody moves an account out of or into a role that
+        // reaches further than their own, and demoting the last
+        // administrator would leave the panel unreachable
+        // (services/roleGuards.js).
         const refusal = guards.roleChangeProblem({
           actorId: actorId(req),
           actorRole: actorRole(req),
+          actorPermissions: await permissionsFor(actorRole(req)),
           target: user,
+          currentPermissions: await permissionsFor(user.role),
           nextRole: next.slug,
+          nextPermissions: await permissionsFor(next.slug),
           activeAdmins: user.role === ADMIN_SLUG ? await activeAdminCount() : null
         });
         if (refusal) return res.status(403).json({ message: refusal });
@@ -593,6 +601,18 @@ module.exports = {
         user.employment = next;
         if (!user.staffCode) user.staffCode = await nextStaffCode();
       }
+
+      // A front-desk grant is switched on only by someone who holds it
+      // (services/roleGuards.js); one the account already has stays as it
+      // is, so the rest of the form still saves.
+      const grantRefusal = guards.grantProblem({
+        ...(await actorAccess(req)),
+        grants: {
+          allowAttendanceApp: !!req.body.allowAttendanceApp && !user.allowAttendanceApp,
+          allowFingerprintEnrollment: !!req.body.allowFingerprintEnrollment && !user.allowFingerprintEnrollment
+        }
+      });
+      if (grantRefusal) return res.status(403).json({ message: grantRefusal });
 
       if (req.body.allowAttendanceApp !== undefined) user.allowAttendanceApp = !!req.body.allowAttendanceApp;
       if (req.body.allowFingerprintEnrollment !== undefined) {
@@ -661,12 +681,15 @@ module.exports = {
       const user = await User.findById(id);
       if (!user) return res.status(404).json({ message: 'Staff member not found' });
 
-      // Nobody deactivates themselves, only an admin deactivates an admin, and
-      // the last active administrator stays on (services/roleGuards.js).
+      // Nobody deactivates themselves, only an admin deactivates an admin,
+      // nobody deactivates an account that reaches further than their own,
+      // and the last active administrator stays on (services/roleGuards.js).
       const refusal = guards.statusChangeProblem({
         actorId: actorId(req),
         actorRole: actorRole(req),
+        actorPermissions: await permissionsFor(actorRole(req)),
         target: user,
+        targetPermissions: await permissionsFor(user.role),
         isActive,
         activeAdmins: user.role === ADMIN_SLUG ? await activeAdminCount() : null
       });
@@ -718,8 +741,11 @@ module.exports = {
       const refusal = guards.roleChangeProblem({
         actorId: actorId(req),
         actorRole: actorRole(req),
+        actorPermissions: await permissionsFor(actorRole(req)),
         target: user,
+        currentPermissions: await permissionsFor(user.role),
         nextRole: MEMBER_SLUG,
+        nextPermissions: await permissionsFor(MEMBER_SLUG),
         activeAdmins: user.role === ADMIN_SLUG ? await activeAdminCount() : null
       });
       if (refusal) return res.status(403).json({ message: refusal });

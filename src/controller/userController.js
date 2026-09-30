@@ -11,11 +11,13 @@ const { checkLimit } = require('../platform/planLimits');
 const { forgetSession } = require('../middleware/auth');
 const { publicUserView } = require('../services/userView');
 const guards = require('../services/roleGuards');
+const { actorAccess, permissionsFor } = require('../services/roleService');
 const { gymSiteName } = require('../services/gymName');
 const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
+const { passwordMatches } = require('../services/passwordCheck');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -179,7 +181,7 @@ function hashResetToken(token) {
 
 // The password rule (a length, nothing else) and the generator live with the
 // admin set-password code, so every screen applies the same ones.
-const { passwordProblem, initialPassword, resetRefusal, setPasswordHandler } = require('../services/adminPasswords');
+const { passwordProblem, initialPassword, setPasswordHandler } = require('../services/adminPasswords');
 
 // Stores a fresh reset token on the account and emails the link. Run after
 // the response has gone (see forgotPassword), so it reports trouble in the
@@ -369,21 +371,21 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
         });
         const assignedRole = requestedRole ? requestedRole.slug : 'user';
 
-        // A manager with `users: manage` must not be able to mint an
-        // administrator.
-        const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: assignedRole });
+        // Nobody creates an account whose role reaches further than their
+        // own -- an administrator least of all. Knowing a new account's
+        // password is being able to sign in as it, and that holds however
+        // the password travels: emailed, it goes to whatever address the
+        // admin typed (services/roleGuards.js).
+        const refusal = guards.createRoleProblem({
+            ...(await actorAccess(req)),
+            role: assignedRole,
+            rolePermissions: await permissionsFor(assignedRole)
+        });
         if (refusal) return fail(403, refusal);
 
         // Nowhere to email a password: it is shown to the admin instead.
         const initial = initialPassword(body, { canEmail: !!normalisedEmail });
         if (initial.problem) return fail(400, initial.problem);
-
-        // Knowing a new account's password is being able to sign in as
-        // it, so choosing or seeing one is held to the set-password rule:
-        // not for an account whose role reaches further than the admin's
-        // own. Emailing it to the person stays as it was.
-        const revealRefusal = await resetRefusal(req, { role: assignedRole });
-        if (revealRefusal && initial.mode !== 'email') return fail(403, revealRefusal);
 
         // A staff role needs an address for the emailed sign-in code
         // (services/twoFactorService.js needsEmail).
@@ -438,15 +440,13 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
 
         // Shown to the admin once: a generated password nobody else will
         // ever see -- asked for, or left over from an email that failed.
-        const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed && !revealRefusal);
+        const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed);
         let message = 'User created with the password you chose';
         if (initial.mode === 'show') message = 'User created. Hand them the password below: it is shown only once';
         if (initial.mode === 'email') {
             message = emailed
                 ? 'User created and credentials emailed'
-                : reveal
-                    ? 'User created, but the credentials email could not be sent. Hand them the password below: it is shown only once'
-                    : 'User created, but the credentials email could not be sent. Ask an administrator to set their password';
+                : 'User created, but the credentials email could not be sent. Hand them the password below: it is shown only once';
         }
 
         return {
@@ -524,6 +524,11 @@ const userController = {
         try {
             const user = await User.findById(req.params.id);
             if (!user) return res.status(404).json({ message: 'User not found' });
+
+            // The same line as choosing one (services/adminPasswords.js).
+            const { usernameRefusal } = require('../services/adminPasswords');
+            const refusal = await usernameRefusal(req, user);
+            if (refusal) return res.status(403).json({ message: refusal });
 
             const { assignUsername } = require('../services/username');
             const username = await assignUsername(user, { force: true });
@@ -758,15 +763,24 @@ const userController = {
     loginUser: async (req, res) => {
         try {
             const { password } = req.body;
+            // The same fields, in the same order, as the sign-in limiter
+            // counts (middleware/rateLimit.js FIELDS.website).
             const login = req.body.login || req.body.email || req.body.username;
             const remember = wantsRemember(req.body);
-            if (!login || !password) {
+            // Spaces alone make no filter at all, and findOne(null) is the
+            // gym's first account -- its owner -- so they are refused here
+            // rather than looked up.
+            const { loginFilter } = require('../services/username');
+            const filter = loginFilter(login);
+            if (!filter || !password) {
                 return res.status(400).json({ message: 'Email or username and password are required' });
             }
 
-            const { loginFilter } = require('../services/username');
-            const user = await User.findOne(loginFilter(login));
+            const user = await User.findOne(filter);
             if (!user) {
+                // The bcrypt work a real account costs, so a name nobody
+                // has is not answered faster (services/passwordCheck.js).
+                await passwordMatches(password, null);
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
 
@@ -1329,11 +1343,15 @@ const userController = {
             }
 
             // Nobody switches themselves off, only an admin switches an admin
-            // off, and the last active admin stays on (services/roleGuards.js).
+            // off, nobody switches off an account that reaches further than
+            // their own, and the last active admin stays on
+            // (services/roleGuards.js).
             const refusal = guards.statusChangeProblem({
                 actorId: currentUser.id,
                 actorRole: actorRole(req, currentUser),
+                actorPermissions: await permissionsFor(actorRole(req, currentUser)),
                 target,
+                targetPermissions: await permissionsFor(target.role),
                 isActive,
                 activeAdmins: target.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
             });
@@ -1390,9 +1408,11 @@ const userController = {
             }
 
             // Nobody changes their own role; only an administrator grants or
-            // revokes the administrator role; and losing the last active
-            // administrator would leave nobody able to hand the role back out
-            // (services/roleGuards.js).
+            // revokes the administrator role; nobody moves an account out of
+            // or into a role that reaches further than their own (or they
+            // could demote the manager, set the password, and restore the
+            // role); and losing the last active administrator would leave
+            // nobody able to hand the role back out (services/roleGuards.js).
             const current = await User.findById(id).select('role isActive employment.isStaff').lean();
             if (!current) {
                 return res.status(404).json({ message: 'User not found' });
@@ -1400,8 +1420,11 @@ const userController = {
             const refusal = guards.roleChangeProblem({
                 actorId: currentUser.id,
                 actorRole: actorRole(req, currentUser),
+                actorPermissions: await permissionsFor(actorRole(req, currentUser)),
                 target: current,
+                currentPermissions: await permissionsFor(current.role),
                 nextRole: target.slug,
+                nextPermissions: await permissionsFor(target.slug),
                 activeAdmins: current.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
             });
             if (refusal) return res.status(403).json({ message: refusal });
@@ -1469,11 +1492,15 @@ const userController = {
             }
 
             // Nobody deletes themselves from here, only an admin deletes an
-            // admin, and the last active admin stays (services/roleGuards.js).
+            // admin, nobody deletes an account that reaches further than
+            // their own, and the last active admin stays
+            // (services/roleGuards.js).
             const refusal = guards.deleteProblem({
                 actorId: currentUser.id,
                 actorRole: actorRole(req, currentUser),
+                actorPermissions: await permissionsFor(actorRole(req, currentUser)),
                 target,
+                targetPermissions: await permissionsFor(target.role),
                 activeAdmins: target.role === guards.ADMIN_SLUG ? await activeAdminCount() : null
             });
             if (refusal) return res.status(403).json({ message: refusal });

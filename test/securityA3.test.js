@@ -154,6 +154,47 @@ test('one member fumbling a password does not lock out the rest of the gym\'s Wi
   }
 });
 
+test('the sign-in limiters count the account the handler signs into, not a field it ignores', async () => {
+  const express = require('express');
+  const limits = require('../src/middleware/rateLimit');
+
+  // The website reads login, then email, then username: so does its limiter.
+  assert.equal(limits.identityKey({ ip: '203.0.113.9', body: { login: ' Victim ', email: 'decoy@x.test' } }), '203.0.113.9|victim');
+
+  const app = express();
+  app.use(express.json());
+  const refuse = (req, res) => res.status(401).json({ message: 'Invalid credentials' });
+  app.post('/website', limits.loginLimiter, refuse);        // userController.loginUser
+  app.post('/app', limits.appLoginLimiter, refuse);         // mobileAuthController.login
+  app.post('/platform', limits.platformLoginLimiter, refuse); // platformAuthController.login
+  app.post('/code', limits.twoFactorLimiter, refuse);       // every emailed-code step
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) =>
+    fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  try {
+    const stamp = Date.now();
+    // The field each handler reads holds the target; every other field a
+    // fresh decoy, which used to buy a fresh bucket per request.
+    const cases = [
+      ['/website', (i) => ({ login: `target-${stamp}`, email: `decoy-${i}@x.test`, password: 'wrong' })],
+      ['/app', (i) => ({ username: `target${stamp}`, email: `decoy-${i}@x.test`, password: 'wrong' })],
+      ['/platform', (i) => ({ email: `target-${stamp}@x.test`, username: `decoy${i}`, password: 'wrong' })],
+      ['/code', (i) => ({ challengeId: `challenge-${stamp}`, email: `decoy-${i}@x.test`, code: '000000' })]
+    ];
+    for (const [path, body] of cases) {
+      let last;
+      for (let i = 0; i < 21; i += 1) last = await post(path, body(i));
+      assert.equal(last.status, 429, `${path}: the target is limited however the other fields change`);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('an upload over its limit is a 413 that says what to do', () => {
   const { sizeLimited, ALLOWED_IMAGE_MIME_TYPES, EXTENSION_FOR_MIME } = require('../src/helper/upload');
   const blob = require('../src/helper/blobUpload');

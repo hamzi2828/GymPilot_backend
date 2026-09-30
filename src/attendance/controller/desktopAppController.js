@@ -27,6 +27,7 @@ const { verifyQrToken } = require('../services/qrToken');
 const { findByCode } = require('../services/peopleDirectory');
 const { tenantKey } = require('../../platform/tenantContext');
 const { loginFilter } = require('../../services/username');
+const { passwordMatches } = require('../../services/passwordCheck');
 
 // The 1:N false-accept target the desktop matcher scales by candidate count.
 // 1-in-100,000 is the DigitalPersona default and what the reference reader
@@ -46,9 +47,14 @@ const MAX_ATTEMPTS = 8;
 const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 const attempts = new Map();
 
-function attemptKey(email, ip) {
+// Failures count against the account, whichever way it was named -- its
+// email or its username, in any case or spacing -- so switching between
+// them buys no extra guesses. A name that matches no account counts against
+// itself, as normalised by loginFilter.
+function attemptKey(user, filter, ip) {
+  const who = user ? `account:${user._id}` : `name:${filter.email || filter.username}`;
   // Scoped to the gym: the same address at two gyms is two accounts.
-  return `${tenantKey()}|${String(email || '').toLowerCase()}|${ip || ''}`;
+  return `${tenantKey()}|${who}|${ip || ''}`;
 }
 
 function isThrottled(key) {
@@ -115,11 +121,16 @@ module.exports = {
     const { email, password } = req.body || {};
 
     try {
-      if (!email || !password) {
+      // An email or a username, as the website's sign-in takes them. Spaces
+      // alone name nobody.
+      const filter = loginFilter(email);
+      if (!filter || !password) {
         return res.status(400).json({ success: false, message: 'Enter your email or username and password.' });
       }
 
-      const key = attemptKey(email, device.ip);
+      const user = await User.findOne(filter);
+
+      const key = attemptKey(user, filter, device.ip);
       if (isThrottled(key)) {
         return res.status(429).json({
           success: false,
@@ -127,11 +138,10 @@ module.exports = {
         });
       }
 
-      // An email or a username, as the website's sign-in takes them.
-      const filter = loginFilter(email);
-      const user = filter ? await User.findOne(filter) : null;
-
       if (!user || !user.password || !user.isActive) {
+        // The bcrypt work a real account costs, so a name nobody has is not
+        // answered faster (services/passwordCheck.js).
+        await passwordMatches(password, null);
         noteFailure(key);
         return res.status(401).json({ success: false, message: 'Invalid credentials.' });
       }

@@ -3,11 +3,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const guards = require('../../src/services/roleGuards');
+const { allowAll, fullPermissionMap } = require('../../src/config/permissions');
 
 const admin = { _id: 'a1', role: 'admin', isActive: true };
 const otherAdmin = { _id: 'a2', role: 'admin', isActive: true };
 const manager = { _id: 'm1', role: 'manager', isActive: true };
 const member = { _id: 'u1', role: 'user', isActive: true };
+
+const NONE = fullPermissionMap();
+const RECEPTION = fullPermissionMap({ users: 'manage', attendance: 'manage', 'package-orders': 'manage' });
+const MANAGER = fullPermissionMap({ users: 'manage', attendance: 'manage', 'package-orders': 'manage', staff: 'manage', reports: 'view' });
 
 test('nobody may change their own role', () => {
   assert.match(guards.roleChangeProblem({ actorId: 'a1', actorRole: 'admin', target: admin, nextRole: 'manager', activeAdmins: 5 }), /own role/);
@@ -56,4 +61,52 @@ test('creating an account straight into admin needs an admin', () => {
   assert.match(guards.createRoleProblem({ actorRole: 'manager', role: 'admin' }), /Only an administrator/);
   assert.equal(guards.createRoleProblem({ actorRole: 'admin', role: 'admin' }), null);
   assert.equal(guards.createRoleProblem({ actorRole: 'receptionist', role: 'user' }), null);
+});
+
+// Below an administrator, an account whose role reaches further than yours
+// is out of bounds whatever the action. Otherwise the set-password rule has
+// a way round it: demote the manager to member, set the member's password,
+// restore the role -- or create a manager and have the password emailed to
+// an address you typed.
+test('nobody moves an account out of or into a role that reaches further than their own', () => {
+  const receptionist = { _id: 'r1', role: 'receptionist', isActive: true };
+  const asReception = { actorId: 'r1', actorRole: 'receptionist', actorPermissions: RECEPTION, activeAdmins: 2 };
+
+  assert.match(
+    guards.roleChangeProblem({ ...asReception, target: manager, currentPermissions: MANAGER, nextRole: 'user', nextPermissions: NONE }),
+    /This account has more access than yours \(Reports\)/
+  );
+  assert.match(
+    guards.roleChangeProblem({ ...asReception, target: member, currentPermissions: NONE, nextRole: 'manager', nextPermissions: MANAGER }),
+    /That role has more access than yours \(Reports\)/
+  );
+  // Sideways and downwards are fine...
+  assert.equal(guards.roleChangeProblem({ ...asReception, target: member, currentPermissions: NONE, nextRole: 'receptionist', nextPermissions: RECEPTION }), null);
+  assert.equal(guards.roleChangeProblem({ ...asReception, target: { _id: 'r2', role: 'receptionist' }, currentPermissions: RECEPTION, nextRole: 'user', nextPermissions: NONE }), null);
+  // ...as is anything a manager does below themselves, and anything an administrator does.
+  assert.equal(guards.roleChangeProblem({ actorId: 'm1', actorRole: 'manager', actorPermissions: MANAGER, target: receptionist, currentPermissions: RECEPTION, nextRole: 'user', nextPermissions: NONE, activeAdmins: 2 }), null);
+  assert.equal(guards.roleChangeProblem({ actorId: 'a1', actorRole: 'admin', actorPermissions: allowAll(), target: manager, currentPermissions: MANAGER, nextRole: 'user', nextPermissions: NONE, activeAdmins: 2 }), null);
+});
+
+test('nobody deactivates or deletes an account that reaches further than their own', () => {
+  const asReception = { actorId: 'r1', actorRole: 'receptionist', actorPermissions: RECEPTION, activeAdmins: 2 };
+  assert.match(guards.statusChangeProblem({ ...asReception, target: manager, targetPermissions: MANAGER, isActive: false }), /more access than yours/);
+  assert.match(guards.deleteProblem({ ...asReception, target: manager, targetPermissions: MANAGER }), /more access than yours/);
+  assert.equal(guards.statusChangeProblem({ ...asReception, target: member, targetPermissions: NONE, isActive: false }), null);
+  assert.equal(guards.deleteProblem({ ...asReception, target: member, targetPermissions: NONE }), null);
+  // Switching someone back on stays allowed.
+  assert.equal(guards.statusChangeProblem({ ...asReception, target: manager, targetPermissions: MANAGER, isActive: true }), null);
+  assert.equal(guards.deleteProblem({ actorId: 'a1', actorRole: 'admin', actorPermissions: allowAll(), target: manager, targetPermissions: MANAGER, activeAdmins: 2 }), null);
+});
+
+test('nobody creates an account above their own, or gives a front-desk grant they lack', () => {
+  const asReception = { actorRole: 'receptionist', actorPermissions: RECEPTION, actorGrants: {} };
+  assert.match(guards.createRoleProblem({ ...asReception, role: 'manager', rolePermissions: MANAGER }), /That role has more access than yours \(Reports\)/);
+  assert.equal(guards.createRoleProblem({ ...asReception, role: 'receptionist', rolePermissions: RECEPTION }), null);
+  assert.match(guards.createRoleProblem({ ...asReception, role: 'receptionist', rolePermissions: RECEPTION, grants: { allowAttendanceApp: true } }), /front-desk app/);
+  assert.equal(guards.createRoleProblem({ ...asReception, actorGrants: { allowAttendanceApp: true }, role: 'receptionist', rolePermissions: RECEPTION, grants: { allowAttendanceApp: true } }), null);
+  assert.match(guards.grantProblem({ ...asReception, grants: { allowFingerprintEnrollment: true } }), /front-desk app/);
+  assert.equal(guards.grantProblem({ ...asReception, grants: {} }), null);
+  // An administrator creates and grants anything.
+  assert.equal(guards.createRoleProblem({ actorRole: 'admin', actorPermissions: allowAll(), role: 'manager', rolePermissions: MANAGER, grants: { allowAttendanceApp: true } }), null);
 });
