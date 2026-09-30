@@ -131,6 +131,19 @@ test('the Users list carries the ID and phone, and finds a member by either', as
   assert.deepEqual(byPhone.body.data.map((u) => u.firstName), ['Second']);
 });
 
+test('staff codes also count numerically across widths', async () => {
+  const Trainer = h.src('gymfolio/models/trainerModel');
+  const { ensureStaffCode } = h.src('attendance/services/peopleDirectory');
+  const made = await h.inGym(gym, async () => {
+    await h.ensureIndexes(Trainer);
+    await Trainer.create({ name: 'Old Width', role: 'Coach', staffCode: 'TR-101' });
+    for (const staffCode of ['TR-0102', 'TR-0103']) await Trainer.create({ name: `Taken ${staffCode}`, role: 'Coach', staffCode });
+    const fresh = await Trainer.create({ name: 'New Coach', role: 'Coach' });
+    return ensureStaffCode(fresh);
+  });
+  assert.equal(made, 'TR-0104');
+});
+
 test('a code imported in another width does not stop the series', async () => {
   // "GP-101" from an old system beside the series' own "GP-0102".."GP-0104":
   // as strings "GP-101" is the highest, so every try at the next code used

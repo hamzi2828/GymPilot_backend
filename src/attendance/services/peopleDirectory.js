@@ -118,10 +118,15 @@ async function assignMemberCode(user) {
 // collection would hand a trainer a code a receptionist already has, and the
 // front desk would have two people answering to "TR-0002".
 async function highestStaffSequence() {
-  const [fromTrainers, fromUsers] = await Promise.all([
-    Trainer.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) }).sort({ staffCode: -1 }).select('staffCode').lean(),
-    User.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) }).sort({ staffCode: -1 }).select('staffCode').lean()
-  ]);
+  // Numerically, as member codes are (nextSequentialCode): as strings "TR-101"
+  // sorts above "TR-0102", and the series would stall on a taken number.
+  const highest = (Model) =>
+    Model.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX + '\\d+$') })
+      .collation({ locale: 'en', numericOrdering: true })
+      .sort({ staffCode: -1 })
+      .select('staffCode')
+      .lean();
+  const [fromTrainers, fromUsers] = await Promise.all([highest(Trainer), highest(User)]);
 
   return [fromTrainers, fromUsers].reduce((max, row) => {
     if (!row || !row.staffCode) return max;

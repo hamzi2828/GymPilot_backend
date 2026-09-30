@@ -147,13 +147,15 @@ function cleanEmployment(input = {}, existing = {}, fallbackCurrency = FALLBACK_
 // Sequential, short enough to read across a desk. Same scheme trainers use, in
 // the same series, so the two never collide at the front desk.
 async function nextStaffCode() {
-  const [lastUser, lastTrainer] = await Promise.all([
-    User.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) }).sort({ staffCode: -1 }).select('staffCode').lean(),
-    Trainer.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX) })
+  // Numerically, as member codes are: as strings "TR-101" sorts above
+  // "TR-0102", and the next code would collide with a taken one.
+  const highest = (Model) =>
+    Model.findOne({ staffCode: new RegExp('^' + STAFF_PREFIX + '\\d+$') })
+      .collation({ locale: 'en', numericOrdering: true })
       .sort({ staffCode: -1 })
       .select('staffCode')
-      .lean()
-  ]);
+      .lean();
+  const [lastUser, lastTrainer] = await Promise.all([highest(User), highest(Trainer)]);
 
   const parse = (row) => {
     if (!row || !row.staffCode) return 0;
