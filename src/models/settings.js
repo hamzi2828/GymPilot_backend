@@ -157,6 +157,22 @@ const settingsSchema = new mongoose.Schema(
       trim: true,
       default: ''
     },
+    // Where members write to the gym: the contact page, the structured data
+    // and the phone app's "contact us" (services/branding.js). Not the
+    // address emails are sent from -- that is smtp.fromEmail.
+    contactEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: ''
+    },
+    // A sentence or two about the gym. The site's description wherever the
+    // gym has not written a search description of its own (seo.description).
+    siteDescription: {
+      type: String,
+      trim: true,
+      default: ''
+    },
 
     // Top Slider Banner Text
     topSliderText: {

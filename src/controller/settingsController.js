@@ -135,6 +135,31 @@ function mergeMessaging(existing = {}, incoming = {}, warnings = []) {
   };
 }
 
+// A social profile link as the footer and the structured data will use it.
+// Blank clears it; "instagram.com/ironworks" gains its https://; anything
+// with another scheme (javascript:, data:) is refused, since the value goes
+// straight into an <a href> on every page of the site. Returns null for a
+// refused value.
+function webLink(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text.replace(/^\/+/, '')}`;
+  let url;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  return withScheme.slice(0, 500);
+}
+
+// Loose on purpose: the address is shown and linked with mailto:, not
+// delivered to, so all it has to be is one address.
+function looksLikeEmail(value) {
+  return /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(value);
+}
+
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -173,6 +198,8 @@ const settingsController = {
         footerLogoHeight: settings.footerLogoHeight || 40,
         mobileNumber: settings.mobileNumber || '',
         address: settings.address || '',
+        contactEmail: settings.contactEmail || '',
+        siteDescription: settings.siteDescription || '',
         currency: settings.currency,
         taxRate: settings.taxRate || 0,
         topSliderText: settings.topSliderText || '',
@@ -328,6 +355,8 @@ const settingsController = {
         siteUrl,
         mobileNumber,
         address,
+        contactEmail,
+        siteDescription,
         timezone,
         dateFormat,
         emailNotifications,
@@ -503,6 +532,14 @@ const settingsController = {
       if (siteUrl !== undefined) updateData.siteUrl = String(siteUrl ?? '').trim();
       if (mobileNumber !== undefined) updateData.mobileNumber = String(mobileNumber ?? '').trim();
       if (address !== undefined) updateData.address = String(address ?? '').trim();
+      if (contactEmail !== undefined) {
+        const email = String(contactEmail ?? '').trim().toLowerCase();
+        if (email && !looksLikeEmail(email)) {
+          return res.status(400).json({ success: false, message: `"${email.slice(0, 80)}" is not an email address` });
+        }
+        updateData.contactEmail = email.slice(0, 200);
+      }
+      if (siteDescription !== undefined) updateData.siteDescription = String(siteDescription ?? '').trim().slice(0, 1000);
       if (timezone !== undefined) updateData.timezone = timezone;
       if (dateFormat !== undefined) updateData.dateFormat = dateFormat;
       if (emailNotifications !== undefined) updateData.emailNotifications = Boolean(emailNotifications);
@@ -566,11 +603,21 @@ const settingsController = {
       if (footerLogoHeight !== undefined) updateData.footerLogoHeight = Number(footerLogoHeight);
 
       // Handle social links
-      if (youtubeUrl !== undefined) updateData.youtubeUrl = youtubeUrl;
-      if (facebookUrl !== undefined) updateData.facebookUrl = facebookUrl;
-      if (instagramUrl !== undefined) updateData.instagramUrl = instagramUrl;
-      if (twitterUrl !== undefined) updateData.twitterUrl = twitterUrl;
-      if (tiktokUrl !== undefined) updateData.tiktokUrl = tiktokUrl;
+      const socials = [
+        ['youtubeUrl', youtubeUrl, 'YouTube'],
+        ['facebookUrl', facebookUrl, 'Facebook'],
+        ['instagramUrl', instagramUrl, 'Instagram'],
+        ['twitterUrl', twitterUrl, 'X (Twitter)'],
+        ['tiktokUrl', tiktokUrl, 'TikTok']
+      ];
+      for (const [key, value, label] of socials) {
+        if (value === undefined) continue;
+        const link = webLink(value);
+        if (link === null) {
+          return res.status(400).json({ success: false, message: `The ${label} link must be a web address (https://…)` });
+        }
+        updateData[key] = link;
+      }
 
       // Handle payment methods array
       if (paymentMethods && Array.isArray(paymentMethods)) {
