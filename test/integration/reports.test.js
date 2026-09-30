@@ -222,3 +222,86 @@ test('every export also comes as a real .xlsx: the CSV\'s rows, amounts as numbe
     assert.deepEqual(members.map((row) => row.Joined).sort(), [dateSerial('2026-08-03'), dateSerial('2026-08-03'), dateSerial('2026-08-20')]);
   });
 });
+
+test('daily sales: each day\'s money by heading, adding up to the accounts screen\'s income', async () => {
+  await h.inGym(gym, async () => {
+    const [res, overview] = await Promise.all([
+      h.call(reports.dailySales, { query: AUGUST }),
+      h.call(accounts.overview, { query: AUGUST })
+    ]);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const r = res.body;
+    assert.equal(r.base_currency, 'GBP');
+    assert.equal(r.days.length, 31, 'every day of August, quiet ones included');
+    const day = (date) => r.days.find((d) => d.date === date);
+    assert.equal(day('2026-08-03').new_signups, 100);
+    assert.equal(day('2026-08-04').pos, 42, 'the no-currency sale is the gym\'s; the refunded one is not takings');
+    assert.equal(day('2026-08-05').new_signups, 40);
+    assert.equal(day('2026-08-06').refunds, -40);
+    assert.equal(day('2026-08-06').total, -40);
+    assert.equal(r.totals.total, 142);
+    assert.equal(r.totals.total, overview.body.result.gross_income, 'the same income as the accounts screen');
+    assert.deepEqual(r.by_method, [{ method: 'cash', label: 'Cash', amount: 142 }]);
+    assert.deepEqual(r.other_currency, { count: 2, currencies: ['PKR'] });
+  });
+});
+
+test('daily sales read the admission / trainer fee split and the payment\'s own method from the ledger rows', async () => {
+  const L = h.src('accounts/services/ledger');
+  const original = L.membershipPaymentStages;
+  // The ledger's rows as the membership work shapes them: R-1's 100 was 20
+  // admission, 10 trainer fee (the membership share left for the report to
+  // work out), paid by JazzCash; R-2 was an instalment of dues.
+  L.membershipPaymentStages = (...args) => [
+    ...original(...args),
+    {
+      $addFields: {
+        admission: { $cond: [{ $eq: ['$orderNumber', 'R-1'] }, 20, '$admission'] },
+        trainerFee: { $cond: [{ $eq: ['$orderNumber', 'R-1'] }, 10, '$trainerFee'] },
+        method: { $cond: [{ $eq: ['$orderNumber', 'R-1'] }, 'jazzcash', '$method'] },
+        kind: { $cond: [{ $eq: ['$orderNumber', 'R-2'] }, 'installment', '$kind'] }
+      }
+    }
+  ];
+  try {
+    await h.inGym(gym, async () => {
+      const res = await h.call(reports.dailySales, { query: AUGUST });
+      const day = (date) => res.body.days.find((d) => d.date === date);
+      assert.deepEqual(
+        { new_signups: day('2026-08-03').new_signups, admission: day('2026-08-03').admission, trainer_fees: day('2026-08-03').trainer_fees, total: day('2026-08-03').total },
+        { new_signups: 70, admission: 20, trainer_fees: 10, total: 100 }
+      );
+      assert.equal(day('2026-08-05').dues, 40);
+      assert.equal(day('2026-08-05').new_signups, 0);
+      assert.equal(res.body.totals.total, 142, 'a different split, the same money');
+      assert.deepEqual(res.body.by_method.map((m) => [m.label, m.amount]), [['JazzCash', 100], ['Cash', 42]]);
+    });
+  } finally {
+    L.membershipPaymentStages = original;
+  }
+});
+
+test('daily sales export: CSV with a totals row; a workbook with the days and a payment-method sheet', async () => {
+  const { unzip, readSheet, sheetNames, sheetObjects } = require('../helpers/readXlsx');
+  const { dateSerial } = h.src('services/xlsx');
+  await h.inGym(gym, async () => {
+    const csv = await h.call(reports.export, { params: { kind: 'daily-sales' }, query: AUGUST });
+    assert.equal(csv.statusCode, 200);
+    assert.match(csv.headers['content-disposition'], /daily_sales_2026-08-01_2026-08-31\.csv/);
+    const lines = csvRows(csv);
+    assert.deepEqual(lines[0], ['Date', 'New sign-ups', 'Renewals', 'Admission fees', 'Trainer fees', 'Dues collected', 'Membership refunds', 'POS sales', 'Total (GBP)', 'Cash', 'Membership payments', 'Till sales']);
+    assert.equal(lines.length, 1 + 31 + 1);
+    assert.deepEqual(lines[lines.length - 1].slice(0, 9), ['Total', '140', '0', '0', '0', '0', '-40', '42', '142']);
+
+    const book = await h.call(reports.export, { params: { kind: 'daily-sales' }, query: { ...AUGUST, format: 'xlsx' } });
+    const files = unzip(book.body);
+    assert.deepEqual(sheetNames(files), ['Daily sales', 'By payment method']);
+    const days = readSheet(files, 1);
+    assert.equal(days.length, 1 + 31 + 1);
+    assert.equal(days[1][0].value, dateSerial('2026-08-01'), 'dates are dates');
+    const totals = days[days.length - 1];
+    assert.ok(totals.every((c) => c.style === 1), 'the totals row is bold');
+    assert.deepEqual(totals.slice(0, 9).map((c) => c.value), ['Total', 140, 0, 0, 0, 0, -40, 42, 142]);
+    assert.deepEqual(sheetObjects(files, 2), [{ 'Payment method': 'Cash', 'Amount (GBP)': 142 }, { 'Payment method': 'Total', 'Amount (GBP)': 142 }]);
+  });
+});

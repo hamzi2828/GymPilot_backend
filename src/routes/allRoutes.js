@@ -142,6 +142,7 @@ router.delete('/admin/lockers/:id', auth, requirePermission('lockers', 'manage')
 // Reports and CSV exports -- see controller/reportsController.js.
 const reportsController = require('../controller/reportsController');
 router.get('/admin/reports/overview', auth, requirePermission('reports'), reportsController.overview);
+router.get('/admin/reports/daily-sales', auth, requirePermission('reports'), reportsController.dailySales);
 router.get('/admin/reports/export/:kind', auth, requirePermission('reports'), reportsController.export);
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ const T = require('../attendance/services/timeUtils');
 const { sendCsv } = require('../services/csv');
 const { sendXlsx } = require('../services/xlsx');
 const { countLiveMembers } = require('../gymfolio/services/membershipExpiry');
+const { dailySales, exportColumns: dailySalesColumns } = require('../services/dailySales');
 
 const EXPIRING_WINDOW_DAYS = 14;
 const EXPORT_LIMIT = 20000;
@@ -289,6 +290,21 @@ module.exports = {
     }
   },
 
+  // GET /admin/reports/daily-sales?from=&to=
+  //
+  // Every day in the range: new sign-ups, renewals, admission and trainer
+  // fees, dues collected, refunds and the till, and the totals by payment
+  // method -- see services/dailySales.js for what goes in which column.
+  dailySales: async (req, res) => {
+    try {
+      const report = await dailySales(L.readRange(req.query));
+      return res.json({ success: true, ...report });
+    } catch (error) {
+      console.error('[reports] daily sales failed:', error);
+      return fail(res, 500, 'Could not build the daily sales report');
+    }
+  },
+
   // GET /admin/reports/export/:kind?from=&to=[&format=xlsx]
   export: async (req, res) => {
     try {
@@ -318,6 +334,32 @@ module.exports = {
           { key: 'createdAt', label: 'Joined', type: 'date', value: (r) => T.dateKey(r.createdAt) },
           { key: 'lastLogin', label: 'Last login', type: 'date', value: (r) => (r.lastLogin ? T.dateKey(r.lastLogin) : '') }
         ], rows);
+      }
+
+      if (kind === 'daily-sales') {
+        const report = await dailySales(range);
+        const columns = dailySalesColumns(report);
+        const name = `daily_sales_${stamp}`;
+        // The CSV is one table with the totals as its last row; the workbook
+        // has the same table (totals in bold) and the payment methods on a
+        // sheet of their own.
+        if (exportFormat(req) === 'xlsx') {
+          return sendXlsx(res, `${name}.xlsx`, columns, report.days, {
+            sheets: [
+              { name: 'Daily sales', columns, rows: report.days, footer: report.totals },
+              {
+                name: 'By payment method',
+                columns: [
+                  { key: 'label', label: 'Payment method' },
+                  { key: 'amount', label: `Amount (${report.base_currency})` }
+                ],
+                rows: report.by_method,
+                footer: { label: 'Total', amount: report.totals.total }
+              }
+            ]
+          });
+        }
+        return sendCsv(res, `${name}.csv`, columns, [...report.days, report.totals]);
       }
 
       if (kind === 'orders') {
@@ -437,7 +479,7 @@ module.exports = {
         ], rows);
       }
 
-      return fail(res, 404, 'Unknown export. Try members, orders, attendance, bookings, leads, pt-sessions, expenses or payslips.');
+      return fail(res, 404, 'Unknown export. Try members, orders, daily-sales, attendance, bookings, leads, pt-sessions, expenses or payslips.');
     } catch (error) {
       console.error('[reports] export failed:', error);
       return fail(res, 500, 'Could not build the export');
