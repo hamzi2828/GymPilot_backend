@@ -270,6 +270,42 @@ async function endEverySession(db, liveHighest) {
   require('../middleware/auth').forgetGymSessions();
 }
 
+// The phone app finds a member's gym by username in the platform-wide
+// directory (platform_member_logins), which is not in a gym's backup and so
+// was left as it was: members deleted since the backup came back unable to
+// use the app, and accounts made since kept rows pointing at nobody. The
+// gym's rows are rebuilt from the restored accounts instead. A username a
+// member of another gym has taken since stays theirs -- usernames are
+// unique across the platform -- and is reported, so staff can give the
+// restored member a new one.
+async function rebuildMemberLogins(db, gym) {
+  const MemberDirectory = require('../platform/models/memberDirectoryModel');
+  const accounts = await db.collection('users').find({ username: { $nin: [null, ''] } }, { projection: { username: 1 } }).toArray();
+  await MemberDirectory.deleteMany({ gymId: gym._id });
+  const at = new Date();
+  const rows = accounts.map((user) => ({
+    username: String(user.username).toLowerCase().trim(),
+    gymId: gym._id,
+    gymSlug: gym.slug,
+    userId: user._id,
+    createdAt: at,
+    updatedAt: at
+  }));
+  const taken = [];
+  if (rows.length) {
+    try {
+      // Straight through the driver: one round trip, and every row that can
+      // go in does, whatever the others do.
+      await MemberDirectory.collection.insertMany(rows, { ordered: false });
+    } catch (error) {
+      const failures = error.writeErrors ? [].concat(error.writeErrors) : [];
+      if (!failures.length || failures.some((failure) => failure.code !== 11000)) throw error;
+      for (const failure of failures) taken.push(rows[failure.index].username);
+    }
+  }
+  return { published: rows.length - taken.length, taken };
+}
+
 // What this process remembers about the gym, read from the collections just
 // replaced. Other instances catch up as their caches expire (a minute at most).
 function forgetCachedState() {
@@ -346,6 +382,14 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
       console.error(`[restore] ${gym.slug}: could not end the sessions:`, error);
       throw refusal(500, 'RESTORE_SIGN_OUT_FAILED', 'The backup was restored, but not every session could be ended. Run the restore again to end them.');
     }
+    let memberLogins;
+    try {
+      memberLogins = await rebuildMemberLogins(db, gym);
+    } catch (error) {
+      // The gym itself is restored; only the app's lookup is behind.
+      console.error(`[restore] ${gym.slug}: could not rebuild the phone app's usernames:`, error);
+      memberLogins = { error: "The phone app's usernames could not be rebuilt: run scripts/assignUsernames.js --repair for this gym." };
+    }
 
     // An uploaded file has done its job.
     if (entry.kind === 'upload') {
@@ -358,6 +402,9 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
       dropped,
       kept: [...KEPT_ON_RESTORE],
       safetyBackup: String(safety._id),
+      // The phone app's usernames: how many were published, and any taken
+      // by another gym's member since the backup.
+      memberLogins,
       // Everyone, the admin who ran it included, signs in again (step 7).
       signedOut: true
     };

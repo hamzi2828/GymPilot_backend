@@ -407,6 +407,55 @@ test('a restore ends every session, including ones ended since the backup that i
   });
 });
 
+test("a restore puts the phone app's usernames back as the restored accounts have them", async () => {
+  // The platform-wide directory the app signs in against is not in a gym's
+  // backup, so a restore used to leave it as it was: members deleted since
+  // came back unable to use the app, and accounts made since kept rows
+  // pointing at nobody.
+  const MemberDirectory = h.src('platform/models/memberDirectoryModel');
+  await h.ensureIndexes(MemberDirectory);
+  let backupId;
+  let leaving;
+  let renamed;
+  let renamedFrom;
+  let newcomer;
+  let clash;
+  await h.inGym(gym, async () => {
+    backupId = (await h.call(controller.run, as())).body.data.id;
+    leaving = await User.findOne({ email: 'm7@restore.test' }).lean();
+    clash = await User.findOne({ email: 'm9@restore.test' }).lean();
+    for (const gone of [leaving, clash]) {
+      await User.deleteOne({ _id: gone._id });
+      await MemberDirectory.withdraw(gone);
+    }
+    renamed = await User.findOne({ email: 'm8@restore.test' });
+    renamedFrom = renamed.username;
+    renamed.username = 'renamedsince1';
+    await renamed.save();
+    newcomer = await User.create({ firstName: 'Newer', lastName: 'Since', email: 'newer@restore.test', role: 'user' });
+  });
+  // A member of another gym is given a username freed since the backup.
+  await h.inGym(intruder, () => User.create({ firstName: 'Sam', lastName: 'Squatter', email: 'sam@intruder.test', role: 'user', username: clash.username }));
+
+  await h.inGym(gym, async () => {
+    const done = await restore(backupId, 'restore-gym');
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+
+    const back = await MemberDirectory.lookup(leaving.username);
+    assert.ok(back, 'the member deleted since is found by the app again');
+    assert.equal(String(back.userId), String(leaving._id));
+    assert.equal(String(back.gymId), String(gym._id));
+    assert.equal(String((await MemberDirectory.lookup(renamedFrom)).userId), String(renamed._id));
+    assert.equal(await MemberDirectory.lookup('renamedsince1'), null);
+    assert.equal(await MemberDirectory.lookup(newcomer.username), null, 'an account the backup does not have holds no username');
+
+    // Taken by another gym since: it stays theirs, and the restore says so.
+    assert.equal(String((await MemberDirectory.lookup(clash.username)).gymId), String(intruder._id));
+    assert.deepEqual(done.body.data.memberLogins.taken, [clash.username]);
+    assert.equal(await MemberDirectory.countDocuments({ gymId: gym._id }), (await User.countDocuments({ username: { $nin: [null, ''] } })) - 1);
+  });
+});
+
 test('the tidy-up after the safety backup never removes the backup being restored', async () => {
   // Storing the safety backup prunes the gym's backups, which used to run
   // before the file being restored was opened: an upload over a day old, or

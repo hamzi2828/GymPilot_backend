@@ -199,6 +199,10 @@ downloaded. Administrators only, every step in the audit log:
    backup); pending reset links and sign-in codes are cleared; every desk
    sign-in is revoked; the session cache is dropped. The answer says
    everyone, the admin included, must sign in again (`signedOut: true`).
+8. The phone app's usernames (`platform_member_logins`, not in a gym's
+   backup) are rebuilt from the restored accounts. A username another gym's
+   member has taken since stays theirs and is listed in `memberLogins.taken`,
+   for staff to give the restored member a new one.
 
 Never touched: the platform's and MongoDB's collections, and the admin audit
 log (`gym_admin_audit_logs`), which keeps its history — a restore must not be
