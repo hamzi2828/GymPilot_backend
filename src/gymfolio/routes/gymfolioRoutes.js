@@ -228,6 +228,10 @@ router.get('/package-orders/expiring', auth, requirePermission('package-orders',
 router.get('/package-orders/expired', auth, requirePermission('package-orders', 'view'), membershipListsController.expired);
 // A read, sent as a POST only because 500 ids do not fit in an address.
 router.post('/package-orders/summary', auth, requirePermission('package-orders', 'view'), membershipListsController.summary);
+// The fee desk: find a member, and what they hold and owe (controller/feeDeskController.js).
+const feeDeskController = require('../controller/feeDeskController');
+router.get('/package-orders/desk/members', auth, requirePermission('package-orders', 'view'), feeDeskController.search);
+router.get('/package-orders/desk/members/:userId', auth, requirePermission('package-orders', 'view'), feeDeskController.member);
 router.get('/package-orders/:id', auth, gymfolioPaymentController.getOrderById);
 router.put('/package-orders/:id/status', auth, requirePermission('package-orders'), gymfolioPaymentController.updateOrderStatus);
 router.post('/package-orders/:id/cancel-subscription', auth, gymfolioPaymentController.cancelSubscription);
