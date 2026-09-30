@@ -624,6 +624,23 @@ function stripeBilled(order) {
   return p.method === 'stripe' || !!p.stripeSubscriptionId || !!p.stripePaymentIntentId || !!p.stripeSessionId;
 }
 
+// Whether a refund holds the order right now: claimed, and not so long ago
+// that the refund must have died part-way (REFUND_CLAIM_MS, with refund
+// below, which lets the next attempt take such a claim over).
+function refundUnderWay(order) {
+  const claimedAt = order && order.refund && order.refund.claimedAt;
+  return !!claimedAt && Date.now() - new Date(claimedAt).getTime() < REFUND_CLAIM_MS;
+}
+
+// The same, as a query: no claim, or only a dead one.
+function refundNotClaimed() {
+  return [{ 'refund.claimedAt': null }, { 'refund.claimedAt': { $lt: new Date(Date.now() - REFUND_CLAIM_MS) } }];
+}
+
+function refundInProgress() {
+  return new MembershipError('This order is being refunded; no payment can be taken against it.', 409, 'REFUND_IN_PROGRESS');
+}
+
 /**
  * Money received at the desk against an order's balance due.
  *
@@ -639,7 +656,7 @@ function stripeBilled(order) {
  * second is told the balance moved.
  *
  * @throws {MembershipError} 409 STRIPE_BILLED / NOT_PAID / NO_BALANCE /
- *   BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
+ *   REFUND_IN_PROGRESS / BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
  *   than the balance); 422 PAYMENT_METHOD_INVALID
  */
 async function recordPayment(order, { amount, method, note = '', by = null, now = new Date() } = {}) {
@@ -653,6 +670,10 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
       'NOT_PAID'
     );
   }
+  // A refund under way gives back what had come in when it started and
+  // then clears the balance: money taken in the meantime would be neither
+  // refunded nor owed.
+  if (refundUnderWay(order)) throw refundInProgress();
   const balance = round2(order.payment.balanceDue || 0);
   if (!(balance > 0)) throw new MembershipError('Nothing is owed on this order.', 409, 'NO_BALANCE');
 
@@ -679,7 +700,8 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
   });
 
   const updated = await PackageOrder.findOneAndUpdate(
-    { _id: order._id, 'payment.status': 'paid', 'payment.balanceDue': order.payment.balanceDue },
+    // ...and no refund claimed since the order was read.
+    { _id: order._id, 'payment.status': 'paid', 'payment.balanceDue': order.payment.balanceDue, $or: refundNotClaimed() },
     {
       $set: {
         'payment.installments': parts,
@@ -691,6 +713,8 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
     { new: true }
   );
   if (!updated) {
+    const fresh = await PackageOrder.findById(order._id).select('refund.claimedAt').lean();
+    if (fresh && refundUnderWay(fresh)) throw refundInProgress();
     throw new MembershipError('The balance changed while this payment was being recorded. Reload the order and try again.', 409, 'BALANCE_CHANGED');
   }
   return updated;
