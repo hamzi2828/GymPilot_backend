@@ -457,7 +457,11 @@ module.exports = {
       const statuses = status === 'all' ? ['paid', 'refunded', 'pending', 'failed'] : [status];
 
       const match = {};
-      if (req.query.method && req.query.method !== 'all') match['payment.method'] = String(req.query.method);
+      // The method is each payment's own -- a part paid another way than
+      // the order says its own, as by_method totals it -- so it is matched
+      // on the payment rows below, not on the order. A refund goes back the
+      // way the order was paid.
+      const method = req.query.method && req.query.method !== 'all' ? String(req.query.method) : null;
       if (req.query.package && req.query.package !== 'all') {
         match['packageDetails.name'] = String(req.query.package);
       }
@@ -474,6 +478,7 @@ module.exports = {
       const [[facets], refundRows] = await Promise.all([
         PackageOrder.aggregate([
           ...L.membershipPaymentStages(range, match, { statuses }),
+          ...(method ? [{ $match: { method } }] : []),
           {
             $facet: {
               rows: [{ $sort: { at: -1, _id: -1 } }, { $limit: SALES_ROW_LIMIT }],
@@ -493,7 +498,10 @@ module.exports = {
         ]),
         // Refunds given in the period, when the filter lets refunded orders in.
         statuses.includes('refunded')
-          ? PackageOrder.aggregate([...L.membershipRefundStages(range, match), { $group: { _id: '$currency', total: { $sum: '$amount' } } }])
+          ? PackageOrder.aggregate([
+              ...L.membershipRefundStages(range, method ? { ...match, 'payment.method': method } : match),
+              { $group: { _id: '$currency', total: { $sum: '$amount' } } }
+            ])
           : []
       ]);
 
