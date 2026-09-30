@@ -216,6 +216,13 @@ did include the fee (subtotal = price + fee), fill it in per gym:
     node scripts/backfillOrderFees.js --gym <slug>           # report only
     node scripts/backfillOrderFees.js --gym <slug> --apply   # write it
 
+An old order saved since (frozen, cancelled, updated by a Stripe webhook)
+has the schema's default `0` in the field rather than no field, and is found
+too: one with no trainer's fee and no trainer (trainers were first sold
+after the split, and every order written since records the fee it charged).
+`--before YYYY-MM-DD` — the day the server started recording the fee —
+limits those to orders created before it (`scripts/lib/orderFees.js`).
+
 ## Member lists for the desk — `src/gymfolio/services/membershipLists.js`
 
 One row per **member**, not per order, for the desk's screens to be built
