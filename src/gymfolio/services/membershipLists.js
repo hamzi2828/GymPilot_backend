@@ -403,6 +403,7 @@ module.exports = {
   expiredList,
   summaryFor,
   MAX_SUMMARY_USERS,
+  IS_MEMBERSHIP,
   memberCard,
   membersById,
   pageOf,
