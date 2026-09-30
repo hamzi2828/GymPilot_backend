@@ -314,13 +314,73 @@ function inRangeOf(range) {
   return { $gte: range.start, $lt: range.end };
 }
 
+// The order's own payment -- as opposed to its renewals -- as entries.
+//
+// Paid in parts (payment.installments, gymfolio/services/orderMoney.js),
+// each part is a payment of its own on the day it arrived: the first is the
+// 'initial' one, the rest 'installment'. Each carries its own admission and
+// trainer-fee shares and, when it was paid another way than the order, its
+// own method. Otherwise the order was paid at once: one 'initial' entry for
+// what was taken -- payment.amountPaid when the order says (it may be less
+// than the amount, even nothing yet), else all of it, as on every order
+// from before part payments -- its shares allocated admission first.
+function ownPaymentEntries() {
+  const parts = { $ifNull: ['$payment.installments', []] };
+  const joiningFee = { $ifNull: ['$payment.joiningFee', 0] };
+  const trainerFee = { $ifNull: ['$payment.trainerFee', 0] };
+  const taken = { $ifNull: ['$payment.amountPaid', '$payment.amount'] };
+  const admission = { $min: [joiningFee, taken] };
+  const methodOf = (value) => ({ $cond: [{ $gt: [{ $strLenCP: { $ifNull: [value, ''] } }, 0] }, value, '$payment.method'] });
+
+  const whole = {
+    kind: 'initial',
+    at: firstPaymentAtExpr(),
+    amount: taken,
+    admission,
+    trainerFee: { $min: [trainerFee, { $max: [0, { $subtract: [taken, admission] }] }] },
+    method: '$payment.method',
+    currency: '$payment.currency'
+  };
+
+  const inParts = {
+    $map: {
+      input: { $range: [0, { $size: parts }] },
+      as: 'i',
+      in: {
+        $let: {
+          vars: { part: { $arrayElemAt: [parts, '$$i'] } },
+          in: {
+            kind: { $cond: [{ $eq: ['$$i', 0] }, 'initial', 'installment'] },
+            at: '$$part.at',
+            amount: { $ifNull: ['$$part.amount', 0] },
+            admission: { $ifNull: ['$$part.joiningFee', 0] },
+            trainerFee: { $ifNull: ['$$part.trainerFee', 0] },
+            method: methodOf('$$part.method'),
+            currency: '$payment.currency'
+          }
+        }
+      }
+    }
+  };
+
+  return { $cond: [{ $gt: [{ $size: parts }, 0] }, inParts, [whole]] };
+}
+
 /**
  * Aggregation stages that turn orders into the payments received in a range,
- * one document per payment: the first one and each renewal.
+ * one document per payment: the first one, each later part of an order paid
+ * in parts, and each renewal.
  *
  * Output: { _id (order), orderNumber, userId, customer, email, packageName,
  * method, paymentStatus, orderStatus, startDate, endDate, kind ('initial' |
- * 'renewal'), at, amount, currency (upper case) }
+ * 'installment' | 'renewal'), at, amount, admission, trainerFee, membership,
+ * currency (upper case) }
+ *
+ * `amount` is the whole payment; `admission` and `trainerFee` are the
+ * joining fee and personal trainer's fee inside it, and `membership` the
+ * rest (amount - admission - trainerFee). A renewal carries neither fee.
+ * `method` is how THIS payment was made: a part paid another way than the
+ * order says its own.
  *
  * `match` narrows the orders (method, package, search); `statuses` defaults
  * to the ones where money came in. Pending and failed orders only appear when
@@ -336,6 +396,9 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
       '$payment.currency'
     ]
   };
+  const amount = { $ifNull: ['$entries.amount', 0] };
+  const admission = { $ifNull: ['$entries.admission', 0] };
+  const trainerFee = { $ifNull: ['$entries.trainerFee', 0] };
 
   return [
     {
@@ -345,7 +408,14 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
           ...(Object.keys(match).length ? [match] : []),
           // Coarse, index-friendly: anything with a payment that might be in
           // range. The exact cut is made per payment after the unwind.
-          { $or: [{ 'payment.paidAt': inRange }, { createdAt: inRange }, { 'subscription.renewals.at': inRange }] }
+          {
+            $or: [
+              { 'payment.paidAt': inRange },
+              { createdAt: inRange },
+              { 'subscription.renewals.at': inRange },
+              { 'payment.installments.at': inRange }
+            ]
+          }
         ]
       }
     },
@@ -363,12 +433,20 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
         endDate: '$subscription.endDate',
         entries: {
           $concatArrays: [
-            [{ kind: 'initial', at: firstPaymentAtExpr(), amount: '$payment.amount', currency: '$payment.currency' }],
+            ownPaymentEntries(),
             {
               $map: {
                 input: { $ifNull: ['$subscription.renewals', []] },
                 as: 'renewal',
-                in: { kind: 'renewal', at: '$$renewal.at', amount: '$$renewal.amount', currency: renewalCurrency }
+                in: {
+                  kind: 'renewal',
+                  at: '$$renewal.at',
+                  amount: '$$renewal.amount',
+                  admission: 0,
+                  trainerFee: 0,
+                  method: '$payment.method',
+                  currency: renewalCurrency
+                }
               }
             }
           ]
@@ -384,14 +462,17 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
         customer: 1,
         email: 1,
         packageName: 1,
-        method: 1,
+        method: { $ifNull: ['$entries.method', '$method'] },
         paymentStatus: 1,
         orderStatus: 1,
         startDate: 1,
         endDate: 1,
         kind: '$entries.kind',
         at: '$entries.at',
-        amount: { $ifNull: ['$entries.amount', 0] },
+        amount,
+        admission,
+        trainerFee,
+        membership: { $round: [{ $subtract: [amount, { $add: [admission, trainerFee] }] }, 2] },
         currency: { $toUpper: { $ifNull: ['$entries.currency', ''] } }
       }
     }

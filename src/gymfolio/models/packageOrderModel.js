@@ -42,8 +42,10 @@ const packageOrderSchema = new mongoose.Schema(
         trialDays: { type: Number, default: 0 }
       }
     },
-    // Who the membership is for. Name and email are required because an order
-    // that identifies nobody is not an order.
+    // Who the membership is for. The name is required because an order that
+    // identifies nobody is not an order. The email is not: a member may be
+    // on file with only a phone number, and an order for them is no less
+    // real (the member record says who they are).
     //
     // Phone and country are NOT required, deliberately. They come from the
     // public checkout form, which asks for them -- but an admin assigning a
@@ -55,7 +57,7 @@ const packageOrderSchema = new mongoose.Schema(
     // prompt for what is actually missing.
     customerInfo: {
       fullName: { type: String, required: true },
-      email: { type: String, required: true },
+      email: { type: String, default: '' },
       phone: { type: String, default: '' },
       country: { type: String, default: '' },
       address: String,
@@ -94,8 +96,17 @@ const packageOrderSchema = new mongoose.Schema(
       lastPaidAt: { type: Date, default: null },
       transactionId: String,
 
+      // ---- What the amount is made of (gymfolio/services/orderMoney.js) ----
+      // The admission fee and the personal trainer's fee charged on THIS
+      // order, inside `amount`; the membership is the rest. joiningFee is 0
+      // on a renewal, a package change, or when waived. Orders from before
+      // these existed read 0 (scripts/backfillOrderFees.js fills joiningFee
+      // in where it was charged).
+      joiningFee: { type: Number, default: 0 },
+      trainerFee: { type: Number, default: 0 },
+
       // ---- Discounts ----
-      subtotal: { type: Number, default: null },        // list price (+ joining fee) before discount
+      subtotal: { type: Number, default: null },        // list price (+ joining and trainer fees) before discount
       discountAmount: { type: Number, default: 0 },
       discountNote: { type: String, default: '' },      // e.g. credit for unused days on an upgrade
       couponCode: { type: String, default: '' },

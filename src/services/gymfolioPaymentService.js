@@ -50,6 +50,9 @@ function recordTrialCharge(order, amountMinor, currency) {
   if (!(Number(billing.trialDays) > 0)) return;
   if (amountMinor === undefined || amountMinor === null || !Number.isFinite(Number(amountMinor))) return;
   order.payment.amount = fromMinorUnits(amountMinor, currency);
+  // What was taken is the joining fee, or part of it: the admission share
+  // can never be more than the payment it is part of.
+  order.payment.joiningFee = Math.min(round2(order.payment.joiningFee), order.payment.amount);
 }
 
 async function memberFor(order) {
@@ -207,6 +210,10 @@ class GymfolioPaymentService {
       payment: {
         method: 'stripe',
         amount: round2(Math.max(0, listPrice + joiningFee - discount)),
+        // The coupon is worked out on the package price alone, so the fee
+        // is charged whole (a trial's charge is re-read: recordTrialCharge).
+        joiningFee,
+        trainerFee: 0,
         subtotal: round2(listPrice + joiningFee),
         discountAmount: discount,
         couponCode: coupon ? coupon.code : '',

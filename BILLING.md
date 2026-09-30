@@ -115,7 +115,31 @@ number per gym (`<prefix>-<year>-<seq>`, prefix under **Settings → Invoices**)
 tax shown as *included* in the price at **Settings → Tax rate**, rendered as a
 PDF on demand (`GET /package-orders/:id/invoice.pdf`) and attached to the
 membership-confirmation email. Members download theirs from the account page;
-staff from Package Orders.
+staff from Package Orders. The admission fee and the personal trainer's fee
+are lines of their own under the package.
+
+## What an order's money is made of — `src/gymfolio/services/orderMoney.js`
+
+`payment.amount` is the whole order. Inside it, every order written records
+`payment.joiningFee` (the admission fee charged on *this* order: 0 on a
+renewal, a package change, or when waived) and `payment.trainerFee` (the
+personal trainer's fee); the membership is the rest, `amount − joiningFee −
+trainerFee`, never below 0. A discount comes off the package price only;
+an amount override, or a payment covering part of the order, is allocated
+to admission first, then the trainer's fee, then the membership
+(`orderMoney.allocate`).
+
+`ledger.membershipPaymentStages` — what the accounts, dashboard, reports and
+the platform's gym stats all read membership money through — gives every
+payment row `admission`, `trainerFee` and `membership` beside `amount`,
+the payment's own `method`, and `kind` (`initial`, `installment` for later
+parts of an order paid in parts, `renewal` — which carries neither fee).
+
+Orders from before `payment.joiningFee` existed read 0. Where their total
+did include the fee (subtotal = price + fee), fill it in per gym:
+
+    node scripts/backfillOrderFees.js --gym <slug>           # report only
+    node scripts/backfillOrderFees.js --gym <slug> --apply   # write it
 
 ## Settings that matter here
 

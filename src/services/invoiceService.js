@@ -145,7 +145,12 @@ async function renderInvoicePdf(order, options = {}) {
   y += 30;
 
   const subtotal = invoice.subtotal !== undefined ? invoice.subtotal : round2(payment.amount);
-  const listPrice = payment.subtotal !== undefined && payment.subtotal !== null ? round2(payment.subtotal) : round2(payment.amount);
+  // The admission and trainer's fees are lines of their own; the package
+  // line is what is left of the pre-discount subtotal. (Orders from before
+  // the fees were recorded apart keep the one combined line they had.)
+  const joiningFee = round2(payment.joiningFee || 0);
+  const trainerFee = round2(payment.trainerFee || 0);
+  const listPrice = payment.subtotal !== undefined && payment.subtotal !== null ? round2(payment.subtotal - joiningFee - trainerFee) : round2(payment.amount);
   const discount = round2(payment.discountAmount || 0);
 
   doc.fillColor(dark).fontSize(10).font('Helvetica').text(`${pkg.name || 'Membership'}${pkg.kind && pkg.kind !== 'membership' ? ` (${String(pkg.kind).replace('_', ' ')})` : ''}`, left + 10, y);
@@ -154,6 +159,16 @@ async function renderInvoicePdf(order, options = {}) {
   doc.fillColor(dark).fontSize(9).text(period, 300, y, { width: 140 });
   doc.fillColor(dark).fontSize(10).text(money(listPrice, currency), 445, y, { width: 90, align: 'right' });
   y += 34;
+
+  for (const [label, amount] of [
+    ['Admission fee (one-off)', joiningFee],
+    ['Personal trainer fee', trainerFee]
+  ]) {
+    if (!(amount > 0)) continue;
+    doc.fillColor(dark).fontSize(10).text(label, left + 10, y);
+    doc.text(money(amount, currency), 445, y, { width: 90, align: 'right' });
+    y += 20;
+  }
 
   if (discount > 0) {
     doc.fillColor(dark).fontSize(10).text(`Discount${payment.couponCode ? ` (${payment.couponCode})` : ''}`, left + 10, y);

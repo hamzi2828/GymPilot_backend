@@ -15,6 +15,7 @@ const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/mon
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
 const { readDeskMethod } = require('../../services/paymentMethods');
+const { allocate } = require('./orderMoney');
 const T = require('../../attendance/services/timeUtils');
 
 const DAY_MS = 86400000;
@@ -331,7 +332,8 @@ async function createManualOrder({
   const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: user.email }) : !!chargeJoiningFee;
   const joiningFee = feeDue ? round2(snapshot.joiningFee) : 0;
 
-  let amount = listPrice + joiningFee;
+  const trainerFee = 0;
+
   let coupon = null;
   let discount = round2(discountAmount);
   if (couponCode) {
@@ -339,12 +341,19 @@ async function createManualOrder({
     coupon = applied.coupon;
     discount = round2(discount + applied.discount);
   }
-  amount = round2(Math.max(0, amount - discount));
+  // A discount comes off the package price, never off the fees charged
+  // beside it -- and never below nothing (a package-change credit can be
+  // worth more than the new package).
+  discount = Math.min(discount, listPrice);
+  let amount = round2(listPrice - discount + joiningFee + trainerFee);
   if (amountOverride !== undefined && amountOverride !== null && amountOverride !== '') {
     const override = parseAmount(amountOverride);
     if (override === null) throw new MembershipError('Amount must be a number', 400);
     amount = override;
   }
+  // What the total carries, admission first: an override below the fees
+  // settles them before the membership (orderMoney.allocate).
+  const parts = allocate(amount, { joiningFee, trainerFee });
 
   const paid = markPaid !== false;
   const now = new Date();
@@ -366,15 +375,17 @@ async function createManualOrder({
     packageId: pkg._id,
     packageDetails: snapshot,
     customerInfo: {
-      fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
-      email: user.email,
+      fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || user.phone || 'Member',
+      email: user.email || '',
       phone: user.phone || '',
       country: (address && address.country) || ''
     },
     payment: {
       method,
       amount,
-      subtotal: round2(listPrice + joiningFee),
+      joiningFee: parts.joiningFee,
+      trainerFee: parts.trainerFee,
+      subtotal: round2(listPrice + joiningFee + trainerFee),
       discountAmount: discount,
       discountNote,
       couponCode: coupon ? coupon.code : '',
@@ -427,8 +438,8 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
     packageId: pkg._id,
     packageDetails: snapshot,
     customerInfo: {
-      fullName: customerInfo.fullName || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
-      email: user.email,
+      fullName: customerInfo.fullName || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || user.phone || 'Member',
+      email: user.email || '',
       phone: customerInfo.phone || user.phone || '',
       country: customerInfo.country || '',
       address: customerInfo.address || '',
@@ -439,6 +450,9 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
     payment: {
       method: 'bank_transfer',
       amount,
+      // The coupon came off the price alone, so the fee is all there.
+      joiningFee,
+      trainerFee: 0,
       subtotal: round2(listPrice + joiningFee),
       discountAmount: discount,
       couponCode: coupon ? coupon.code : '',
