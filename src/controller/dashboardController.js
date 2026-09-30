@@ -29,6 +29,7 @@ const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 const { isOpenVisit } = require('../attendance/services/staleVisits');
+const { tally } = require('../attendance/services/liveBoard');
 const sessions = require('../gymfolio/services/classSessions');
 const { sweepIfDue, liveFilter, countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
@@ -43,64 +44,11 @@ const FEES_DUE_ROWS = 8;
 // Today's visits read per row; far more than any gym's day.
 const ATTENDANCE_ROWS = 5000;
 
-// ---------------------------------------------------------------------------
-// Who came in today, paid or not
-//
-// The same rules as the attendance screen's live board
-// (attendance/services/liveBoard.js: isPaidVisit, balanceOwed, tally), so the
-// two never disagree -- and `tally` below takes and returns what that one
-// does, so it can be swapped for it. Read from each visit's own membership
-// snapshot, taken at check-in: a renewal at noon does not turn a morning
-// visit on an expired package into a paid one.
-//
-// PAID: the member walked in on a paid membership still running -- active
-// (expiring soon included: the desk records that as active), frozen, or
-// cancelled but still inside what was paid for (a cancelled one that has run
-// out is recorded as expired). UNPAID: expired, none, past_due, pending,
-// suspended. Money still owed on a running membership (membership.balanceDue)
-// is paid, and counted again as "balance due". Each member counts once, by
-// their latest visit today.
-// ---------------------------------------------------------------------------
-
-const PAID_MEMBERSHIP = new Set(['active', 'frozen', 'cancelled']);
-
-function isPaidVisit(row) {
-  return row.personType === 'member' && PAID_MEMBERSHIP.has((row.membership && row.membership.status) || 'none');
-}
-
-function balanceOwed(row) {
-  const due = Number((row.membership && row.membership.balanceDue) ?? 0);
-  return Number.isFinite(due) && due > 0 ? due : 0;
-}
-
-/** Today's counts over the day's rows; `isOpen(row)` answers "still inside". */
-function tally(rows, isOpen) {
-  const latest = new Map();
-  let inNow = 0;
-  const staff = new Set();
-
-  for (const row of rows) {
-    if (isOpen(row)) inNow++;
-    const key = String(row.personId);
-    if (row.personType !== 'member') {
-      staff.add(key);
-      continue;
-    }
-    const seen = latest.get(key);
-    if (!seen || new Date(row.checkInAt || 0) >= new Date(seen.checkInAt || 0)) latest.set(key, row);
-  }
-
-  let paid = 0;
-  let unpaid = 0;
-  let balanceDue = 0;
-  for (const row of latest.values()) {
-    if (isPaidVisit(row)) paid++;
-    else unpaid++;
-    if (balanceOwed(row) > 0) balanceDue++;
-  }
-
-  return { visits: rows.length, members: latest.size, staff: staff.size, in_now: inNow, paid, unpaid, balance_due: balanceDue };
-}
+// Who came in today, paid or not: the attendance screen's live board decides
+// (attendance/services/liveBoard.js -- PAID: walked in on a paid membership
+// still running; UNPAID: expired, none, past_due, pending, suspended; money
+// still owed counted again as "balance due"; each member once, by their
+// latest visit today), so the dashboard and that screen cannot disagree.
 
 function startOfLocalDay(dateKey) {
   const [y, m, d] = dateKey.split('-').map(Number);
@@ -225,7 +173,7 @@ module.exports = {
 
         membershipCounts(now),
 
-        // Today's visits, counted by tally() above: people, not rows.
+        // Today's visits, counted by the live board's tally(): people, not rows.
         Attendance.find({ shiftDate: today })
           .select('personType personId checkInAt checkOutAt autoClosed voided openUntil membership.status membership.balanceDue')
           .sort({ checkInAt: 1, _id: 1 })
