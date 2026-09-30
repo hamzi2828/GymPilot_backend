@@ -292,8 +292,9 @@ test('daily sales read the admission / trainer fee split and the payment\'s own 
   const L = h.src('accounts/services/ledger');
   const original = L.membershipPaymentStages;
   // The ledger's rows as the membership work shapes them: R-1's 100 was 20
-  // admission, 10 trainer fee (the membership share left for the report to
-  // work out), paid by JazzCash; R-2 was an instalment of dues.
+  // admission and 10 trainer fee -- so 70 membership, the pipeline's own
+  // amount - admission - trainerFee -- paid by JazzCash; R-2 was an instalment
+  // of dues.
   L.membershipPaymentStages = (...args) => [
     ...original(...args),
     {
@@ -303,7 +304,8 @@ test('daily sales read the admission / trainer fee split and the payment\'s own 
         method: { $cond: [{ $eq: ['$orderNumber', 'R-1'] }, 'jazzcash', '$method'] },
         kind: { $cond: [{ $eq: ['$orderNumber', 'R-2'] }, 'installment', '$kind'] }
       }
-    }
+    },
+    { $addFields: { membership: { $subtract: ['$amount', { $add: [{ $ifNull: ['$admission', 0] }, { $ifNull: ['$trainerFee', 0] }] }] } } }
   ];
   try {
     await h.inGym(gym, async () => {
