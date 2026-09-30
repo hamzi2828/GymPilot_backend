@@ -36,6 +36,14 @@ function readDate(value, fallback = null) {
   return L.localInstant(text, 12, 0);
 }
 
+// The gym's local 'YYYY-MM-DD' for a stored date, or '' when there is none --
+// exactly what a date input holds, so the edit form can be filled from the
+// list without converting an ISO instant (which, read in UTC, is the wrong
+// day for half the world).
+function dateInput(value) {
+  return value ? T.dateKey(new Date(value)) : '';
+}
+
 function shape(asset, now = new Date()) {
   const value = L.depreciate(asset, now);
   const dueDate = asset.nextServiceDue ? new Date(asset.nextServiceDue) : null;
@@ -54,11 +62,13 @@ function shape(asset, now = new Date()) {
     currency: asset.currency,
 
     purchased_on: asset.purchasedOn,
+    purchased_date: dateInput(asset.purchasedOn),
     purchased_label: asset.purchasedOn ? T.dateLabel(asset.purchasedOn) : null,
     supplier: asset.supplier || '',
     invoice_no: asset.invoiceNo || '',
     serial_number: asset.serialNumber || '',
     warranty_until: asset.warrantyUntil,
+    warranty_date: dateInput(asset.warrantyUntil),
     warranty_label: asset.warrantyUntil ? T.dateLabel(asset.warrantyUntil) : null,
     warranty_active: asset.warrantyUntil ? new Date(asset.warrantyUntil) >= now : false,
 
@@ -74,8 +84,10 @@ function shape(asset, now = new Date()) {
     fully_depreciated: value.fully_depreciated,
 
     last_serviced_on: asset.lastServicedOn,
+    last_serviced_date: dateInput(asset.lastServicedOn),
     last_serviced_label: asset.lastServicedOn ? T.dateLabel(asset.lastServicedOn) : null,
     next_service_due: asset.nextServiceDue,
+    next_service_date: dateInput(asset.nextServiceDue),
     next_service_label: asset.nextServiceDue ? T.dateLabel(asset.nextServiceDue) : null,
     service_interval_days: asset.serviceIntervalDays || 0,
     days_to_service: daysToService,
