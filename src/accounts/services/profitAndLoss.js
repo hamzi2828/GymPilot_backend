@@ -32,6 +32,8 @@ const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const PtSession = require('../../gymfolio/models/ptSessionModel');
 const Payslip = require('../../models/payslipModel');
 const Asset = require('../models/assetModel');
+const Expense = require('../models/expenseModel');
+const Sale = require('../../models/saleModel');
 const L = require('./ledger');
 
 const REVENUE_LINES = [
@@ -254,11 +256,28 @@ function build({ base, payments = [], refunds = [], sales = [], expenses = [], e
   };
 }
 
+/**
+ * The whole profit and loss for a range, read as the Accounts overview reads
+ * it, for a screen that shows its net without the overview's other figures
+ * (the Reports page) -- so the two nets cannot disagree.
+ */
+async function forRange(range) {
+  const [base, payments, refunds, expenses, sales] = await Promise.all([
+    L.baseCurrency(),
+    PackageOrder.aggregate(L.membershipPaymentStages(range)),
+    PackageOrder.aggregate(L.membershipRefundStages(range)),
+    Expense.find({ incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' } }).lean(),
+    Sale.find({ status: 'paid', paidAt: { $gte: range.start, $lt: range.end } }).select('total currency paidAt').lean()
+  ]);
+  return build({ base, payments, refunds, sales, expenses, extra: await gather(range, expenses) });
+}
+
 module.exports = {
   REVENUE_LINES,
   OUTFLOW_LINES,
   splitPayment,
   membershipCommissionStages,
   gather,
-  build
+  build,
+  forRange
 };

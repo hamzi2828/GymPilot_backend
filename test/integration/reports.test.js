@@ -128,6 +128,26 @@ test('reports net is the accounts net for the same range: paid expenses by the d
   });
 });
 
+test('reports net follows every Accounts outflow line: an asset bought in the range comes off both', async () => {
+  await h.inGym(gym, async () => {
+    const Asset = h.src('accounts/models/assetModel');
+    const bike = await Asset.create({ tag: 'AST-9001', name: 'Spin bike', quantity: 2, unitCost: 15, currency: 'GBP', purchasedOn: at('2026-08-10T12:00:00Z') });
+    try {
+      const [report, overview] = await Promise.all([
+        h.call(reports.overview, { query: AUGUST }),
+        h.call(accounts.overview, { query: AUGUST })
+      ]);
+      assert.equal(report.statusCode, 200, JSON.stringify(report.body));
+      assert.equal(report.body.kpis.expenses, 55, 'the expenses figure is still the paid expenses');
+      assert.equal(report.body.kpis.outflow, 85, 'expenses 55 + asset purchases 30');
+      assert.equal(report.body.kpis.net, 57);
+      assert.equal(overview.body.result.net, report.body.kpis.net, 'the two screens still agree');
+    } finally {
+      await Asset.deleteOne({ _id: bike._id });
+    }
+  });
+});
+
 test('reports leave other currencies out of the totals and count them, a blank currency is not one', async () => {
   await h.inGym(gym, async () => {
     const res = await h.call(reports.overview, { query: AUGUST });

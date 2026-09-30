@@ -16,6 +16,7 @@ const Payslip = require('../models/payslipModel');
 const Lead = require('../models/leadModel');
 const User = require('../models/user');
 const L = require('../accounts/services/ledger');
+const pnl = require('../accounts/services/profitAndLoss');
 const T = require('../attendance/services/timeUtils');
 const { sendCsv } = require('../services/csv');
 const { sendXlsx } = require('../services/xlsx');
@@ -231,6 +232,9 @@ module.exports = {
       const leadTotal = Object.values(leads).reduce((a, b) => a + b, 0);
 
       const [activeMemberships, expiring, memberCount] = memberships;
+      // The net is the Accounts profit and loss for the range: revenue less
+      // every outflow line (expenses, salaries, trainer commission, assets).
+      const profit = await pnl.forRange(range);
       const shopTotal = shop.reduce((s, b) => s + b.value, 0);
       const revenueTotal = revenue.reduce((s, b) => s + b.value, 0) + shopTotal;
       const expenseTotal = expenses.reduce((s, b) => s + b.value, 0);
@@ -248,7 +252,8 @@ module.exports = {
           // Paid expenses; the net is the accounts screen's for the range.
           expenses: Math.round(expenseTotal * 100) / 100,
           expenses_pending: Math.round(pendingExpenses * 100) / 100,
-          net: Math.round((revenueTotal - expenseTotal) * 100) / 100,
+          outflow: profit.total_outflow,
+          net: profit.net_profit,
           paid_orders: orders.reduce((s, b) => s + b.value, 0),
           new_members: members.reduce((s, b) => s + b.value, 0),
           visits: visitTotal,
