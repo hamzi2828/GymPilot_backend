@@ -834,3 +834,80 @@ test('a balance owing: checked in all the same, told "Balance due" in the order\
     assert.deepEqual(clearIn.detail.alert, { level: 'ok', speech: null });
   });
 });
+
+test("the office's live view of today: arrival numbers, contacts, package, expiry, paid or not, and the day's counts", async () => {
+  await h.inGym(gym, async () => {
+    const paidUp = await memberWithOrder('Livepaid', 21, { endIn: 40 });
+    const lapsedLive = await memberWithOrder('Livelapsed', 22, { endIn: -2 });
+    const owesLive = await memberWithOrder('Liveowes', 23, { endIn: 40 });
+    await owe(owesLive, 15);
+    await User.updateOne({ _id: paidUp._id }, { $set: { phone: '+44 7700 900123', gender: 'female' } });
+    await User.updateOne({ _id: lapsedLive._id }, { $set: { phone: '+44 7700 900456', gender: 'male' } });
+
+    for (const person of [paidUp, lapsedLive, owesLive]) {
+      const punched = await scan('member', person);
+      assert.equal(punched.action, 'check_in', punched.message);
+    }
+
+    const res = await h.call(admin.live, { query: {}, user: asOperator() });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const { records, counts } = res.body;
+    assert.equal(res.body.today, T.dateKey());
+    assert.ok(res.body.date_label.includes(T.dateLabelForKey(T.dateKey())));
+
+    // Every visit today, newest first, numbered in the order they arrived.
+    const todayRows = await Attendance.countDocuments({ shiftDate: T.dateKey() });
+    assert.equal(records.length, todayRows);
+    assert.equal(counts.visits, todayRows);
+    assert.equal(records[0].number, todayRows, 'the newest arrival is the highest number');
+    const numbers = records.map((r) => r.number);
+    assert.deepEqual(numbers, [...numbers].sort((a, b) => b - a));
+
+    const row = (user) => records.find((r) => r.person_id === String(user._id));
+    const paidRow = row(paidUp);
+    assert.equal(paidRow.name, 'Livepaid Fixture');
+    assert.match(paidRow.code, /^GP-\d{4}$/);
+    assert.equal(paidRow.phone, '+44 7700 900123');
+    assert.equal(paidRow.gender, 'female');
+    assert.equal(paidRow.package_name, 'Monthly');
+    assert.match(paidRow.end_date_label, /^\d{2} [A-Z][a-z]{2} \d{4}$/);
+    assert.ok(paidRow.check_in_time);
+    assert.equal(paidRow.check_out_time, null);
+    assert.equal(paidRow.still_in, true);
+    assert.deepEqual(paidRow.standing, { key: 'paid', label: 'Paid' });
+    assert.equal(paidRow.paid, true);
+
+    const lapsedRow = row(lapsedLive);
+    assert.deepEqual(lapsedRow.standing, { key: 'unpaid', label: 'Unpaid' });
+    assert.equal(lapsedRow.paid, false);
+    assert.equal(lapsedRow.status, 'membership_expired');
+    assert.equal(lapsedRow.number, paidRow.number + 1, 'scanned straight after');
+
+    const owesRow = row(owesLive);
+    assert.deepEqual(owesRow.standing, { key: 'balance_due', label: 'Balance due £15' });
+    assert.equal(owesRow.balance_due, 15);
+    assert.equal(owesRow.paid, true, 'money owing on a running package is still paid');
+
+    // The day's counts: every member once, split paid / unpaid.
+    const members = new Set((await Attendance.find({ shiftDate: T.dateKey(), personType: 'member' }).select('personId').lean()).map((r) => String(r.personId)));
+    assert.equal(counts.members, members.size);
+    assert.equal(counts.paid + counts.unpaid, counts.members);
+    assert.ok(counts.balance_due >= 1);
+    assert.ok(counts.in_now >= 3);
+
+    // Filters narrow the rows, not the counts or the numbers.
+    const found = await h.call(admin.live, { query: { q: '900456' }, user: asOperator() });
+    assert.deepEqual(found.body.records.map((r) => r.person_id), [String(lapsedLive._id)], 'found by phone number');
+    assert.equal(found.body.records[0].number, lapsedRow.number);
+    assert.deepEqual(found.body.counts, counts);
+    const staffOnly = await h.call(admin.live, { query: { personType: 'staff' }, user: asOperator() });
+    assert.ok(staffOnly.body.records.length > 0);
+    assert.ok(staffOnly.body.records.every((r) => r.person_type === 'staff' && r.standing.key === 'staff' && r.package_name === ''));
+
+    // The desk's board carries the expiry too.
+    const board = await h.call(desktop.recent, { body: { limit: 200 } });
+    const boardRow = board.body.entries.find((e) => e.name === 'Livepaid Fixture');
+    assert.equal(boardRow.end_date_label, paidRow.end_date_label);
+    assert.ok(board.body.entries.filter((e) => e.person_type === 'staff').every((e) => e.end_date_label === null));
+  });
+});

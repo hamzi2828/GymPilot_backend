@@ -21,7 +21,8 @@ const Fingerprint = require('../models/fingerprintModel');
 const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const { fullName, membershipsFor } = require('../services/peopleDirectory');
-const { membershipVerdict } = require('../services/punchService');
+const { membershipVerdict, currentVerdict, balanceDueLabel } = require('../services/punchService');
+const { standingOf, isPaidVisit, balanceOwed, tally } = require('../services/liveBoard');
 const { correctionFields } = require('./attendanceCorrectionController');
 const {
   openVisitMatch,
@@ -38,6 +39,11 @@ const OBJECT_ID = /^[0-9a-fA-F]{24}$/;
 // A roster scan is bounded so one very large gym cannot turn the People tab
 // into an unbounded read of every account that ever signed up.
 const MAX_ROSTER = 3000;
+
+// Today's visits the live view reads. Far past any real day at one gym; a
+// bound so a runaway import cannot turn a 15-second refresh into a scan of
+// thousands of rows.
+const MAX_LIVE = 2000;
 
 function toObjectId(value) {
   return new mongoose.Types.ObjectId(String(value));
@@ -805,6 +811,101 @@ module.exports = {
     } catch (err) {
       console.error('[attendance] admin person failed:', err);
       return res.status(500).json({ success: false, message: 'Could not load that attendance history.' });
+    }
+  },
+
+  // -------------------------------------------------------------------------
+  // GET /api/attendance/live   ?personType=member|staff  &q=
+  //
+  // Today at the gym, for a screen the office leaves open: every visit with
+  // its arrival number, who it was and how to reach them, the package and
+  // when it runs out, and whether they are paid up -- plus the day's paid and
+  // unpaid counts. The page asks again every few seconds, so this is one read
+  // of today's rows and one of their contacts, however many there are.
+  //
+  // `number` is the visit's place in the day's arrivals (1 = first in), the
+  // same whatever the filters, so a row keeps its number as the day goes on.
+  // `counts` are the whole day's, also whatever the filters.
+  // -------------------------------------------------------------------------
+  live: async (req, res) => {
+    try {
+      const now = new Date();
+      const today = T.dateKey(now);
+
+      const rows = await Attendance.find({ shiftDate: today })
+        .sort({ checkInAt: 1, _id: 1 })
+        .limit(MAX_LIVE)
+        .lean();
+
+      // Today's phone number and gender, from the live records: the rows
+      // keep the name as it was, the office wants a number that works now.
+      const ids = Array.from(new Set(rows.map((row) => String(row.personId))));
+      const staffIds = Array.from(new Set(rows.filter((row) => row.personType === 'staff').map((row) => String(row.personId))));
+      const [users, trainers] = await Promise.all([
+        ids.length ? User.find({ _id: { $in: ids } }).select('phone gender').lean() : [],
+        staffIds.length ? Trainer.find({ _id: { $in: staffIds } }).select('phone').lean() : []
+      ]);
+      const contact = new Map();
+      for (const trainer of trainers) contact.set(String(trainer._id), { phone: trainer.phone || '', gender: '' });
+      for (const user of users) contact.set(String(user._id), { phone: user.phone || '', gender: user.gender || '' });
+
+      const personType = req.query.personType === 'member' || req.query.personType === 'staff' ? req.query.personType : null;
+      const term = String(req.query.q || '').trim().toLowerCase();
+
+      const records = [];
+      rows.forEach((row, index) => {
+        if (personType && row.personType !== personType) return;
+        const who = contact.get(String(row.personId)) || { phone: '', gender: '' };
+        if (term) {
+          const haystack = [row.personName, row.personCode, who.phone].join(' ').toLowerCase();
+          if (!haystack.includes(term)) return;
+        }
+
+        const membership = row.membership || {};
+        const verdict = currentVerdict(row);
+        const balance = row.personType === 'member' ? balanceOwed(row) : 0;
+        records.push({
+          number: index + 1,
+          id: String(row._id),
+          person_type: row.personType,
+          person_id: String(row.personId),
+          code: row.personCode || '',
+          name: row.personName || '',
+          phone: who.phone,
+          gender: who.gender,
+          package_name: row.personType === 'member' ? membership.packageName || '' : '',
+          end_date_label: row.personType === 'member' && membership.endDate ? T.dateLabel(membership.endDate) : null,
+          check_in_time: T.timeLabel(row.checkInAt),
+          check_out_time: T.timeLabel(row.checkOutAt),
+          still_in: isOpenVisit(row, now),
+          no_check_out: missedCheckOut(row, now),
+          status: verdict.status || '',
+          status_label: verdict.label || '',
+          standing: standingOf(row),
+          paid: isPaidVisit(row),
+          balance_due: balance,
+          balance_due_label: balance > 0 ? balanceDueLabel(row) : null
+        });
+      });
+
+      // Newest first: the arrival that just happened is the one to see.
+      records.reverse();
+
+      return res.json({
+        success: true,
+        timezone: T.TIMEZONE,
+        today,
+        date_label: T.weekdayNameForKey(today) + ', ' + T.dateLabelForKey(today),
+        refreshed_label: T.timeLabel(now),
+        counts: tally(rows, (row) => isOpenVisit(row, now)),
+        // More visits today than this screen reads: say so, rather than
+        // quietly count only the first of them.
+        truncated: rows.length >= MAX_LIVE,
+        records
+      });
+    } catch (err) {
+      console.error('[attendance] admin live failed:', err);
+      return res.status(500).json({ success: false, message: "Could not load today's attendance." });
     }
   }
 };

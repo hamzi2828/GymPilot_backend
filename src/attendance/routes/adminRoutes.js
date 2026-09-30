@@ -44,6 +44,7 @@ router.get('/me/qr', auth, myController.qr);
 const gate = [auth, requirePermission('attendance')];
 
 router.get('/records', gate, controller.records);
+router.get('/live', gate, controller.live);
 router.get('/people', gate, controller.people);
 router.get('/person/:personType/:personId', gate, controller.person);
 
