@@ -14,6 +14,7 @@ const guards = require('../services/roleGuards');
 const { gymSiteName } = require('../services/gymName');
 const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
+const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -390,6 +391,8 @@ const userController = {
                 // manages their payroll and roster.
                 employment: { isStaff: !!(requestedRole && requestedRole.isStaff) },
             });
+            // A member's ID from the start, for the card and the Users list.
+            await assignMemberCode(user);
 
             // The account exists regardless of whether the email lands, so a
             // send failure is reported rather than failing the whole request.
@@ -518,6 +521,8 @@ const userController = {
                 password: hashed,
             });
 
+            await assignMemberCode(user);
+
             // The welcome email carries their username for the phone app,
             // which they are told nowhere else. Not waited for.
             afterResponse(() => notify.memberWelcome(user), 'welcome email');
@@ -638,6 +643,7 @@ const userController = {
                 });
                 // A new member, as from the sign-up form -- with no password
                 // yet, which the phone app needs.
+                await assignMemberCode(user);
                 afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
             } else {
                 user = await linkGoogleAccount(user, { googleId, picture });
@@ -990,6 +996,7 @@ const userController = {
                     googleId: googleId || null,
                     avatarUrl: picture || null,
                 });
+                await assignMemberCode(user);
                 afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
             } else {
                 user = await linkGoogleAccount(user, { googleId, picture });

@@ -315,7 +315,9 @@ const userSchema = new mongoose.Schema({
 
     // Short human-readable ID the front desk can search by ("GP-0184"), for
     // the days the fingerprint reader is unplugged or the finger won't read.
-    // Assigned on demand -- see ensureMemberCode() in peopleDirectory.js.
+    // Given to a member when their account is created (assignMemberCode() in
+    // peopleDirectory.js); older accounts get one at the desk on first sight
+    // or from scripts/assignMemberCodes.js.
     memberCode: { type: String, default: null, trim: true },
 
     // ---- Employment -------------------------------------------------------

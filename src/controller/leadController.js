@@ -445,6 +445,8 @@ module.exports = {
           tags: lead.tags || []
         });
         created = true;
+        // A new member's ID, as every other way of creating one gives.
+        await require('../attendance/services/peopleDirectory').assignMemberCode(user);
         const b = await notify.brand();
         const loginUrl = `${b.accountUrl.replace(/\/user-detail$/, '')}/authentication`;
         const body = [

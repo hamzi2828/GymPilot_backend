@@ -18,6 +18,7 @@ const User = require('../models/user');
 const Package = require('../gymfolio/models/packageModel');
 const { createManualOrder } = require('../gymfolio/services/membershipService');
 const { checkLimit } = require('../platform/planLimits');
+const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const T = require('../attendance/services/timeUtils');
 
 const MAX_ROWS = 5000;
@@ -362,6 +363,9 @@ module.exports = {
             // "new members" is not everybody who was ever imported.
             ...(joinedAt ? { createdAt: joinedAt } : {})
           });
+          // The old system's ID when it had one that is free; otherwise the
+          // next in the gym's own series, as any new member gets.
+          if (!user.memberCode) await assignMemberCode(user);
           report.created += 1;
           if (!email) report.withoutEmail += 1;
           if (!active) report.inactive += 1;
