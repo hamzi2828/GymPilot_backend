@@ -132,6 +132,8 @@ router.delete('/admin/pos/products/:id', auth, requirePermission('pos', 'manage'
 router.get('/admin/pos/sales', auth, requirePermission('pos'), posController.listSales);
 router.post('/admin/pos/sales', auth, requirePermission('pos', 'manage'), posController.createSale);
 router.post('/admin/pos/sales/:id/refund', auth, requirePermission('pos', 'manage'), posController.refundSale);
+router.get('/admin/pos/receipt-settings', auth, requirePermission('pos'), posController.receiptSettings);
+router.put('/admin/pos/receipt-settings', auth, requirePermission('pos', 'manage'), posController.updateReceiptSettings);
 router.get('/admin/lockers', auth, requirePermission('lockers'), posController.listLockers);
 router.post('/admin/lockers', auth, requirePermission('lockers', 'manage'), posController.createLockers);
 router.put('/admin/lockers/:id', auth, requirePermission('lockers', 'manage'), posController.updateLocker);

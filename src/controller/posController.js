@@ -14,11 +14,15 @@ const Settings = require('../models/settings');
 const Counter = require('../gymfolio/models/counterModel');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
+const { branding } = require('../services/branding');
 
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
 const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const METHODS = ['cash', 'card', 'bank_transfer', 'online', 'account', 'other'];
+// Thermal roll widths the receipt is laid out for.
+const PAPER_WIDTHS = ['80mm', '58mm'];
+const RECEIPT_FOOTER_MAX = 300;
 
 function fail(res, code, message) {
   return res.status(code).json({ success: false, message });
@@ -96,6 +100,33 @@ function lockerView(l) {
     fee: l.fee || 0,
     currency: l.currency || '',
     notes: l.notes || ''
+  };
+}
+
+// Everything a printed receipt carries besides the sale itself: the gym's
+// own details -- the same name, address, phone and tax number the invoice
+// prints -- and how the till prints (settings.receipt).
+async function receiptProfile() {
+  const [settings, brand] = await Promise.all([Settings.getSettings(), branding()]);
+  const receipt = settings.receipt || {};
+  const invoice = settings.invoice || {};
+  return {
+    receipt: {
+      paper_width: PAPER_WIDTHS.includes(receipt.paperWidth) ? receipt.paperWidth : '80mm',
+      show_logo: receipt.showLogo !== false,
+      footer_text: receipt.footerText || ''
+    },
+    gym: {
+      name: brand.siteName,
+      logo_url: brand.logoUrl,
+      address: brand.contact.address,
+      phone: brand.phone,
+      email: brand.supportEmail,
+      tax_label: invoice.taxLabel || 'Tax',
+      tax_number: invoice.taxNumber || '',
+      // The invoice's footer, printed when the receipt has none of its own.
+      footer_note: invoice.footerNote || ''
+    }
   };
 }
 
@@ -438,6 +469,56 @@ module.exports = {
       return res.json({ success: true, data: rows.map(saleView) });
     } catch (error) {
       return fail(res, 500, 'Could not load your purchases');
+    }
+  },
+
+  // ---- receipt -----------------------------------------------------------------
+
+  // GET /admin/pos/receipt-settings
+  //
+  // Read by anyone who can see the till, since anyone who can see a sale can
+  // reprint its receipt.
+  receiptSettings: async (req, res) => {
+    try {
+      return res.json({ success: true, data: await receiptProfile() });
+    } catch (error) {
+      console.error('[pos] receipt settings failed:', error);
+      return fail(res, 500, 'Could not load the receipt settings');
+    }
+  },
+
+  // PUT /admin/pos/receipt-settings   { paperWidth, showLogo, footerText }
+  //
+  // Only the fields sent are changed, and a value of the wrong kind is
+  // refused rather than guessed at: a printer set to a width it does not
+  // have prints nothing useful.
+  updateReceiptSettings: async (req, res) => {
+    try {
+      const b = req.body || {};
+      const set = {};
+      if (b.paperWidth !== undefined) {
+        if (!PAPER_WIDTHS.includes(b.paperWidth)) return fail(res, 400, `paperWidth must be one of ${PAPER_WIDTHS.join(', ')}`);
+        set['receipt.paperWidth'] = b.paperWidth;
+      }
+      if (b.showLogo !== undefined) {
+        if (typeof b.showLogo !== 'boolean') return fail(res, 400, 'showLogo must be true or false');
+        set['receipt.showLogo'] = b.showLogo;
+      }
+      if (b.footerText !== undefined) {
+        if (typeof b.footerText !== 'string') return fail(res, 400, 'footerText must be text');
+        const footerText = b.footerText.trim();
+        if (footerText.length > RECEIPT_FOOTER_MAX) return fail(res, 400, `The footer can be up to ${RECEIPT_FOOTER_MAX} characters`);
+        set['receipt.footerText'] = footerText;
+      }
+      if (!Object.keys(set).length) return fail(res, 400, 'Nothing to change');
+
+      // getSettings() creates the gym's settings row if it has none yet.
+      const current = await Settings.getSettings();
+      await Settings.updateOne({ _id: current._id }, { $set: set });
+      return res.json({ success: true, message: 'Receipt settings saved.', data: await receiptProfile() });
+    } catch (error) {
+      console.error('[pos] receipt settings update failed:', error);
+      return fail(res, 500, 'Could not save the receipt settings');
     }
   },
 
