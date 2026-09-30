@@ -71,9 +71,11 @@ function stampOf(when) {
 /**
  * Makes, encrypts and stores a backup of the gym in context, and lists it.
  * `kind`: 'daily', 'manual' or 'pre-restore'. Resolves with the list entry.
+ * `spare`: list ids the tidy-up afterwards must leave alone -- a restore's
+ * source, which is read only after its safety backup has been stored.
  * Throws (status 409) when the server cannot store backups.
  */
-async function storeBackup({ kind, actor = null, now = new Date() }) {
+async function storeBackup({ kind, actor = null, now = new Date(), spare = [] }) {
   const state = readiness();
   if (!state.ready) throw notReady(state);
   const gym = currentTenant();
@@ -112,7 +114,7 @@ async function storeBackup({ kind, actor = null, now = new Date() }) {
     collections: manifest.collections.map((c) => ({ name: c.name, documents: c.documents })),
     createdBy: actor ? { id: String(actor.id || ''), email: String(actor.email || '') } : undefined
   });
-  await prune(gym);
+  await prune(gym, { spare });
   return entry;
 }
 
@@ -124,15 +126,17 @@ const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
  * uploaded files more than a day old (restored or not). The list entry goes
  * only once the file is gone from the store, so nothing is ever left in the
  * store unlisted; a file the store cannot remove now is tried again after
- * the next backup.
+ * the next backup. `spare` ids are left out altogether (a kind may then
+ * keep one more than its count until the next tidy-up).
  */
-async function prune(gym, { keep = keepCount(), now = new Date() } = {}) {
+async function prune(gym, { keep = keepCount(), now = new Date(), spare = [] } = {}) {
   const removed = [];
+  const notSpared = { $nin: spare };
   for (const kind of PlatformBackup.schema.statics.KINDS) {
     const old =
       kind === 'upload'
-        ? await PlatformBackup.find({ gymId: gym._id, kind, createdAt: { $lt: new Date(now.getTime() - UPLOAD_TTL_MS) } }).select('_id url').lean()
-        : await PlatformBackup.find({ gymId: gym._id, kind }).sort({ createdAt: -1 }).skip(keep).select('_id url').lean();
+        ? await PlatformBackup.find({ _id: notSpared, gymId: gym._id, kind, createdAt: { $lt: new Date(now.getTime() - UPLOAD_TTL_MS) } }).select('_id url').lean()
+        : await PlatformBackup.find({ _id: notSpared, gymId: gym._id, kind }).sort({ createdAt: -1 }).skip(keep).select('_id url').lean();
     if (!old.length) continue;
     try {
       await storage.remove(old.map((b) => b.url));

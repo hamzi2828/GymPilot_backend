@@ -406,3 +406,34 @@ test('a restore ends every session, including ones ended since the backup that i
     assert.equal(await auth.sessionProblem({ id: String(member._id), tv: restored.tokenVersion }), null);
   });
 });
+
+test('the tidy-up after the safety backup never removes the backup being restored', async () => {
+  // Storing the safety backup prunes the gym's backups, which used to run
+  // before the file being restored was opened: an upload over a day old, or
+  // the oldest backup of a kind at its keep limit, was deleted for good and
+  // the restore failed on a file that was no longer there.
+  const previousKeep = process.env.BACKUP_KEEP_DAILY;
+  process.env.BACKUP_KEEP_DAILY = '1';
+  try {
+    const archive = await downloadNow(gym);
+    await h.inGym(gym, async () => {
+      const uploadId = await upload(archive);
+      await h.rawDb(h.PLATFORM_DB)
+        .collection('platform_backups')
+        .updateOne({ _id: new mongoose.Types.ObjectId(uploadId) }, { $set: { createdAt: new Date(Date.now() - 25 * 3600 * 1000) } });
+      const fromUpload = await restore(uploadId, 'restore-gym');
+      assert.equal(fromUpload.statusCode, 200, JSON.stringify(fromUpload.body));
+
+      // One 'Before a restore' is kept, and restoring it makes another.
+      const safety = fromUpload.body.data.safetyBackup;
+      assert.equal(await PlatformBackup.countDocuments({ gymId: gym._id, kind: 'pre-restore' }), 1);
+      const fromSafety = await restore(safety, 'restore-gym');
+      assert.equal(fromSafety.statusCode, 200, JSON.stringify(fromSafety.body));
+      const kept = await PlatformBackup.findById(safety).lean();
+      assert.ok(kept && blobs.has(kept.url), 'the backup restored from is still there');
+    });
+  } finally {
+    if (previousKeep === undefined) delete process.env.BACKUP_KEEP_DAILY;
+    else process.env.BACKUP_KEEP_DAILY = previousKeep;
+  }
+});

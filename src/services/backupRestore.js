@@ -314,7 +314,10 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
 
     let safety;
     try {
-      safety = await backupJobs.storeBackup({ kind: 'pre-restore', actor, now });
+      // The tidy-up after it must spare the file being restored, which is
+      // only opened below: an upload over a day old, or the oldest of a kind
+      // at its keep limit, would otherwise be deleted before it was read.
+      safety = await backupJobs.storeBackup({ kind: 'pre-restore', actor, now, spare: [entry._id] });
     } catch (error) {
       console.error(`[restore] ${gym.slug}: the backup before restoring failed:`, error);
       throw refusal(503, 'PRE_RESTORE_BACKUP_FAILED', 'Nothing was restored: the backup of the gym as it is now could not be made first. Please try again.');

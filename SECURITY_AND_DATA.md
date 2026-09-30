@@ -183,7 +183,8 @@ downloaded. Administrators only, every step in the audit log:
    names the gym by id. An uploaded file is also encrypted with this gym's
    key, and another gym's stored backups cannot be named at all.
 4. A backup of the gym as it is now is stored (kind `pre-restore`). If it
-   cannot be made, nothing is touched.
+   cannot be made, nothing is touched. The tidy-up of old backups after it
+   spares the file being restored, which is only read in the next step.
 5. Every collection in the file is loaded into a staging collection
    (`__restoring__<name>`) with its options and indexes, beside the live one.
    Until the whole file has been read and checked the live data is untouched;
