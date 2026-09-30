@@ -23,13 +23,17 @@ let PlatformBackup;
 
 // The Blob store, in memory: public-looking URLs, bytes kept as given.
 const blobs = new Map();
+// Stands in for the store's random suffix: never reused, even after deletes
+// (blobs.size was, so a backup made in the same second as a deleted one got
+// its URL).
+let blobSerial = 0;
 let storeOn = true;
 function useMemoryStore() {
   storage.configured = () => storeOn;
   storage.save = async (pathname, body) => {
     const chunks = [];
     for await (const chunk of body) chunks.push(chunk);
-    const url = `https://teststore.public.blob.vercel-storage.com/${pathname.replace(/\.gpbackup$/, '')}-${blobs.size + 1}.gpbackup`;
+    const url = `https://teststore.public.blob.vercel-storage.com/${pathname.replace(/\.gpbackup$/, '')}-${(blobSerial += 1)}.gpbackup`;
     blobs.set(url, Buffer.concat(chunks));
     return { url, pathname };
   };
