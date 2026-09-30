@@ -287,13 +287,30 @@ function googleErrorCode(error) {
   return /^[a-z_]{1,64}$/i.test(code) ? code : 'unknown_error';
 }
 
+// What a duplicate-key refusal on an account means. A second member with no
+// email is refused on the email index only while the gym's database still
+// has the old always-unique one (scripts/migrateEmailIndex.js replaces it).
+function duplicateMessage(error) {
+    const key = (error && (error.keyValue || error.keyPattern)) || {};
+    if ('email' in key && (key.email === null || key.email === undefined)) {
+        return "This gym's database cannot hold a second member without an email yet: it needs a one-off update (scripts/migrateEmailIndex.js). Add an email address for now.";
+    }
+    if ('memberCode' in key) return 'That member ID is already in use';
+    if ('username' in key) return 'That username is already in use';
+    return 'Email already in use';
+}
+
 const userController = {
 
 
     // POST /admin/users - Admin creates a user
     //
-    // { firstName, lastName, email, role, phone,
+    // { firstName, lastName, email?, role, phone,
     //   credentials?: 'email' | 'show' | 'set', password? }
+    //
+    // The email is optional -- plenty of members never give one -- but then a
+    // phone number is required, so the gym can still reach them and find
+    // them at the desk. Such a member signs in with their username.
     //
     // How the first password reaches the person (services/adminPasswords.js
     // initialPassword): emailed (the default), generated and shown to the
@@ -304,17 +321,22 @@ const userController = {
         try {
             const { firstName, lastName, email, role, phone } = req.body;
 
-            if (!firstName || !lastName || !email) {
-                return res.status(400).json({ message: 'First name, last name and email are required' });
+            if (!firstName || !lastName) {
+                return res.status(400).json({ message: 'First name and last name are required' });
             }
 
-            const normalisedEmail = String(email).toLowerCase().trim();
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalisedEmail)) {
+            const normalisedEmail = String(email || '').toLowerCase().trim();
+            const cleanPhone = String(phone || '').trim();
+            if (!normalisedEmail && !cleanPhone) {
+                return res.status(400).json({ message: 'Give an email address or a phone number' });
+            }
+            if (normalisedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalisedEmail)) {
                 return res.status(400).json({ message: 'Please provide a valid email address' });
             }
 
-            const existing = await User.findOne({ email: normalisedEmail });
-            if (existing) {
+            // Only an address that was given is looked up: `{ email: '' }`
+            // must never be asked, it means nothing.
+            if (normalisedEmail && (await User.exists({ email: normalisedEmail }))) {
                 return res.status(409).json({ message: 'Email already in use' });
             }
 
@@ -335,7 +357,8 @@ const userController = {
             const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: assignedRole });
             if (refusal) return res.status(403).json({ message: refusal });
 
-            const initial = initialPassword(req.body, { canEmail: true });
+            // Nowhere to email a password: it is shown to the admin instead.
+            const initial = initialPassword(req.body, { canEmail: !!normalisedEmail });
             if (initial.problem) return res.status(400).json({ message: initial.problem });
 
             // Knowing a new account's password is being able to sign in as
@@ -358,10 +381,10 @@ const userController = {
             const user = await User.create({
                 firstName: String(firstName).trim(),
                 lastName: String(lastName).trim(),
-                email: normalisedEmail,
+                email: normalisedEmail || undefined,
                 password: hashed,
                 role: assignedRole,
-                phone: phone ? String(phone).trim() : null,
+                phone: cleanPhone || null,
                 // Creating someone straight into a staff role should make them
                 // staff, or they would be invisible on the Staff tab that
                 // manages their payroll and roster.
@@ -412,7 +435,7 @@ const userController = {
             });
         } catch (error) {
             if (error && error.code === 11000) {
-                return res.status(409).json({ message: 'Email already in use' });
+                return res.status(409).json({ message: duplicateMessage(error) });
             }
             return res.status(400).json({ message: 'Error creating user', error: error.message });
         }

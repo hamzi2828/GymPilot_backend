@@ -28,3 +28,33 @@ test('headers are matched loosely by name', () => {
   assert.equal(map.package, 5);
   assert.equal(map.endDate, 6);
 });
+
+test('the new columns are recognised by their usual names', () => {
+  const { mapHeaders: map } = require('../../src/controller/userImportController');
+  const columns = map(['Full Name', 'Mobile', 'Home Address', 'Joining Date', 'Status', 'Discount', 'Package']);
+  assert.equal(columns.fullName, 0);
+  assert.equal(columns.phone, 1);
+  assert.equal(columns.address, 2);
+  assert.equal(columns.joinedAt, 3);
+  assert.equal(columns.active, 4);
+  assert.equal(columns.discount, 5);
+  assert.equal(columns.package, 6);
+  assert.equal(map(['Name', 'Registration Date']).joinedAt, 1);
+  assert.equal(map(['Name']).fullName, 0);
+  // "Joined" stays the membership start it always was.
+  assert.equal(map(['Joined']).startDate, 0);
+});
+
+test('a full name splits into a first word and the rest', () => {
+  const { splitFullName } = require('../../src/controller/userImportController');
+  assert.deepEqual(splitFullName('  Ayesha   Khan Malik '), { firstName: 'Ayesha', lastName: 'Khan Malik' });
+  assert.deepEqual(splitFullName('Cher'), { firstName: 'Cher', lastName: '' });
+  assert.deepEqual(splitFullName(''), { firstName: '', lastName: '' });
+});
+
+test('an active cell reads yes/no, active/inactive and 1/0; blank is active', () => {
+  const { parseActive } = require('../../src/controller/userImportController');
+  for (const yes of ['yes', 'Y', 'true', '1', 'Active', '']) assert.equal(parseActive(yes), true, yes);
+  for (const no of ['no', 'N', 'false', '0', 'INACTIVE', 'disabled']) assert.equal(parseActive(no), false, no);
+  assert.equal(parseActive('maybe'), null);
+});
