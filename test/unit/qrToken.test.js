@@ -22,7 +22,10 @@ test('a QR token verifies for the gym that issued it and nobody else', async () 
 
   await runWithTenant(gymA, () => {
     assert.deepEqual(verifyQrToken(token), { personType: 'member', personId });
-    assert.equal(verifyQrToken(token.slice(0, -1) + 'x'), null, 'tampered signature');
+    // Always a different last character: a signature that already ended in
+    // 'x' made the old "tamper" a no-op (about one run in 64).
+    const tampered = token.slice(0, -1) + (token.endsWith('x') ? 'y' : 'x');
+    assert.equal(verifyQrToken(tampered), null, 'tampered signature');
     assert.equal(verifyQrToken('GPQ1.member.notanid.1.sig'), null);
   });
 
