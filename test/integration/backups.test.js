@@ -380,3 +380,49 @@ test('two daily runs overlapping store one backup of a gym, not two', async () =
   await raw.updateMany({ kind: 'daily', gymSlug: 'backup-gym' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
   assert.ok((await h.inGym(gym, () => backupJobs.dailyBackup())).backup);
 });
+
+test('deleting a gym deletes its stored backups; a store that cannot does not stop the deletion', async () => {
+  // Nothing could open them again -- they are encrypted for that gym's id
+  // -- so they used to sit in the public store for ever, members' data and
+  // all, and in the list with nobody to see them.
+  const provisioning = h.src('platform/provisioning');
+  const Gym = h.src('platform/models/gymModel');
+  const theirs = await PlatformBackup.countDocuments({ gymId: gym._id });
+
+  const backUp = async (slug) => {
+    const doomed = await h.createGym(slug);
+    await h.inGym(doomed, async () => {
+      await User.create({ firstName: 'Last', lastName: 'Member', email: `last@${slug}.test`, role: 'user' });
+      for (let i = 0; i < 2; i += 1) assert.equal((await h.call(controller.run, ownerReq())).statusCode, 201);
+    });
+    return { doomed, rows: await PlatformBackup.find({ gymId: doomed._id }).lean() };
+  };
+
+  const { doomed, rows } = await backUp('doomed-gym');
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => blobs.has(row.url)));
+  const result = await provisioning.deleteGym(await Gym.findById(doomed._id), { confirmSlug: 'doomed-gym' });
+  assert.equal(result.deleted, true);
+  assert.equal(result.backupsRemoved, 2);
+  assert.equal(await PlatformBackup.countDocuments({ gymId: doomed._id }), 0);
+  assert.ok(rows.every((row) => !blobs.has(row.url)), 'the files are gone from the store');
+  assert.equal(await PlatformBackup.countDocuments({ gymId: gym._id }), theirs, 'another gym keeps its backups');
+
+  // The store refusing: the gym still goes, and its backups stay listed --
+  // nothing is ever in the store unlisted -- for the operator to clear.
+  const stuck = await backUp('stuck-gym');
+  const remove = storage.remove;
+  storage.remove = async () => {
+    throw new Error('store unavailable');
+  };
+  try {
+    const kept = await provisioning.deleteGym(await Gym.findById(stuck.doomed._id), { confirmSlug: 'stuck-gym' });
+    assert.equal(kept.deleted, true);
+    assert.equal(kept.backupsLeft, 2);
+    assert.match(kept.backupsError, /store unavailable/);
+    assert.equal(await Gym.countDocuments({ _id: stuck.doomed._id }), 0);
+    assert.equal(await PlatformBackup.countDocuments({ gymId: stuck.doomed._id }), 2);
+  } finally {
+    storage.remove = remove;
+  }
+});

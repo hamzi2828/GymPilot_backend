@@ -148,7 +148,10 @@ in the platform database (`platform_backups`), not the gym's, so a restore
 can never roll back the list of backups. Settings → Data & backup shows date,
 kind, size and record count; *Download* has the server decrypt one and
 stream it back as the plain `.tar.gz`. The newest `BACKUP_KEEP_DAILY`
-(default 7) of each kind are kept per gym.
+(default 7) of each kind are kept per gym. Deleting a gym deletes its stored
+backups (`provisioning.deleteGym`), whether or not its database is kept:
+encrypted for its id, nothing could open them again. A file the store will
+not remove stays listed, and the deletion's answer says how many.
 
 Why encrypted: every file in the Blob store is public — the installed
 `@vercel/blob` (0.23) has no private access — so a stored backup is

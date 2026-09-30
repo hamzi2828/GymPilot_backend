@@ -31,6 +31,10 @@ async function main() {
   const result = await deleteGym(gym, { confirmSlug: confirm, dropDatabase });
 
   console.log(`\nDeleted "${gym.name}" (${gym.slug}).`);
+  console.log(`Stored backups removed: ${result.backupsRemoved}.`);
+  if (result.backupsLeft) {
+    console.log(`${result.backupsLeft} stored backup(s) could not be removed (${result.backupsError}); they are still listed in platform_backups.`);
+  }
   console.log(dropDatabase ? `Database "${gym.database.name}" dropped.\n` : `Database "${gym.database.name}" kept.\n`);
   return result;
 }

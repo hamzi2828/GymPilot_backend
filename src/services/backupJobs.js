@@ -157,6 +157,28 @@ async function removeBackup(entry) {
   await PlatformBackup.deleteOne({ _id: entry._id });
 }
 
+/**
+ * Every stored backup of a gym that is being deleted, gone from the store
+ * and the list. Nothing could open them again -- they are encrypted for
+ * that gym's id -- so they would only sit in the public store, members'
+ * data and all. As in prune, the list entries go only once the files have:
+ * when the store cannot remove them they stay listed (and the answer says
+ * so), rather than lying in the store unlisted. Never throws.
+ */
+async function removeGymBackups(gymId) {
+  let rows = [];
+  try {
+    rows = await PlatformBackup.find({ gymId }).select('_id url').lean();
+    if (!rows.length) return { removed: 0, left: 0 };
+    await storage.remove(rows.map((row) => row.url).filter(Boolean));
+    await PlatformBackup.deleteMany({ _id: { $in: rows.map((row) => row._id) } });
+    return { removed: rows.length, left: 0 };
+  } catch (error) {
+    console.error(`[backups] could not remove the backups of deleted gym ${gymId}:`, error.message);
+    return { removed: 0, left: rows.length, error: error.message };
+  }
+}
+
 /** The gym in context's stored backups, newest first, as the owner sees them. */
 async function listBackups() {
   const gym = currentTenant();
@@ -263,6 +285,7 @@ module.exports = {
   storeBackup,
   prune,
   removeBackup,
+  removeGymBackups,
   listBackups,
   publicBackup,
   takeLock,
