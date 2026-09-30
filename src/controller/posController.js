@@ -19,7 +19,10 @@ const { branding } = require('../services/branding');
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
 const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const METHODS = ['cash', 'card', 'bank_transfer', 'online', 'account', 'other'];
+// How a sale was paid. The mobile wallets (JazzCash, Easypaisa, any other
+// wallet) are the same values package orders take. Anything else is refused,
+// never read as cash. Kept in step with the enum in models/saleModel.js.
+const METHODS = ['cash', 'card', 'bank_transfer', 'jazzcash', 'easypaisa', 'wallet', 'online', 'account', 'other'];
 // Thermal roll widths the receipt is laid out for.
 const PAPER_WIDTHS = ['80mm', '58mm'];
 const RECEIPT_FOOTER_MAX = 300;
@@ -75,6 +78,8 @@ function saleView(s) {
     total: s.total,
     currency: s.currency,
     payment_method: s.paymentMethod,
+    tendered: s.tendered ?? null,
+    change: s.change ?? null,
     status: s.status,
     member_id: s.memberId ? String(s.memberId) : null,
     member_name: s.memberName || '',
@@ -168,8 +173,11 @@ module.exports = {
   listProducts: async (req, res) => {
     try {
       const filter = req.query.all === '1' ? {} : { isActive: true };
-      const rows = await Product.find(filter).sort({ order: 1, category: 1, name: 1 }).lean();
-      return res.json({ success: true, currency: await gymCurrency(), data: rows.map(productView), low_stock: rows.filter((p) => p.trackStock !== false && (p.stock || 0) <= (p.lowStockAt || 0) && p.isActive !== false).length });
+      const [rows, settings] = await Promise.all([Product.find(filter).sort({ order: 1, category: 1, name: 1 }).lean(), Settings.getSettings().catch(() => null)]);
+      // The tax rate goes with the prices so the till can show the tax in a
+      // basket before it is paid for, worked out as createSale works it out.
+      const taxRate = Math.max(0, Number((settings && settings.taxRate) || 0));
+      return res.json({ success: true, currency: await gymCurrency(), tax_rate: taxRate, data: rows.map(productView), low_stock: rows.filter((p) => p.trackStock !== false && (p.stock || 0) <= (p.lowStockAt || 0) && p.isActive !== false).length });
     } catch (error) {
       console.error('[pos] products failed:', error);
       return fail(res, 500, 'Could not load products');
@@ -307,7 +315,7 @@ module.exports = {
 
   // ---- sales --------------------------------------------------------------------
 
-  // POST /admin/pos/sales   { items: [{productId, quantity}], discount, paymentMethod, memberId, notes }
+  // POST /admin/pos/sales   { items: [{productId, quantity}], discount, paymentMethod, tendered, memberId, notes }
   createSale: async (req, res) => {
     try {
       const b = req.body || {};
@@ -336,6 +344,19 @@ module.exports = {
       const total = round(subtotal - discount);
       const taxableShare = subtotal ? items.filter((i) => i.taxable).reduce((s, i) => s + i.total, 0) / subtotal : 0;
       const taxAmount = taxRate > 0 ? round((total * taxableShare) - (total * taxableShare) / (1 + taxRate / 100)) : 0;
+
+      // Cash handed over, when the cashier typed it in. Never less than the
+      // total, and the change is worked out here so the receipt and the till
+      // agree. Only cash has change; for any other method it is ignored.
+      let tendered = null;
+      let change = null;
+      if (b.paymentMethod === 'cash' && b.tendered !== undefined && b.tendered !== null && b.tendered !== '') {
+        const given = Number(b.tendered);
+        if (!Number.isFinite(given) || given < 0) return fail(res, 400, 'Cash received must be an amount');
+        if (round(given) < total) return fail(res, 400, `Cash received (${round(given).toFixed(2)}) is less than the total (${total.toFixed(2)})`);
+        tendered = round(given);
+        change = round(given - total);
+      }
 
       let member = null;
       if (b.memberId) {
@@ -369,6 +390,8 @@ module.exports = {
           total,
           currency,
           paymentMethod: b.paymentMethod,
+          tendered,
+          change,
           memberId: member ? member._id : null,
           memberName: member ? [member.firstName, member.lastName].filter(Boolean).join(' ') || member.email : '',
           soldBy: actorId(req),

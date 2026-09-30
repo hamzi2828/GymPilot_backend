@@ -212,3 +212,70 @@ test('over HTTP: a view role on the till reads the receipt settings but cannot c
     assert.equal(trail[0].tab, 'pos');
   });
 });
+
+test('mobile wallets are payment methods; anything else is refused and takes nothing', async () => {
+  await h.inGym(gym, async () => {
+    const gel = await product('Energy gel', 10, 3);
+    const pay = (paymentMethod) => h.call(pos.createSale, as({ body: { items: [{ productId: gel.id, quantity: 1 }], paymentMethod } }));
+    for (const method of ['jazzcash', 'easypaisa', 'wallet']) {
+      const res = await pay(method);
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      assert.equal(res.body.data.payment_method, method);
+    }
+    // Not read as cash, not lower-cased into a match: refused.
+    for (const method of ['bitcoin', 'JazzCash', '', undefined]) {
+      const res = await pay(method);
+      assert.equal(res.statusCode, 400, `${method}: ${JSON.stringify(res.body)}`);
+    }
+    assert.equal(await stockOf(gel.id), 7, 'a refused sale takes no stock');
+    assert.equal(await Sale.countDocuments({ 'items.productId': gel.id }), 3);
+  });
+});
+
+test('the tax in a sale is the included share of its taxable lines, after the discount, at the Settings rate', async () => {
+  await h.inGym(gym, async () => {
+    const Settings = h.src('models/settings');
+    await Settings.updateOne({ isActive: true }, { $set: { taxRate: 20 } });
+    try {
+      const listed = await h.call(pos.listProducts, as({ query: {} }));
+      assert.equal(listed.body.tax_rate, 20, 'the till is told the rate so the basket can show it');
+
+      const shake = await product('Shake', 10, 6);
+      const pass = await h.call(pos.createProduct, as({ body: { name: 'Day pass', price: 4, taxable: false, trackStock: false } }));
+      assert.equal(pass.statusCode, 201, JSON.stringify(pass.body));
+      const res = await h.call(pos.createSale, as({ body: { items: [{ productId: shake.id, quantity: 2 }, { productId: pass.body.data.id, quantity: 1 }], discount: 2, paymentMethod: 'card' } }));
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      const sale = res.body.data;
+      // 16 in the basket, 2 off, 14 to pay. The taxable 12 of the 16 is
+      // 10.50 of the 14, which includes 20% tax: 10.50 - 10.50 / 1.2 = 1.75.
+      assert.deepEqual([sale.subtotal, sale.discount, sale.total, sale.tax_rate, sale.tax_amount], [16, 2, 14, 20, 1.75]);
+      assert.deepEqual(sale.items.map((i) => [i.quantity, i.unit_price, i.total]), [[2, 6, 12], [1, 4, 4]]);
+    } finally {
+      await Settings.updateOne({ isActive: true }, { $set: { taxRate: 0 } });
+    }
+  });
+});
+
+test('cash received: the change is worked out, too little is refused, and other methods ignore it', async () => {
+  await h.inGym(gym, async () => {
+    const bottle = await product('Bottle', 10, 7.25);
+    const sell1 = (paymentMethod, tendered) => h.call(pos.createSale, as({ body: { items: [{ productId: bottle.id, quantity: 1 }], paymentMethod, tendered } }));
+
+    const short = await sell1('cash', 5);
+    assert.equal(short.statusCode, 400, JSON.stringify(short.body));
+    assert.equal(await stockOf(bottle.id), 10);
+    assert.equal((await sell1('cash', 'lots')).statusCode, 400);
+
+    const paid = await sell1('cash', 10);
+    assert.equal(paid.statusCode, 201, JSON.stringify(paid.body));
+    assert.deepEqual([paid.body.data.total, paid.body.data.tendered, paid.body.data.change], [7.25, 10, 2.75]);
+
+    const exact = await sell1('cash', undefined);
+    assert.deepEqual([exact.body.data.tendered, exact.body.data.change], [null, null]);
+
+    const card = await sell1('card', 50);
+    assert.equal(card.statusCode, 201, JSON.stringify(card.body));
+    assert.deepEqual([card.body.data.tendered, card.body.data.change], [null, null]);
+    assert.equal(await stockOf(bottle.id), 7);
+  });
+});

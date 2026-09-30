@@ -31,7 +31,14 @@ const saleSchema = new mongoose.Schema(
     taxAmount: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
     currency: { type: String, default: 'USD', uppercase: true },
-    paymentMethod: { type: String, enum: ['cash', 'card', 'bank_transfer', 'online', 'account', 'other'], default: 'cash' },
+    // Mobile wallets beside cash and card: JazzCash, Easypaisa, or another
+    // wallet ('wallet'). The same values package orders take. Kept in step
+    // with METHODS in controller/posController.js.
+    paymentMethod: { type: String, enum: ['cash', 'card', 'bank_transfer', 'jazzcash', 'easypaisa', 'wallet', 'online', 'account', 'other'], default: 'cash' },
+    // Cash handed over and the change given back, for a cash sale where the
+    // cashier entered it; null otherwise (paid exactly, or not cash).
+    tendered: { type: Number, default: null },
+    change: { type: Number, default: null },
     status: { type: String, enum: ['paid', 'refunded'], default: 'paid', index: true },
     memberId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
     memberName: { type: String, default: '' },
