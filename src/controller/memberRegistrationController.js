@@ -11,9 +11,15 @@
 //     staffNotes?, credentials?: 'email' | 'show' | 'set', password?,
 //     membership?: { packageId, paymentMethod?, markPaid?, couponCode?,
 //       durationMonths?, startDate? | startAfterDays?, discountAmount?,
-//       discountNote?, amountOverride?, waiveJoiningFee?, amountPaid?,
-//       trainerId?, trainerFee?, trainerCommissionType?,
+//       discountNote?, amountOverride?, waiveJoiningFee? | joiningFeeOverride?,
+//       amountPaid?, trainerId?, trainerFee?, trainerCommissionType?,
 //       trainerCommissionValue?, notes? } }
+//
+// `joiningFeeOverride` is this desk's own: an admission fee other than the
+// package's (a promotion, a family rate), charged as the admission fee --
+// so the accounts count it as admission, which an override of the whole
+// total (`amountOverride`) cannot do. Not with waiveJoiningFee. The order's
+// package snapshot records the fee as charged.
 //
 //   → 201 { success, message, member, order (null without a membership),
 //           credentials, emailed, emailError, password? }
@@ -92,8 +98,23 @@ async function readSale(block, { email }) {
   const markPaid = block.markPaid !== false && block.markPaid !== 'false';
   const couponCode = present(block.couponCode) ? String(block.couponCode) : undefined;
 
-  const pkg = await Package.findById(block.packageId);
-  if (!pkg) throw new MembershipError('Package not found', 404, 'PACKAGE_NOT_FOUND');
+  let joiningFeeOverride;
+  if (present(block.joiningFeeOverride)) {
+    if (terms.chargeJoiningFee === false) {
+      throw new MembershipError('Waive the admission fee or charge a different one, not both', 400, 'INVALID_TERMS');
+    }
+    const fee = typeof block.joiningFeeOverride === 'number' ? block.joiningFeeOverride : parseAmount(block.joiningFeeOverride);
+    if (fee === null || !Number.isFinite(fee) || fee < 0) {
+      throw new MembershipError('joiningFeeOverride must be an amount of 0 or more', 400, 'INVALID_TERMS');
+    }
+    joiningFeeOverride = round2(fee);
+  }
+
+  const found = await Package.findById(block.packageId);
+  if (!found) throw new MembershipError('Package not found', 404, 'PACKAGE_NOT_FOUND');
+  // The package as this sale charges it: createManualOrder takes the
+  // admission fee from the package, so a different one is handed over there.
+  const pkg = joiningFeeOverride === undefined ? found : Object.assign(found.toObject(), { joiningFee: joiningFeeOverride });
 
   const listPrice = parseAmount(pkg.price);
   if (listPrice === null) {

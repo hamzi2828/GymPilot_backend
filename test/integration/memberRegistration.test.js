@@ -135,6 +135,36 @@ test('a member registered with a package, a trainer and part of the money: one r
   assert.equal(confirmed.length, 1, 'the member is sent the membership confirmation');
 });
 
+test('a different admission fee is charged as the admission fee, not taken off the total', async () => {
+  const res = await post(admin, {
+    firstName: 'Fam',
+    lastName: 'Rate',
+    phone: '0355 1212121',
+    credentials: 'show',
+    membership: { packageId: String(monthly._id), joiningFeeOverride: 1000, paymentMethod: 'easypaisa' }
+  });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const { payment, packageDetails } = res.body.order;
+  assert.equal(payment.amount, 6000);
+  assert.equal(payment.joiningFee, 1000, 'the accounts count it as admission');
+  assert.equal(payment.method, 'easypaisa');
+  assert.equal(packageDetails.joiningFee, 1000);
+  // The package itself is unchanged.
+  assert.equal((await inGym(() => Package.findById(monthly._id).lean())).joiningFee, 2000);
+
+  const both = await post(admin, {
+    firstName: 'Fam',
+    lastName: 'Both',
+    phone: '0355 1212122',
+    membership: { packageId: String(monthly._id), joiningFeeOverride: 1000, waiveJoiningFee: true }
+  });
+  assert.equal(both.statusCode, 400);
+  assert.match(both.body.message, /not both/);
+  const negative = await post(admin, { firstName: 'Fam', lastName: 'Neg', phone: '0355 1212123', membership: { packageId: String(monthly._id), joiningFeeOverride: -5 } });
+  assert.equal(negative.statusCode, 400);
+  assert.equal(await inGym(() => User.countDocuments({ phone: { $in: ['0355 1212122', '0355 1212123'] } })), 0);
+});
+
 test('without a membership it registers the member alone', async () => {
   const res = await post(receptionist, { firstName: 'Omar', lastName: 'Solo', email: 'omar@register.test' });
   assert.equal(res.statusCode, 201, JSON.stringify(res.body));
