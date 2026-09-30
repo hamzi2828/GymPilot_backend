@@ -3,7 +3,8 @@
 // The numbers behind the business over a chosen range, drawn from the same
 // collections the operational screens use: revenue and new members over
 // time, attendance and its busiest hours, classes by demand, memberships
-// won and lost, leads, personal training -- and every list as a CSV.
+// won and lost, leads, personal training -- and every list as a CSV or an
+// Excel workbook.
 
 const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const ClassBooking = require('../gymfolio/models/classBookingModel');
@@ -17,6 +18,7 @@ const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 const { sendCsv } = require('../services/csv');
+const { sendXlsx } = require('../services/xlsx');
 const { countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
 const EXPIRING_WINDOW_DAYS = 14;
@@ -37,6 +39,19 @@ function fill(buckets, rows, keyOf, valueOf) {
     if (map.has(key)) map.set(key, map.get(key) + valueOf(row));
   }
   return buckets.map((b) => ({ key: b.key, label: b.label, value: Math.round(map.get(b.key) * 100) / 100 }));
+}
+
+// CSV unless the caller asks for Excel (?format=xlsx, or an export name
+// ending .xlsx): the same columns and rows either way. In the workbook the
+// columns marked `type: 'date'` are real dates and amounts are numbers.
+function exportFormat(req) {
+  const format = String((req.query && req.query.format) || '').toLowerCase();
+  return format === 'xlsx' || /\.xlsx$/i.test(String((req.params && req.params.kind) || '')) ? 'xlsx' : 'csv';
+}
+
+function sendExport(req, res, name, sheet, columns, rows) {
+  if (exportFormat(req) === 'xlsx') return sendXlsx(res, `${name}.xlsx`, columns, rows, { sheet });
+  return sendCsv(res, `${name}.csv`, columns, rows);
 }
 
 function dateBucketExpr(field, grain, timezone) {
@@ -274,11 +289,11 @@ module.exports = {
     }
   },
 
-  // GET /admin/reports/export/:kind?from=&to=
+  // GET /admin/reports/export/:kind?from=&to=[&format=xlsx]
   export: async (req, res) => {
     try {
       const range = L.readRange(req.query);
-      const kind = String(req.params.kind || '').replace(/\.csv$/, '');
+      const kind = String(req.params.kind || '').replace(/\.(csv|xlsx)$/i, '');
       const stamp = `${range.from}_${range.to}`;
       const inRange = { $gte: range.start, $lt: range.end };
       const keyRange = { $gte: range.from, $lte: range.to };
@@ -289,25 +304,25 @@ module.exports = {
         const everyone = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
         const filter = everyone ? { role: 'user' } : { role: 'user', createdAt: inRange };
         const rows = await User.find(filter).select('firstName lastName email phone memberCode gender dateOfBirth tags source createdAt lastLogin isActive').sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, everyone ? `members_${T.dateKey()}.csv` : `members_joined_${stamp}.csv`, [
+        return sendExport(req, res, everyone ? `members_${T.dateKey()}` : `members_joined_${stamp}`, 'Members', [
           { key: 'memberCode', label: 'Member code' },
           { key: 'firstName', label: 'First name' },
           { key: 'lastName', label: 'Last name' },
           { key: 'email', label: 'Email' },
           { key: 'phone', label: 'Phone' },
           { key: 'gender', label: 'Gender' },
-          { key: 'dateOfBirth', label: 'Date of birth', value: (r) => (r.dateOfBirth ? T.dateKey(r.dateOfBirth) : '') },
+          { key: 'dateOfBirth', label: 'Date of birth', type: 'date', value: (r) => (r.dateOfBirth ? T.dateKey(r.dateOfBirth) : '') },
           { key: 'tags', label: 'Tags', value: (r) => (r.tags || []).join(' ') },
           { key: 'source', label: 'Source' },
           { key: 'isActive', label: 'Active', value: (r) => (r.isActive === false ? 'no' : 'yes') },
-          { key: 'createdAt', label: 'Joined', value: (r) => T.dateKey(r.createdAt) },
-          { key: 'lastLogin', label: 'Last login', value: (r) => (r.lastLogin ? T.dateKey(r.lastLogin) : '') }
+          { key: 'createdAt', label: 'Joined', type: 'date', value: (r) => T.dateKey(r.createdAt) },
+          { key: 'lastLogin', label: 'Last login', type: 'date', value: (r) => (r.lastLogin ? T.dateKey(r.lastLogin) : '') }
         ], rows);
       }
 
       if (kind === 'orders') {
         const rows = await PackageOrder.find({ $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } }).sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `orders_${stamp}.csv`, [
+        return sendExport(req, res, `orders_${stamp}`, 'Orders', [
           { key: 'orderNumber', label: 'Order' },
           { key: 'name', label: 'Member', value: (r) => (r.customerInfo && r.customerInfo.fullName) || '' },
           { key: 'email', label: 'Email', value: (r) => (r.customerInfo && r.customerInfo.email) || '' },
@@ -317,17 +332,17 @@ module.exports = {
           { key: 'method', label: 'Method', value: (r) => (r.payment && r.payment.method) || '' },
           { key: 'paymentStatus', label: 'Payment', value: (r) => (r.payment && r.payment.status) || '' },
           { key: 'status', label: 'Membership status' },
-          { key: 'paidAt', label: 'Paid on', value: (r) => (r.payment && r.payment.paidAt ? T.dateKey(r.payment.paidAt) : T.dateKey(r.createdAt)) },
-          { key: 'start', label: 'Starts', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
-          { key: 'end', label: 'Ends', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
+          { key: 'paidAt', label: 'Paid on', type: 'date', value: (r) => (r.payment && r.payment.paidAt ? T.dateKey(r.payment.paidAt) : T.dateKey(r.createdAt)) },
+          { key: 'start', label: 'Starts', type: 'date', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
+          { key: 'end', label: 'Ends', type: 'date', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
           { key: 'invoice', label: 'Invoice', value: (r) => (r.invoice && r.invoice.number) || '' }
         ], rows);
       }
 
       if (kind === 'attendance') {
         const rows = await Attendance.find({ shiftDate: keyRange }).sort({ checkInAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `attendance_${stamp}.csv`, [
-          { key: 'shiftDate', label: 'Date' },
+        return sendExport(req, res, `attendance_${stamp}`, 'Attendance', [
+          { key: 'shiftDate', label: 'Date', type: 'date' },
           { key: 'personType', label: 'Type' },
           { key: 'personName', label: 'Name' },
           { key: 'personCode', label: 'Code' },
@@ -342,8 +357,8 @@ module.exports = {
 
       if (kind === 'bookings') {
         const rows = await ClassBooking.find({ sessionDate: keyRange }).sort({ sessionDate: -1, sessionStart: 1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `bookings_${stamp}.csv`, [
-          { key: 'sessionDate', label: 'Date' },
+        return sendExport(req, res, `bookings_${stamp}`, 'Bookings', [
+          { key: 'sessionDate', label: 'Date', type: 'date' },
           { key: 'sessionStart', label: 'Start' },
           { key: 'className', label: 'Class' },
           { key: 'instructorName', label: 'Instructor' },
@@ -353,13 +368,13 @@ module.exports = {
           { key: 'membershipStatus', label: 'Membership' },
           { key: 'bookedBy', label: 'Booked by' },
           { key: 'creditUsed', label: 'Credit used', value: (r) => (r.creditUsed ? 'yes' : 'no') },
-          { key: 'createdAt', label: 'Booked on', value: (r) => T.dateKey(r.createdAt) }
+          { key: 'createdAt', label: 'Booked on', type: 'date', value: (r) => T.dateKey(r.createdAt) }
         ], rows);
       }
 
       if (kind === 'leads') {
         const rows = await Lead.find({ createdAt: inRange }).sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `leads_${stamp}.csv`, [
+        return sendExport(req, res, `leads_${stamp}`, 'Leads', [
           { key: 'firstName', label: 'First name' },
           { key: 'lastName', label: 'Last name' },
           { key: 'email', label: 'Email' },
@@ -367,16 +382,16 @@ module.exports = {
           { key: 'source', label: 'Source' },
           { key: 'status', label: 'Status' },
           { key: 'interest', label: 'Interest' },
-          { key: 'nextFollowUpAt', label: 'Follow up', value: (r) => (r.nextFollowUpAt ? T.dateKey(r.nextFollowUpAt) : '') },
+          { key: 'nextFollowUpAt', label: 'Follow up', type: 'date', value: (r) => (r.nextFollowUpAt ? T.dateKey(r.nextFollowUpAt) : '') },
           { key: 'lostReason', label: 'Lost reason' },
-          { key: 'createdAt', label: 'Created', value: (r) => T.dateKey(r.createdAt) }
+          { key: 'createdAt', label: 'Created', type: 'date', value: (r) => T.dateKey(r.createdAt) }
         ], rows);
       }
 
       if (kind === 'pt-sessions') {
         const rows = await PtSession.find({ date: keyRange }).sort({ date: -1, startTime: 1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `pt_sessions_${stamp}.csv`, [
-          { key: 'date', label: 'Date' },
+        return sendExport(req, res, `pt_sessions_${stamp}`, 'PT sessions', [
+          { key: 'date', label: 'Date', type: 'date' },
           { key: 'startTime', label: 'Start' },
           { key: 'trainerName', label: 'Trainer' },
           { key: 'memberName', label: 'Member' },
@@ -390,9 +405,9 @@ module.exports = {
 
       if (kind === 'expenses') {
         const rows = await Expense.find({ incurredOn: inRange }).sort({ incurredOn: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `expenses_${stamp}.csv`, [
+        return sendExport(req, res, `expenses_${stamp}`, 'Expenses', [
           { key: 'reference', label: 'Reference' },
-          { key: 'incurredOn', label: 'Date', value: (r) => T.dateKey(r.incurredOn) },
+          { key: 'incurredOn', label: 'Date', type: 'date', value: (r) => T.dateKey(r.incurredOn) },
           { key: 'title', label: 'Title' },
           { key: 'category', label: 'Category' },
           { key: 'vendor', label: 'Vendor' },
@@ -400,13 +415,13 @@ module.exports = {
           { key: 'currency', label: 'Currency' },
           { key: 'status', label: 'Status' },
           { key: 'paymentMethod', label: 'Method' },
-          { key: 'paidOn', label: 'Paid on', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
+          { key: 'paidOn', label: 'Paid on', type: 'date', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
         ], rows);
       }
 
       if (kind === 'payslips') {
         const rows = await Payslip.find({ 'period.from': { $gte: range.from }, 'period.to': { $lte: range.to } }).sort({ 'period.from': -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `payslips_${stamp}.csv`, [
+        return sendExport(req, res, `payslips_${stamp}`, 'Payslips', [
           { key: 'number', label: 'Payslip' },
           { key: 'staffName', label: 'Staff' },
           { key: 'period', label: 'Period', value: (r) => `${r.period.from} to ${r.period.to}` },
@@ -418,7 +433,7 @@ module.exports = {
           { key: 'net', label: 'Net' },
           { key: 'currency', label: 'Currency' },
           { key: 'status', label: 'Status' },
-          { key: 'paidOn', label: 'Paid on', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
+          { key: 'paidOn', label: 'Paid on', type: 'date', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
         ], rows);
       }
 

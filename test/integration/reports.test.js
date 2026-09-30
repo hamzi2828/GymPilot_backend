@@ -179,3 +179,46 @@ test('members export: those who joined in the range, or everyone with all=1', as
     assert.deepEqual(csvRows(everyone).slice(1).map((r) => r[email]).sort(), ['ann@reports.test', 'ben@reports.test', 'cat@reports.test', 'dan@reports.test']);
   });
 });
+
+test('every export also comes as a real .xlsx: the CSV\'s rows, amounts as numbers, dates as dates', async () => {
+  const { unzip, readSheet, sheetNames, sheetObjects } = require('../helpers/readXlsx');
+  const { dateSerial } = h.src('services/xlsx');
+  const kinds = ['members', 'orders', 'attendance', 'bookings', 'leads', 'pt-sessions', 'expenses', 'payslips'];
+
+  await h.inGym(gym, async () => {
+    for (const kind of kinds) {
+      const [csv, book] = await Promise.all([
+        h.call(reports.export, { params: { kind }, query: AUGUST }),
+        h.call(reports.export, { params: { kind }, query: { ...AUGUST, format: 'xlsx' } })
+      ]);
+      assert.equal(book.statusCode, 200, `${kind}: ${JSON.stringify(book.body)}`);
+      assert.equal(book.headers['content-type'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      assert.match(book.headers['content-disposition'], /\.xlsx"$/);
+      assert.equal(book.headers['content-disposition'].replace('.xlsx', '.csv'), csv.headers['content-disposition'], `${kind}: same file name`);
+
+      const files = unzip(book.body);
+      const sheet = readSheet(files);
+      const csvLines = csvRows(csv);
+      assert.deepEqual(sheet[0].map((c) => c.value), csvLines[0], `${kind}: same columns, same order`);
+      assert.ok(sheet[0].every((c) => c.style === 1), `${kind}: header row is bold`);
+      assert.equal(sheet.length, csvLines.length, `${kind}: same number of rows`);
+      assert.equal(sheetNames(files).length, 1);
+    }
+
+    // The same export by its old name, with the ending instead of ?format.
+    const suffixed = await h.call(reports.export, { params: { kind: 'orders.xlsx' }, query: AUGUST });
+    assert.equal(suffixed.headers['content-type'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+    const orders = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'orders' }, query: { ...AUGUST, format: 'xlsx' } })).body));
+    const r1 = orders.find((row) => row.Order === 'R-1');
+    assert.equal(r1.Amount, 100, 'an amount is a number cell');
+    assert.equal(r1['Paid on'], dateSerial('2026-08-03'), 'a date is a date cell');
+
+    const expenses = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'expenses' }, query: { ...AUGUST, format: 'xlsx' } })).body));
+    assert.deepEqual(expenses.map((row) => row.Amount).sort((a, b) => a - b), [5, 50, 60, 80, 1000]);
+    assert.equal(expenses.find((row) => row.Reference === 'E-1').Date, dateSerial('2026-08-02'));
+
+    const members = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'members' }, query: { ...AUGUST, format: 'xlsx' } })).body));
+    assert.deepEqual(members.map((row) => row.Joined).sort(), [dateSerial('2026-08-03'), dateSerial('2026-08-03'), dateSerial('2026-08-20')]);
+  });
+});
