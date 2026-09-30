@@ -42,7 +42,7 @@ const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'intern', 'casua
 const PAY_CYCLES = ['monthly', 'biweekly', 'weekly'];
 const STAFF_PREFIX = 'TR-';
 
-function staffWelcomeEmail({ firstName, email, password, roleName, siteName, loginUrl }) {
+function staffWelcomeEmail({ firstName, email, username, password, roleName, siteName, loginUrl }) {
   return `
   <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;color:#1f2937">
     <h2 style="margin:0 0 8px">Welcome to ${siteName}, ${firstName}</h2>
@@ -51,6 +51,7 @@ function staffWelcomeEmail({ firstName, email, password, roleName, siteName, log
     </p>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin:0 0 16px">
       <p style="margin:0 0 6px"><strong>Email:</strong> ${email}</p>
+      ${username ? `<p style="margin:0 0 6px"><strong>Username:</strong> ${username} <span style="color:#6b7280">(signs in instead of the email)</span></p>` : ''}
       <p style="margin:0"><strong>Temporary password:</strong> ${password}</p>
     </div>
     <p style="margin:0 0 16px;color:#4b5563">
@@ -192,6 +193,9 @@ function shapeStaff(user, roleName, stats) {
     first_name: user.firstName,
     last_name: user.lastName,
     email: user.email,
+    // What they can sign in with besides their email, on the website, the
+    // desk and the phone app.
+    username: user.username || '',
     phone: user.phone || '',
     staff_code: user.staffCode || '',
     role: user.role,
@@ -466,6 +470,7 @@ module.exports = {
             staffWelcomeEmail({
               firstName: user.firstName,
               email: normalisedEmail,
+              username: user.username,
               password,
               roleName: roleDoc.name,
               siteName,
@@ -623,6 +628,12 @@ module.exports = {
   // Users screen's business. Rules and session ending:
   // services/adminPasswords.js.
   setPassword: setPasswordHandler({
+    load: (id) => User.findOne({ _id: id, 'employment.isStaff': true }),
+    notFound: 'Staff member not found'
+  }),
+
+  // PUT /api/staff/:id/username   { username }
+  setUsername: require('../services/username').setUsernameHandler({
     load: (id) => User.findOne({ _id: id, 'employment.isStaff': true }),
     notFound: 'Staff member not found'
   }),

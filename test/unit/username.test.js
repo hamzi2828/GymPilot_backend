@@ -67,3 +67,23 @@ test('a gym logo the phone app can load', () => {
   assert.equal(absoluteAsset('/images/logo.png'), '/images/logo.png');
   assert.equal(absoluteAsset('', 'https://demogym.example'), '');
 });
+
+test('the sign-in box: an @ means an email, anything else a username, case ignored', () => {
+  const { loginFilter } = require('../../src/services/username');
+  assert.deepEqual(loginFilter('  Sara.Malik@Example.com '), { email: 'sara.malik@example.com' });
+  assert.deepEqual(loginFilter('SaraMalik284'), { username: 'saramalik284' });
+  assert.equal(loginFilter('   '), null);
+  assert.equal(loginFilter(undefined), null);
+});
+
+test('a username staff choose follows the generated ones: letters and digits, with a letter', () => {
+  const { usernameProblem } = require('../../src/services/username');
+  assert.equal(usernameProblem('AliKhan'), null);
+  assert.equal(usernameProblem('ali2026'), null);
+  assert.match(usernameProblem(''), /required/);
+  assert.match(usernameProblem('ab'), /at least 3/);
+  assert.match(usernameProblem('a'.repeat(31)), /at most 30/);
+  assert.match(usernameProblem('ali.khan'), /letters and digits only/);
+  assert.match(usernameProblem('ali khan'), /letters and digits only/);
+  assert.match(usernameProblem('03001234567'), /one letter/);
+});

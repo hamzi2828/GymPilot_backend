@@ -137,12 +137,12 @@ function welcomeEmailHtml({ firstName, email, username, password, siteName, logi
     <table style="width:100%;border-collapse:collapse;background:#fafafa;border:1px solid #e4e4e7;border-radius:8px;margin-bottom:16px">
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Email</td>
           <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${email}</td></tr>
-      ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username <span style="color:#a1a1aa">(phone app)</span></td>
+      ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username</td>
           <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${username}</td></tr>` : ''}
       <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
           <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${password}</td></tr>
     </table>
-    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' On the GymPilot phone app, sign in with your username and the same password.' : ''}</p>
+    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' You can sign in with your email or your username, here and on the GymPilot phone app.' : ''}</p>
     <a href="${loginUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
   </div>`;
@@ -452,6 +452,15 @@ const userController = {
         notFound: 'User not found'
     }),
 
+    // PUT /admin/users/:id/username   { username }
+    //
+    // Staff choose the username instead of taking a generated one -- letters
+    // and digits, unique across the platform (services/username.js).
+    setUsername: require('../services/username').setUsernameHandler({
+        load: (id) => User.findById(id),
+        notFound: 'User not found'
+    }),
+
     // POST /admin/users/:id/username - Issue a fresh username
     //
     // For the rare case where a member does not want the one they were given,
@@ -684,15 +693,22 @@ const userController = {
     },
 
     // POST /user/login - Authenticate user and return JWT
+    //
+    // { email, password, remember? } -- `email` is whatever was typed into
+    // the "Email or username" box (`login` or `username` are read too): an
+    // address, or the username a member without one signs in with. Either
+    // way, case does not matter (services/username.js loginFilter).
     loginUser: async (req, res) => {
         try {
-            const { email, password } = req.body;
+            const { password } = req.body;
+            const login = req.body.login || req.body.email || req.body.username;
             const remember = wantsRemember(req.body);
-            if (!email || !password) {
-                return res.status(400).json({ message: 'Email and password are required' });
+            if (!login || !password) {
+                return res.status(400).json({ message: 'Email or username and password are required' });
             }
 
-            const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+            const { loginFilter } = require('../services/username');
+            const user = await User.findOne(loginFilter(login));
             if (!user) {
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
