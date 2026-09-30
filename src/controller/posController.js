@@ -15,6 +15,8 @@ const Counter = require('../gymfolio/models/counterModel');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 const { branding } = require('../services/branding');
+const { sendCsv } = require('../services/csv');
+const { can, ADMIN_SLUG } = require('../services/roleService');
 
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
@@ -26,6 +28,9 @@ const METHODS = ['cash', 'card', 'bank_transfer', 'jazzcash', 'easypaisa', 'wall
 // Thermal roll widths the receipt is laid out for.
 const PAPER_WIDTHS = ['80mm', '58mm'];
 const RECEIPT_FOOTER_MAX = 300;
+// Rows on the sales list; the summary and the CSV cover the whole range.
+const SALES_LIST_LIMIT = 500;
+const EXPORT_LIMIT = 20000;
 
 function fail(res, code, message) {
   return res.status(code).json({ success: false, message });
@@ -66,11 +71,43 @@ function productView(p) {
   };
 }
 
-function saleView(s) {
-  return {
+// What a sale cost the gym and what it made. Each line's margin is its
+// price against its cost, as rung up; the sale's profit is what was taken
+// less the tax in it (prices include tax, and the tax is not the gym's) and
+// less the cost, so a basket discount comes off it too. The cost is the
+// product's cost when it was sold (unitCost is snapshotted on the line).
+function saleMoney(s) {
+  const lines = (s.items || []).map((i) => {
+    const cost = round((i.unitCost || 0) * i.quantity);
+    return { unit_cost: i.unitCost || 0, cost, margin: round(i.total - cost) };
+  });
+  const cost = round(lines.reduce((sum, l) => sum + l.cost, 0));
+  return { lines, cost, profit: round((s.total || 0) - (s.taxAmount || 0) - cost) };
+}
+
+// Cost and profit are for the people who run the till (pos at manage): a
+// view-only role reading the sales -- an accountant, a trainer -- sees what
+// was sold, not what the gym paid for it.
+async function seesCost(req) {
+  const slug = req.roleSlug;
+  if (!slug) return false;
+  return slug === ADMIN_SLUG || can(slug, 'pos', 'manage');
+}
+
+function saleView(s, { withCost = false } = {}) {
+  const money = withCost ? saleMoney(s) : null;
+  const view = {
     id: String(s._id),
     receipt_number: s.receiptNumber,
-    items: (s.items || []).map((i) => ({ product_id: i.productId ? String(i.productId) : null, name: i.name, sku: i.sku || '', quantity: i.quantity, unit_price: i.unitPrice, total: i.total })),
+    items: (s.items || []).map((i, n) => ({
+      product_id: i.productId ? String(i.productId) : null,
+      name: i.name,
+      sku: i.sku || '',
+      quantity: i.quantity,
+      unit_price: i.unitPrice,
+      total: i.total,
+      ...(money ? money.lines[n] : {})
+    })),
     subtotal: s.subtotal,
     discount: s.discount,
     tax_rate: s.taxRate,
@@ -89,6 +126,21 @@ function saleView(s) {
     refunded_at: s.refundedAt,
     refund_reason: s.refundReason || ''
   };
+  if (money) {
+    view.cost = money.cost;
+    view.profit = money.profit;
+  }
+  return view;
+}
+
+// The sales in a range, as the list and the export read them: ?from=&to=
+// (local calendar days, this month so far by default) and ?memberId=.
+function salesFilter(query) {
+  const range = L.readRange(query);
+  const filter = { paidAt: { $gte: range.start, $lt: range.end } };
+  // An ObjectId, not the string: aggregate() does not cast like find().
+  if (isId(query.memberId)) filter.memberId = new mongoose.Types.ObjectId(String(query.memberId));
+  return { range, filter };
 }
 
 function lockerView(l) {
@@ -421,23 +473,25 @@ module.exports = {
   },
 
   // GET /admin/pos/sales?from=&to=&memberId=
+  //
+  // Cost, margin and profit -- per line, per sale, and the range's cost and
+  // gross profit per currency -- only for pos at manage (seesCost).
   listSales: async (req, res) => {
     try {
-      const range = L.readRange(req.query);
-      const filter = { paidAt: { $gte: range.start, $lt: range.end } };
-      // An ObjectId, not the string: aggregate() does not cast like find().
-      if (isId(req.query.memberId)) filter.memberId = new mongoose.Types.ObjectId(String(req.query.memberId));
+      const { range, filter } = salesFilter(req.query);
+      const withCost = await seesCost(req);
       // The list is capped; the summary is worked out over every sale in the
       // range, so a busy till's totals are not just its latest 500 receipts.
       const [rows, [summary]] = await Promise.all([
-        Sale.find(filter).sort({ paidAt: -1 }).limit(500).lean(),
+        Sale.find(filter).sort({ paidAt: -1 }).limit(SALES_LIST_LIMIT).lean(),
         Sale.aggregate([
           { $match: { ...filter, status: 'paid' } },
           {
             $facet: {
-              byCurrency: [{ $group: { _id: '$currency', total: { $sum: '$total' }, n: { $sum: 1 } } }],
+              byCurrency: [{ $group: { _id: '$currency', total: { $sum: '$total' }, tax: { $sum: '$taxAmount' }, n: { $sum: 1 } } }],
               byMethod: [{ $group: { _id: '$paymentMethod', total: { $sum: '$total' } } }],
-              items: [{ $unwind: '$items' }, { $group: { _id: null, n: { $sum: '$items.quantity' } } }]
+              items: [{ $unwind: '$items' }, { $group: { _id: null, n: { $sum: '$items.quantity' } } }],
+              costs: [{ $unwind: '$items' }, { $group: { _id: '$currency', cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unitCost', 0] }] } } } }]
             }
           }
         ])
@@ -451,10 +505,73 @@ module.exports = {
       }
       for (const row of summary.byMethod) byMethod[row._id] = round(row.total);
       const items = (summary.items[0] && summary.items[0].n) || 0;
-      return res.json({ success: true, range: { from: range.from, to: range.to, label: L.rangeLabel(range.from, range.to) }, summary: { totals, by_method: byMethod, sales, items }, data: rows.map(saleView) });
+      const summaryOut = { totals, by_method: byMethod, sales, items };
+      if (withCost) {
+        // Gross profit per currency, never added across currencies: takings
+        // less the tax in them, less what the goods cost.
+        const costOf = new Map(summary.costs.map((row) => [row._id, row.cost]));
+        summaryOut.cost = {};
+        summaryOut.gross_profit = {};
+        for (const row of summary.byCurrency) {
+          summaryOut.cost[row._id] = round(costOf.get(row._id) || 0);
+          summaryOut.gross_profit[row._id] = round(row.total - row.tax - (costOf.get(row._id) || 0));
+        }
+      }
+      return res.json({
+        success: true,
+        range: { from: range.from, to: range.to, label: L.rangeLabel(range.from, range.to) },
+        summary: summaryOut,
+        // More sales in the range than the list shows; the export has them all.
+        truncated: rows.length >= SALES_LIST_LIMIT,
+        data: rows.map((s) => saleView(s, { withCost }))
+      });
     } catch (error) {
       console.error('[pos] sales failed:', error);
       return fail(res, 500, 'Could not load sales');
+    }
+  },
+
+  // GET /admin/pos/sales/export?from=&to=&memberId=
+  //
+  // Every sale in the range as a CSV, refunded ones included and marked, one
+  // row per receipt. The cost and profit columns only for pos at manage.
+  exportSales: async (req, res) => {
+    try {
+      const { range, filter } = salesFilter(req.query);
+      const withCost = await seesCost(req);
+      const rows = await Sale.find(filter).sort({ paidAt: -1 }).limit(EXPORT_LIMIT).lean();
+      const columns = [
+        { key: 'receiptNumber', label: 'Receipt' },
+        { key: 'date', label: 'Date', value: (r) => T.dateKey(r.paidAt) },
+        { key: 'time', label: 'Time', value: (r) => T.timeLabel(r.paidAt) },
+        { key: 'status', label: 'Status' },
+        { key: 'memberName', label: 'Member' },
+        { key: 'items', label: 'Items', value: (r) => (r.items || []).map((i) => `${i.quantity} x ${i.name}`).join('; ') },
+        { key: 'quantity', label: 'Quantity', value: (r) => (r.items || []).reduce((n, i) => n + (i.quantity || 0), 0) },
+        { key: 'subtotal', label: 'Subtotal' },
+        { key: 'discount', label: 'Discount' },
+        { key: 'taxRate', label: 'Tax rate %' },
+        { key: 'taxAmount', label: 'Tax included' },
+        { key: 'total', label: 'Total' },
+        { key: 'currency', label: 'Currency' },
+        { key: 'paymentMethod', label: 'Method' },
+        { key: 'tendered', label: 'Cash received', value: (r) => (r.tendered ?? '') },
+        { key: 'change', label: 'Change', value: (r) => (r.change ?? '') },
+        { key: 'soldByName', label: 'Sold by' },
+        { key: 'notes', label: 'Notes' },
+        { key: 'refundedAt', label: 'Refunded on', value: (r) => (r.refundedAt ? T.dateKey(r.refundedAt) : '') },
+        { key: 'refundReason', label: 'Refund reason' }
+      ];
+      if (withCost) {
+        columns.push(
+          { key: 'cost', label: 'Cost', value: (r) => saleMoney(r).cost },
+          { key: 'profit', label: 'Profit', value: (r) => saleMoney(r).profit }
+        );
+      }
+      return sendCsv(res, `sales_${range.from}_${range.to}.csv`, columns, rows);
+    } catch (error) {
+      console.error('[pos] sales export failed:', error);
+      return fail(res, 500, 'Could not export the sales');
     }
   },
 
@@ -489,7 +606,8 @@ module.exports = {
   myPurchases: async (req, res) => {
     try {
       const rows = await Sale.find({ memberId: actorId(req) }).sort({ paidAt: -1 }).limit(100).lean();
-      return res.json({ success: true, data: rows.map(saleView) });
+      // Never with cost: this is the member's own receipts.
+      return res.json({ success: true, data: rows.map((s) => saleView(s)) });
     } catch (error) {
       return fail(res, 500, 'Could not load your purchases');
     }

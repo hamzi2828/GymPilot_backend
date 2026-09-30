@@ -279,3 +279,164 @@ test('cash received: the change is worked out, too little is refused, and other 
     assert.equal(await stockOf(bottle.id), 7);
   });
 });
+
+// Three sales moved into March 2025, away from every other sale in this
+// gym: a taxed card sale with a discount, a cash sale to a member, and a
+// sale that was refunded.
+let march;
+
+async function marchSales() {
+  if (march) return march;
+  const Settings = h.src('models/settings');
+  const make = async (body) => {
+    const res = await h.call(pos.createProduct, as({ body }));
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    return res.body.data;
+  };
+  const tub = await make({ name: 'Protein tub', price: 30, cost: 18, stock: 20 });
+  const shaker = await make({ name: 'Shaker', price: 10, cost: 4, stock: 20 });
+
+  await Settings.updateOne({ isActive: true }, { $set: { taxRate: 25 } });
+  let big;
+  try {
+    big = await h.call(pos.createSale, as({ body: { items: [{ productId: tub.id, quantity: 2 }, { productId: shaker.id, quantity: 1 }], discount: 5, paymentMethod: 'card' } }));
+  } finally {
+    await Settings.updateOne({ isActive: true }, { $set: { taxRate: 0 } });
+  }
+  const small = await h.call(pos.createSale, as({ body: { items: [{ productId: shaker.id, quantity: 1 }], paymentMethod: 'cash', memberId: String(bookkeeper._id) } }));
+  const back = await h.call(pos.createSale, as({ body: { items: [{ productId: shaker.id, quantity: 1 }], paymentMethod: 'cash' } }));
+  for (const res of [big, small, back]) assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal((await refund(back.body.data.id)).statusCode, 200);
+
+  const days = [[big, '2025-03-10'], [small, '2025-03-11'], [back, '2025-03-12']];
+  for (const [res, day] of days) await Sale.updateOne({ _id: res.body.data.id }, { $set: { paidAt: new Date(`${day}T10:00:00Z`) } });
+  march = { big: big.body.data.receipt_number, small: small.body.data.receipt_number, back: back.body.data.receipt_number };
+  return march;
+}
+
+const MARCH = { from: '2025-03-01', to: '2025-03-31' };
+const asViewer = (req) => ({ user: { id: String(bookkeeper._id) }, roleSlug: 'accountant', ...req });
+
+test('sales history: a date range, and cost and profit per line, per sale and for the range', async () => {
+  await h.inGym(gym, async () => {
+    const r = await marchSales();
+    const res = await h.call(pos.listSales, as({ query: MARCH }));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.data.map((s) => s.receipt_number), [r.back, r.small, r.big], 'the range holds these three and nothing else, newest first');
+    assert.equal(res.body.range.label, 'Mar 2025');
+    assert.equal(res.body.truncated, false);
+
+    const [back, small, big] = res.body.data;
+    // 70 in the basket, 5 off: 65 paid, of which 13 is the 25% tax. The
+    // goods cost 2 x 18 + 4 = 40, so the sale made 65 - 13 - 40 = 12.
+    assert.deepEqual([big.total, big.tax_amount, big.cost, big.profit], [65, 13, 40, 12]);
+    assert.deepEqual(big.items.map((i) => [i.name, i.unit_cost, i.cost, i.margin]), [['Protein tub', 18, 36, 24], ['Shaker', 4, 4, 6]]);
+    assert.deepEqual([small.total, small.cost, small.profit], [10, 4, 6]);
+    assert.equal(back.status, 'refunded');
+
+    // The range's summary counts paid sales only: the refund is out.
+    assert.deepEqual(res.body.summary.totals, { GBP: 75 });
+    assert.equal(res.body.summary.sales, 2);
+    assert.equal(res.body.summary.items, 4);
+    assert.deepEqual(res.body.summary.cost, { GBP: 44 });
+    assert.deepEqual(res.body.summary.gross_profit, { GBP: 18 });
+
+    const oneDay = await h.call(pos.listSales, as({ query: { from: '2025-03-11', to: '2025-03-11' } }));
+    assert.deepEqual(oneDay.body.data.map((s) => s.receipt_number), [r.small]);
+    assert.deepEqual(oneDay.body.summary.totals, { GBP: 10 });
+  });
+});
+
+test('sales history: a view-only role and the member see no cost, margin or profit', async () => {
+  await h.inGym(gym, async () => {
+    const r = await marchSales();
+    const res = await h.call(pos.listSales, asViewer({ query: MARCH }));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.length, 3);
+    assert.deepEqual(res.body.summary.totals, { GBP: 75 });
+    assert.ok(!('cost' in res.body.summary) && !('gross_profit' in res.body.summary));
+    for (const sale of res.body.data) {
+      assert.ok(!('cost' in sale) && !('profit' in sale), JSON.stringify(sale));
+      for (const item of sale.items) assert.ok(!('unit_cost' in item) && !('cost' in item) && !('margin' in item), JSON.stringify(item));
+    }
+
+    const mine = await h.call(pos.myPurchases, { user: { id: String(bookkeeper._id) } });
+    assert.deepEqual(mine.body.data.map((s) => s.receipt_number), [r.small]);
+    assert.ok(!('profit' in mine.body.data[0]) && !('unit_cost' in mine.body.data[0].items[0]));
+  });
+});
+
+// A CSV line to its fields; enough for these rows, whose quoted fields have
+// no line breaks in them.
+function csvFields(line) {
+  const out = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (quoted) {
+      if (c === '"' && line[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') {
+      out.push(field);
+      field = '';
+    } else field += c;
+  }
+  out.push(field);
+  return out;
+}
+
+function readCsv(body) {
+  const [header, ...rows] = String(body).replace(/^﻿/, '').trim().split('\r\n').map(csvFields);
+  return rows.map((row) => Object.fromEntries(header.map((key, i) => [key, row[i]])));
+}
+
+test('sales export: every sale in the range as a CSV, with cost and profit only for manage', async () => {
+  await h.inGym(gym, async () => {
+    const r = await marchSales();
+    const res = await h.call(pos.exportSales, as({ query: MARCH }));
+    assert.equal(res.statusCode, 200, String(res.body));
+    assert.equal(res.headers['content-type'], 'text/csv; charset=utf-8');
+    assert.match(res.headers['content-disposition'], /filename="sales_2025-03-01_2025-03-31\.csv"/);
+
+    const rows = readCsv(res.body);
+    assert.deepEqual(rows.map((row) => row.Receipt), [r.back, r.small, r.big]);
+    const big = rows.find((row) => row.Receipt === r.big);
+    assert.equal(big.Date, '2025-03-10');
+    assert.equal(big.Items, '2 x Protein tub; 1 x Shaker');
+    assert.deepEqual([big.Quantity, big.Subtotal, big.Discount, big['Tax included'], big.Total, big.Currency, big.Method], ['3', '70', '5', '13', '65', 'GBP', 'card']);
+    assert.deepEqual([big.Cost, big.Profit], ['40', '12']);
+    const back = rows.find((row) => row.Receipt === r.back);
+    assert.equal(back.Status, 'refunded');
+    assert.equal(back['Refund reason'], 'returned');
+
+    const viewer = readCsv((await h.call(pos.exportSales, asViewer({ query: MARCH }))).body);
+    assert.equal(viewer.length, 3);
+    assert.ok(viewer.every((row) => !('Cost' in row) && !('Profit' in row)));
+  });
+});
+
+test('over HTTP: the sales list and export take the range, and cost follows the live role', async () => {
+  const r = await h.inGym(gym, () => marchSales());
+  await withServer(async (send) => {
+    const managed = await send(cashier, 'GET', '/admin/pos/sales?from=2025-03-01&to=2025-03-31');
+    assert.equal(managed.status, 200, managed.text);
+    assert.deepEqual(managed.body.summary.gross_profit, { GBP: 18 });
+
+    const viewed = await send(bookkeeper, 'GET', '/admin/pos/sales?from=2025-03-10&to=2025-03-10');
+    assert.equal(viewed.status, 200, viewed.text);
+    assert.deepEqual(viewed.body.data.map((s) => s.receipt_number), [r.big]);
+    assert.ok(!('profit' in viewed.body.data[0]) && !('gross_profit' in viewed.body.summary));
+
+    const csv = await send(bookkeeper, 'GET', '/admin/pos/sales/export?from=2025-03-01&to=2025-03-31');
+    assert.equal(csv.status, 200, csv.text);
+    assert.match(csv.headers.get('content-type'), /^text\/csv/);
+    const rows = readCsv(csv.text);
+    assert.equal(rows.length, 3);
+    assert.ok(!('Profit' in rows[0]));
+  });
+});
