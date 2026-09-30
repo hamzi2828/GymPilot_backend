@@ -10,9 +10,12 @@ const mongoose = require('mongoose');
 const Asset = require('../models/assetModel');
 const Expense = require('../models/expenseModel');
 const L = require('../services/ledger');
+const categories = require('../services/categories');
+const reminders = require('../services/assetReminders');
 const T = require('../../attendance/services/timeUtils');
 
 const CONDITIONS = ['new', 'good', 'fair', 'poor', 'unusable'];
+const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = ['active', 'maintenance', 'retired', 'sold', 'lost'];
 
 // AST-0042, printed on the sticker that goes on the machine.
@@ -36,7 +39,17 @@ function readDate(value, fallback = null) {
   return L.localInstant(text, 12, 0);
 }
 
-function shape(asset, now = new Date()) {
+// The gym's local 'YYYY-MM-DD' for a stored date, or '' when there is none --
+// exactly what a date input holds, so the edit form can be filled from the
+// list without converting an ISO instant (which, read in UTC, is the wrong
+// day for half the world).
+function dateInput(value) {
+  return value ? T.dateKey(new Date(value)) : '';
+}
+
+// `heads` (services/categories.headsFor('asset')) names the gym's own heads;
+// without it only the built-in ones have a label.
+function shape(asset, now = new Date(), heads = null) {
   const value = L.depreciate(asset, now);
   const dueDate = asset.nextServiceDue ? new Date(asset.nextServiceDue) : null;
   const daysToService = dueDate ? Math.ceil((dueDate.getTime() - now.getTime()) / L.DAY_MS) : null;
@@ -46,7 +59,7 @@ function shape(asset, now = new Date()) {
     tag: asset.tag,
     name: asset.name,
     category: asset.category,
-    category_label: Asset.CATEGORY_LABELS[asset.category] || asset.category,
+    category_label: heads ? heads.labelOf(asset.category) : Asset.CATEGORY_LABELS[asset.category] || asset.category,
 
     quantity: asset.quantity || 1,
     unit_cost: L.round(asset.unitCost),
@@ -54,11 +67,13 @@ function shape(asset, now = new Date()) {
     currency: asset.currency,
 
     purchased_on: asset.purchasedOn,
+    purchased_date: dateInput(asset.purchasedOn),
     purchased_label: asset.purchasedOn ? T.dateLabel(asset.purchasedOn) : null,
     supplier: asset.supplier || '',
     invoice_no: asset.invoiceNo || '',
     serial_number: asset.serialNumber || '',
     warranty_until: asset.warrantyUntil,
+    warranty_date: dateInput(asset.warrantyUntil),
     warranty_label: asset.warrantyUntil ? T.dateLabel(asset.warrantyUntil) : null,
     warranty_active: asset.warrantyUntil ? new Date(asset.warrantyUntil) >= now : false,
 
@@ -74,8 +89,10 @@ function shape(asset, now = new Date()) {
     fully_depreciated: value.fully_depreciated,
 
     last_serviced_on: asset.lastServicedOn,
+    last_serviced_date: dateInput(asset.lastServicedOn),
     last_serviced_label: asset.lastServicedOn ? T.dateLabel(asset.lastServicedOn) : null,
     next_service_due: asset.nextServiceDue,
+    next_service_date: dateInput(asset.nextServiceDue),
     next_service_label: asset.nextServiceDue ? T.dateLabel(asset.nextServiceDue) : null,
     service_interval_days: asset.serviceIntervalDays || 0,
     days_to_service: daysToService,
@@ -86,6 +103,23 @@ function shape(asset, now = new Date()) {
     disposal_amount: L.round(asset.disposalAmount),
     notes: asset.notes || ''
   };
+}
+
+// The purchase dates the register is narrowed to, from ?from= / ?to=. Either
+// end may be left open, and neither given means every date: unlike the money
+// tabs, the register does not default to this month -- a list that hid
+// everything bought before the 1st would look like the gym owned nothing.
+function purchaseRange(query = {}) {
+  let from = DATE_KEY.test(String(query.from || '')) ? String(query.from) : '';
+  let to = DATE_KEY.test(String(query.to || '')) ? String(query.to) : '';
+  if (!from && !to) return null;
+  if (from && to && from > to) [from, to] = [to, from];
+
+  const purchasedOn = {};
+  if (from) purchasedOn.$gte = L.startOfLocalDay(from);
+  if (to) purchasedOn.$lt = L.endOfLocalDay(to);
+  const label = from && to ? L.rangeLabel(from, to) : from ? `From ${T.dateLabelForKey(from)}` : `Up to ${T.dateLabelForKey(to)}`;
+  return { from, to, label, filter: { purchasedOn } };
 }
 
 // A text field from the body, or what is stored when the body leaves it out.
@@ -99,10 +133,12 @@ function amount(value, current) {
   return value !== undefined ? Math.max(0, Number(value) || 0) : Number(current) || 0;
 }
 
-async function readBody(body, existing = {}) {
+async function readBody(body, existing = {}, heads = null) {
   if (!body.name || !String(body.name).trim()) throw new Error('Give the asset a name');
 
-  const category = Asset.CATEGORIES.includes(body.category) ? body.category : 'other';
+  // A built-in head or one of the gym's own that is not archived; an asset
+  // already filed under an archived head keeps it.
+  const category = categories.pickCategory(heads || (await categories.headsFor('asset')), body.category, existing.category);
   const purchasedOn = readDate(body.purchasedOn, existing.purchasedOn || null);
 
   const patch = {
@@ -128,7 +164,7 @@ async function readBody(body, existing = {}) {
     usefulLifeYears:
       body.usefulLifeYears !== undefined && body.usefulLifeYears !== ''
         ? Math.max(0, Number(body.usefulLifeYears) || 0)
-        : existing.usefulLifeYears || Asset.DEFAULT_LIFE_YEARS[category] || 5,
+        : existing.usefulLifeYears || Asset.DEFAULT_LIFE_YEARS[category] || categories.CUSTOM_ASSET_LIFE_YEARS,
     salvageValue: amount(body.salvageValue, existing.salvageValue),
     serviceIntervalDays: amount(body.serviceIntervalDays, existing.serviceIntervalDays),
     lastServicedOn: readDate(body.lastServicedOn, existing.lastServicedOn || null),
@@ -156,6 +192,7 @@ module.exports = {
     try {
       const base = await L.baseCurrency();
       const now = new Date();
+      const heads = await categories.headsFor('asset');
 
       const filter = {};
       if (req.query.category && req.query.category !== 'all') filter.category = String(req.query.category);
@@ -168,17 +205,25 @@ module.exports = {
         filter.$or = [{ name: rx }, { tag: rx }, { supplier: rx }, { serialNumber: rx }, { location: rx }];
       }
 
-      let rows = await Asset.find(filter).sort({ createdAt: -1 }).lean();
-      const shaped = rows.map((row) => shape(row, now));
+      // Bought in a period: the summary above the list and the list agree.
+      const purchased = purchaseRange(req.query);
+      if (purchased) Object.assign(filter, purchased.filter);
 
-      // Applied after shaping because "overdue" is derived, not stored.
+      let rows = await Asset.find(filter).sort({ createdAt: -1 }).lean();
+      const shaped = rows.map((row) => shape(row, now, heads));
+
+      // Applied after shaping because "overdue" is derived, not stored. 'due'
+      // and the warranty filter are what the admin bell counts and links to
+      // (services/assetReminders.js), read off the stored asset the same way.
       const due = String(req.query.service || 'all');
-      const visible =
-        due === 'overdue'
-          ? shaped.filter((row) => row.service_overdue)
-          : due === 'soon'
-          ? shaped.filter((row) => row.days_to_service !== null && row.days_to_service >= 0 && row.days_to_service <= 30)
-          : shaped;
+      const warranty = String(req.query.warranty || 'all');
+      const visible = shaped.filter((row, i) => {
+        if (due === 'overdue' && !row.service_overdue) return false;
+        if (due === 'soon' && !(row.days_to_service !== null && row.days_to_service >= 0 && row.days_to_service <= 30)) return false;
+        if (due === 'due' && !reminders.isServiceDue(rows[i], now)) return false;
+        if (warranty === 'ending' && !reminders.isWarrantyEnding(rows[i], now)) return false;
+        return true;
+      });
 
       const cost = {};
       const book = {};
@@ -206,13 +251,23 @@ module.exports = {
         // What a new asset is recorded in: the Settings currency.
         record_currency: await L.recordCurrency(),
         currency_notice: await L.currencyNotice(),
-        categories: Asset.CATEGORIES.map((key) => ({
-          key,
-          label: Asset.CATEGORY_LABELS[key],
-          default_life: Asset.DEFAULT_LIFE_YEARS[key]
+        // What a new asset can be filed under; the archived heads are listed
+        // apart, for the filter -- items already filed under them keep them.
+        categories: heads.active.map((head) => ({
+          key: head.key,
+          label: head.label,
+          default_life: head.default_life,
+          built_in: head.built_in
         })),
+        archived_categories: heads.archived.map((head) => ({ key: head.key, label: head.label })),
         conditions: CONDITIONS,
         statuses: STATUSES,
+        // The purchase dates asked for, or null for every date.
+        purchased: purchased ? { from: purchased.from, to: purchased.to, label: purchased.label } : null,
+        reminder_windows: {
+          service_due_days: reminders.SERVICE_DUE_WINDOW_DAYS,
+          warranty_days: reminders.WARRANTY_WINDOW_DAYS
+        },
         summary: {
           count: shaped.length,
           units: shaped.reduce((sum, row) => sum + (row.status === 'sold' ? 0 : row.quantity), 0),
@@ -223,6 +278,8 @@ module.exports = {
             (row) => row.days_to_service !== null && row.days_to_service >= 0 && row.days_to_service <= 30
           ).length,
           needs_attention: shaped.filter((row) => ['poor', 'unusable'].includes(row.condition)).length,
+          service_due: rows.filter((row) => reminders.isServiceDue(row, now)).length,
+          warranty_ending: rows.filter((row) => reminders.isWarrantyEnding(row, now)).length,
           by_category: [...byCategory.values()]
             .map((entry) => ({ ...entry, totals: L.presentTotals(entry.totals, base) }))
             .sort((a, b) => b.totals.base_amount - a.totals.base_amount)
@@ -238,7 +295,8 @@ module.exports = {
   // POST /api/accounts/assets
   create: async (req, res) => {
     try {
-      const patch = await readBody(req.body || {});
+      const heads = await categories.headsFor('asset');
+      const patch = await readBody(req.body || {}, {}, heads);
       const asset = await Asset.create({
         ...patch,
         tag: await nextTag(),
@@ -283,7 +341,7 @@ module.exports = {
         message: expense
           ? `${asset.tag} added to the register, and ${expense.reference} recorded as an expense.`
           : `${asset.tag} added to the register.`,
-        asset: shape(asset)
+        asset: shape(asset, new Date(), heads)
       });
     } catch (error) {
       console.error('[accounts] asset create failed:', error);
@@ -300,11 +358,12 @@ module.exports = {
       const asset = await Asset.findById(id);
       if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-      const patch = await readBody(req.body || {}, asset.toObject());
+      const heads = await categories.headsFor('asset');
+      const patch = await readBody(req.body || {}, asset.toObject(), heads);
       Object.assign(asset, patch);
       await asset.save();
 
-      return res.json({ success: true, message: `${asset.tag} updated.`, asset: shape(asset) });
+      return res.json({ success: true, message: `${asset.tag} updated.`, asset: shape(asset, new Date(), heads) });
     } catch (error) {
       console.error('[accounts] asset update failed:', error);
       return res.status(400).json({ message: error.message || 'Could not update this asset' });
@@ -347,7 +406,7 @@ module.exports = {
         message: asset.nextServiceDue
           ? `${asset.tag} serviced. Next due ${T.dateLabel(asset.nextServiceDue)}.`
           : `${asset.tag} serviced.`,
-        asset: shape(asset)
+        asset: shape(asset, new Date(), await categories.headsFor('asset'))
       });
     } catch (error) {
       console.error('[accounts] service log failed:', error);

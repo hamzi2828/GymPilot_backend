@@ -13,6 +13,7 @@ const requirePermission = require('../../middleware/requirePermission');
 const accountsController = require('../controller/accountsController');
 const expenseController = require('../controller/expenseController');
 const assetController = require('../controller/assetController');
+const categoryController = require('../controller/categoryController');
 
 router.use(auth);
 
@@ -33,5 +34,10 @@ router.post('/assets', requirePermission('accounts', 'manage'), assetController.
 router.post('/assets/:id/service', requirePermission('accounts', 'manage'), assetController.logService);
 router.put('/assets/:id', requirePermission('accounts', 'manage'), assetController.update);
 router.delete('/assets/:id', requirePermission('accounts', 'manage'), assetController.remove);
+
+// Expense and asset heads: the built-in ones and the gym's own
+router.get('/categories', requirePermission('accounts', 'view'), categoryController.list);
+router.post('/categories', requirePermission('accounts', 'manage'), categoryController.create);
+router.put('/categories/:id', requirePermission('accounts', 'manage'), categoryController.update);
 
 module.exports = router;

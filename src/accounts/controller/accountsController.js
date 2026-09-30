@@ -1,11 +1,12 @@
 // src/accounts/controller/accountsController.js
 //
 // The two reads that answer "how is the gym doing": the overview (money in,
-// money out, what is left) and the sales report behind the money-in half.
+// money out, what is left -- the profit and loss, line by line, in
+// services/profitAndLoss.js) and the sales report behind the money-in half.
 //
-// Income here is membership sales, because that is the income this system
-// records. A gym also takes day passes, PT sessions and drinks over the
-// counter; until those are sold through this system they are not in these
+// Income here is membership sales and shop (POS) takings, because that is
+// the income this system records. A gym also takes day passes and PT paid at
+// the desk; until those are sold through this system they are not in these
 // numbers, and the response says so rather than quietly under-reporting.
 
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
@@ -15,6 +16,8 @@ const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const Attendance = require('../../attendance/models/attendanceModel');
 const L = require('../services/ledger');
+const categories = require('../services/categories');
+const pnl = require('../services/profitAndLoss');
 const T = require('../../attendance/services/timeUtils');
 
 // The sales list shows at most this many payments; the totals above it are
@@ -40,26 +43,21 @@ async function payrollFor(range) {
   // without this join their hours were invisible to payroll and an hourly
   // trainer's wages came out as zero. Trainer.userId is what ties the two
   // records back to one person.
-  const [linkedTrainers, unlinkedTrainerCount] = await Promise.all([
+  const [linkedTrainers, unlinkedTrainers, trainerCurrency] = await Promise.all([
     Trainer.find({ isActive: true, userId: { $ne: null } })
       .select('userId')
       .lean(),
-    // Counted so the screen can say the figure excludes them, rather than
-    // quietly reporting a wage bill that leaves the coaching staff out.
-    Trainer.countDocuments({ isActive: true, userId: null })
+    // Trainers with no staff account are costed at the salary on their
+    // trainer record, in the gym's currency (the one new records are written
+    // in). Those with none set are counted, so the screen can say the figure
+    // leaves them out rather than quietly omitting the coaching staff.
+    Trainer.find({ isActive: true, userId: null })
+      .select('name role +salary +salaryCycle')
+      .lean(),
+    L.recordCurrency()
   ]);
-
-  if (!staff.length) {
-    return {
-      totals: {},
-      salaried: 0,
-      hourly: 0,
-      headcount: 0,
-      hours: 0,
-      people: [],
-      unlinked_trainers: unlinkedTrainerCount
-    };
-  }
+  const salariedTrainers = unlinkedTrainers.filter((trainer) => trainer.salary !== null && trainer.salary !== undefined);
+  const unlinkedTrainerCount = unlinkedTrainers.length - salariedTrainers.length;
 
   const staffIds = new Set(staff.map((person) => String(person._id)));
 
@@ -140,18 +138,75 @@ async function payrollFor(range) {
     });
   }
 
+  // The same pro-rating for a trainer's own salary. 0 is commission only.
+  for (const trainer of salariedTrainers) {
+    const cost = L.salaryForDays(trainer.salary, trainer.salaryCycle, range.from, range.to);
+    if (!cost) continue;
+    salaried += cost;
+    L.addTo(totals, trainerCurrency, cost);
+    people.push({
+      id: String(trainer._id),
+      name: trainer.name,
+      job_title: trainer.role || 'Trainer',
+      basis: 'salaried',
+      currency: trainerCurrency,
+      hours: null,
+      cost: L.round(cost),
+      trainer: true
+    });
+  }
+
   return {
     totals,
     salaried: L.round(salaried),
     hourly: L.round(hourly),
-    headcount: staff.length,
+    headcount: staff.length + salariedTrainers.length,
     hours: Math.round((totalMinutes / 60) * 10) / 10,
     people: people.sort((a, b) => b.cost - a.cost),
-    // Active trainers with no staff account behind them. They punch in and
-    // out like everyone else, but nothing here knows what they are paid, so
-    // they are not in the total above. Surfaced rather than swallowed.
+    // Active trainers with no staff account and no salary on their trainer
+    // record. They punch in and out like everyone else, but nothing here
+    // knows what they are paid, so they are not in the total above.
+    // Surfaced rather than swallowed.
     unlinked_trainers: unlinkedTrainerCount
   };
+}
+
+// ---------------------------------------------------------------------------
+// Sales search
+//
+// The desk looks a sale up by whatever the member has to hand: the order
+// number, their name or email, their phone, or the member ID on their card
+// ("GP-0184", User.memberCode). The phone and the member ID of an account
+// live on the account, not the order, so those find the people first and
+// then their orders.
+// ---------------------------------------------------------------------------
+
+// Most people this search will match on their account before it gives up on
+// being a lookup and becomes a scan.
+const SEARCH_PEOPLE_LIMIT = 500;
+
+// A phone number is typed however the person remembers it -- "0300 1234567",
+// "0300-1234567" -- so a term that looks like one matches its digits with
+// anything between them.
+function phonePattern(term) {
+  if (!/^[\d\s+().-]+$/.test(term)) return null;
+  const digits = term.replace(/\D/g, '');
+  return digits.length >= 4 ? new RegExp(digits.split('').join('\\D*')) : null;
+}
+
+/** The `$or` that narrows the orders to a search term. */
+async function salesSearch(term) {
+  const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const phoneRx = phonePattern(term);
+  const or = [{ orderNumber: rx }, { 'customerInfo.fullName': rx }, { 'customerInfo.email': rx }, { 'customerInfo.phone': rx }];
+  if (phoneRx) or.push({ 'customerInfo.phone': phoneRx });
+
+  const people = await User.find({ $or: [{ memberCode: rx }, { phone: rx }, ...(phoneRx ? [{ phone: phoneRx }] : [])] })
+    .select('_id')
+    .limit(SEARCH_PEOPLE_LIMIT)
+    .lean();
+  if (people.length) or.push({ userId: { $in: people.map((person) => person._id) } });
+  return or;
 }
 
 module.exports = {
@@ -166,7 +221,7 @@ module.exports = {
 
       // Till sales (shop / POS) are money in beside memberships.
       const Sale = require('../../models/saleModel');
-      const [payments, refundRows, expenses, assets, payroll, sales] = await Promise.all([
+      const [payments, refundRows, expenses, assets, payroll, sales, expenseHeads] = await Promise.all([
         // Every membership payment received in the period -- first payments
         // and renewals -- including those on orders refunded since: the
         // refund is counted on its own, below.
@@ -185,8 +240,21 @@ module.exports = {
         Sale.find({ status: 'paid', paidAt: { $gte: range.start, $lt: range.end } })
           .select('total currency paidAt paymentMethod items')
           .lean()
-          .catch(() => [])
+          .catch(() => []),
+
+        // The gym's own expense heads, to name them in the breakdown.
+        categories.headsFor('expense')
       ]);
+
+      // The profit and loss: every line, each cost counted once.
+      const profit = pnl.build({
+        base,
+        payments,
+        refunds: refundRows,
+        sales,
+        expenses,
+        extra: await pnl.gather(range, expenses)
+      });
 
       // ---- Money in ----
       const revenue = {};
@@ -240,7 +308,7 @@ module.exports = {
 
         const entry = byCategory.get(expense.category) || {
           category: expense.category,
-          label: Expense.CATEGORY_LABELS[expense.category] || expense.category,
+          label: expenseHeads.labelOf(expense.category),
           count: 0,
           totals: {}
         };
@@ -250,29 +318,18 @@ module.exports = {
       }
 
       // ---- Trend ----
+      // The profit and loss's own amounts, by when each happened, so the
+      // chart's money in and out add up to the lines above it.
       const series = new Map(buckets.map((bucket) => [bucket.key, { ...bucket, revenue: 0, expense: 0 }]));
+      const bucketOf = (at) => (typeof at === 'string' ? (grain === 'day' ? at : at.slice(0, 7)) : L.bucketKeyFor(at, grain));
 
-      for (const payment of payments) {
-        if (String(payment.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(payment.at, grain));
-        if (point) point.revenue += Number(payment.amount) || 0;
+      for (const item of profit.items.revenue) {
+        const point = series.get(bucketOf(item.at));
+        if (point) point.revenue += item.amount;
       }
-      for (const row of refundRows) {
-        if (String(row.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(row.at, grain));
-        if (point) point.revenue -= Number(row.amount) || 0;
-      }
-      for (const sale of sales) {
-        if (String(sale.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(sale.paidAt, grain));
-        if (point) point.revenue += Number(sale.total) || 0;
-      }
-
-      for (const expense of expenses) {
-        if (expense.status === 'cancelled') continue;
-        if (String(expense.currency || base).toUpperCase() !== base) continue;
-        const point = series.get(L.bucketKeyFor(expense.incurredOn, grain));
-        if (point) point.expense += Number(expense.amount) || 0;
+      for (const item of profit.items.outflow) {
+        const point = series.get(bucketOf(item.at));
+        if (point) point.expense += item.amount;
       }
 
       // ---- Assets ----
@@ -289,10 +346,6 @@ module.exports = {
         if (asset.nextServiceDue && new Date(asset.nextServiceDue) <= now) serviceDue += 1;
       }
 
-      // Net is base-currency only and says so. Netting a GBP sale against a PKR
-      // bill would be a made-up number, and this system holds no exchange rate.
-      const bottomLine = L.netResult({ revenue, refunds, spent: spendPaid }, base);
-
       return res.json({
         success: true,
         base_currency: base,
@@ -303,10 +356,12 @@ module.exports = {
         income: {
           ...L.presentTotals(revenue, base),
           refunds: L.presentTotals(refunds, base),
+          // The shop's part of the figure above.
+          shop: L.presentTotals(shop, base),
           // Payments received: a renewal is a sale of its own.
           orders: payments.length,
           // Named so nobody reads this as the gym's total takings.
-          source: 'Membership and package sales recorded in this system'
+          source: 'Membership, package and shop sales recorded in this system'
         },
 
         spending: {
@@ -330,15 +385,35 @@ module.exports = {
           // warn that this total does not cover them.
           unlinked_trainers: payroll.unlinked_trainers,
           // A commitment, not a payment: it is what the roster and the rates
-          // add up to, and it is only an actual outflow once it is entered as
-          // a salaries expense.
+          // add up to, and it is only an actual outflow once it is paid -- on
+          // a payslip (the profit and loss's salaries line) or as an expense.
           note: 'Calculated from staff pay rates and hours worked, not from recorded payments'
         },
 
+        // The profit and loss, line by line (services/profitAndLoss.js).
+        profit_and_loss: {
+          currency: profit.currency,
+          revenue: profit.revenue,
+          outflow: profit.outflow,
+          total_revenue: profit.total_revenue,
+          total_outflow: profit.total_outflow,
+          net_profit: profit.net_profit,
+          margin: profit.margin,
+          mixed_currencies: profit.mixed_currencies,
+          set_aside: profit.set_aside
+        },
+
+        // The bottom line: revenue less refunds, less every outflow line.
+        // Base currency only, and says so -- netting a GBP sale against a PKR
+        // bill would be a made-up number, and this system holds no exchange
+        // rate.
         result: {
           currency: base,
-          ...bottomLine,
-          mixed_currencies: L.presentTotals(revenue, base).mixed || L.presentTotals(spendPaid, base).mixed
+          gross_income: profit.total_revenue,
+          expenses: profit.total_outflow,
+          net: profit.net_profit,
+          margin: profit.margin,
+          mixed_currencies: profit.mixed_currencies
         },
 
         assets: {
@@ -388,10 +463,7 @@ module.exports = {
       }
 
       const term = String(req.query.q || '').trim();
-      if (term) {
-        const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        match.$or = [{ orderNumber: rx }, { 'customerInfo.fullName': rx }, { 'customerInfo.email': rx }];
-      }
+      if (term) match.$or = await salesSearch(term);
 
       // One row per payment -- a renewal is a sale in the period it was paid
       // -- and every total worked out over the whole period in the database,

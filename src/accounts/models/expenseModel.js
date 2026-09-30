@@ -5,9 +5,12 @@
 // February is January's cost, and a report that files it under February makes
 // the two months both wrong.
 //
-// Categories are a fixed list rather than free text. A gym's costs are the
-// same handful every month, and free text turns "Electricity", "electricity"
-// and "K-Electric bill" into three categories that no report can add up.
+// Categories are a list rather than free text. A gym's costs are the same
+// handful every month, and free text turns "Electricity", "electricity" and
+// "K-Electric bill" into three categories that no report can add up. The list
+// is the built-in heads below plus the gym's own (categoryModel.js); a row
+// stores the head's key, and services/categories.js decides which keys a new
+// row may use.
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
@@ -53,7 +56,8 @@ const expenseSchema = new mongoose.Schema(
     reference: { type: String, required: true, unique: true, trim: true, index: true },
 
     title: { type: String, required: true, trim: true },
-    category: { type: String, enum: CATEGORIES, default: 'other', index: true },
+    // A built-in key or one of the gym's own heads (services/categories.js).
+    category: { type: String, default: 'other', trim: true, index: true },
 
     amount: { type: Number, required: true, min: 0 },
     // Stored per row rather than assumed. A gym that buys equipment abroad has

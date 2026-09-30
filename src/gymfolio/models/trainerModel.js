@@ -72,6 +72,21 @@ const trainerSchema = new mongoose.Schema({
   acceptsPt: { type: Boolean, default: true },
   ptRate: { type: Number, default: 0, min: 0 },
   commissionPercent: { type: Number, default: null, min: 0, max: 100 },
+  // The cut of each completed session, as a percent of what the session was
+  // worth or as a fixed amount per session. Null = the gym's default percent
+  // (Settings -> PT). commissionPercent above is kept in step for a percent
+  // (and null otherwise) so anything still reading it gets the same answer;
+  // ptService.commissionTerms reads these first.
+  commissionType: { type: String, enum: ['percent', 'amount', null], default: null },
+  commissionValue: { type: Number, default: null, min: 0 },
+
+  // What the trainer is paid per pay cycle, for a trainer with no staff
+  // account behind them (a linked trainer is paid by that account's pay
+  // rate, which carries the basis, currency and bank details payslips use).
+  // Null = not set; 0 = commission only. In the gym's currency. Never sent to
+  // the public site: `select: false`, read with '+salary +salaryCycle'.
+  salary: { type: Number, default: null, min: 0, select: false },
+  salaryCycle: { type: String, enum: ['monthly', 'biweekly', 'weekly'], default: 'monthly', select: false },
 
   // Short human-readable staff ID the front desk can search by ("TR-004"),
   // used by the attendance app when the fingerprint reader is unavailable.
