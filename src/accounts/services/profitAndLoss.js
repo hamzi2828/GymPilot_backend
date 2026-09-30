@@ -25,6 +25,18 @@
 // on the order's first payment: payment.paidAt, or the first instalment when
 // it was paid in instalments.
 //
+// A refund takes that commission back, as a negative commission entry on the
+// day of the refund -- the date ledger.membershipRefundStages gives it -- so
+// a refund in a later month leaves the earlier month as it was reported, and
+// the two months together net to nothing. An order is refunded once, fully
+// or in part (membershipService.refund records refund.amount, at most what
+// was received). A refund does not say which part of the payment it
+// returned, so it is read as returning the same share of every part: the
+// commission taken back is the share of the money received that went back
+// (refund.amount / payment.amountPaid, else payment.amount), capped at all
+// of it. 40 of 100 back takes back 40% of the commission; a full refund all
+// of it.
+//
 // Money is kept per currency throughout (ledger.js); the lines' base-currency
 // amounts are what the totals and the net add up.
 
@@ -101,6 +113,50 @@ function membershipCommissionStages(range) {
 }
 
 /**
+ * Aggregation stages for the membership commission refunds took back in a
+ * range, one document per refunded order, dated when the money went back:
+ * { orderNumber, trainerId, trainerName, at, amount, currency }. `amount` is
+ * what is taken back, a positive figure: the refund's share of the money
+ * received, of the commission (see the header).
+ */
+function membershipCommissionReversalStages(range) {
+  const received = { $ifNull: ['$payment.amountPaid', '$payment.amount'] };
+  const share = {
+    $cond: [
+      { $gt: [{ $ifNull: ['$received', 0] }, 0] },
+      { $min: [1, { $divide: ['$amount', '$received'] }] },
+      1
+    ]
+  };
+  return [
+    // The refunds' own pipeline, so the commission goes back on exactly the
+    // day the refund is counted.
+    ...L.membershipRefundStages(
+      range,
+      { 'trainerAssignment.commissionAmount': { $gt: 0 } },
+      {
+        fields: {
+          trainerId: '$trainerAssignment.trainerId',
+          trainerName: '$trainerAssignment.trainerName',
+          commission: '$trainerAssignment.commissionAmount',
+          received
+        }
+      }
+    ),
+    {
+      $project: {
+        orderNumber: 1,
+        trainerId: 1,
+        trainerName: 1,
+        at: 1,
+        currency: 1,
+        amount: { $round: [{ $multiply: ['$commission', share] }, 2] }
+      }
+    }
+  ];
+}
+
+/**
  * Everything the lines are made of beyond what the overview already reads.
  * `expenses` are the overview's non-cancelled expense rows for the range.
  */
@@ -109,8 +165,9 @@ async function gather(range, expenses = []) {
   const paidExpenses = expenses.filter((row) => row.status === 'paid');
   const assetIds = [...new Set(paidExpenses.filter((row) => row.assetId && row.category === 'equipment').map((row) => String(row.assetId)))];
 
-  const [membershipCommissions, ptCommissions, payslips, filedByPayslips, assetsBought, linkedAssets] = await Promise.all([
+  const [membershipCommissions, membershipCommissionReversals, ptCommissions, payslips, filedByPayslips, assetsBought, linkedAssets] = await Promise.all([
     PackageOrder.aggregate(membershipCommissionStages(range)),
+    PackageOrder.aggregate(membershipCommissionReversalStages(range)),
     PtSession.aggregate([
       { $match: { status: 'completed', date: { $gte: range.from, $lte: range.to }, 'commission.amount': { $gt: 0 } } },
       {
@@ -133,6 +190,7 @@ async function gather(range, expenses = []) {
 
   return {
     membershipCommissions,
+    membershipCommissionReversals,
     ptCommissions,
     payslips,
     payslipExpenseIds: new Set(filedByPayslips.map((row) => String(row.expenseId))),
@@ -181,6 +239,13 @@ function build({ base, payments = [], refunds = [], sales = [], expenses = [], e
     L.addTo(commission.membership, currency, num(row.amount));
     L.addTo(totals.trainer_commission, currency, num(row.amount));
     note('outflow', row.at, currency, num(row.amount));
+  }
+  // Taken back by a refund, in the refund's period.
+  for (const row of extra.membershipCommissionReversals || []) {
+    const currency = currencyOf(row.currency, base);
+    L.addTo(commission.membership, currency, -num(row.amount));
+    L.addTo(totals.trainer_commission, currency, -num(row.amount));
+    note('outflow', row.at, currency, -num(row.amount));
   }
   for (const row of extra.ptCommissions || []) {
     const currency = currencyOf(row._id && row._id.currency, base);
@@ -277,6 +342,7 @@ module.exports = {
   OUTFLOW_LINES,
   splitPayment,
   membershipCommissionStages,
+  membershipCommissionReversalStages,
   gather,
   build,
   forRange
