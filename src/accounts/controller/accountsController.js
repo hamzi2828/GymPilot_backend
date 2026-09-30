@@ -171,6 +171,44 @@ async function payrollFor(range) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Sales search
+//
+// The desk looks a sale up by whatever the member has to hand: the order
+// number, their name or email, their phone, or the member ID on their card
+// ("GP-0184", User.memberCode). The phone and the member ID of an account
+// live on the account, not the order, so those find the people first and
+// then their orders.
+// ---------------------------------------------------------------------------
+
+// Most people this search will match on their account before it gives up on
+// being a lookup and becomes a scan.
+const SEARCH_PEOPLE_LIMIT = 500;
+
+// A phone number is typed however the person remembers it -- "0300 1234567",
+// "0300-1234567" -- so a term that looks like one matches its digits with
+// anything between them.
+function phonePattern(term) {
+  if (!/^[\d\s+().-]+$/.test(term)) return null;
+  const digits = term.replace(/\D/g, '');
+  return digits.length >= 4 ? new RegExp(digits.split('').join('\\D*')) : null;
+}
+
+/** The `$or` that narrows the orders to a search term. */
+async function salesSearch(term) {
+  const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const phoneRx = phonePattern(term);
+  const or = [{ orderNumber: rx }, { 'customerInfo.fullName': rx }, { 'customerInfo.email': rx }, { 'customerInfo.phone': rx }];
+  if (phoneRx) or.push({ 'customerInfo.phone': phoneRx });
+
+  const people = await User.find({ $or: [{ memberCode: rx }, { phone: rx }, ...(phoneRx ? [{ phone: phoneRx }] : [])] })
+    .select('_id')
+    .limit(SEARCH_PEOPLE_LIMIT)
+    .lean();
+  if (people.length) or.push({ userId: { $in: people.map((person) => person._id) } });
+  return or;
+}
+
 module.exports = {
   // -------------------------------------------------------------------------
   // GET /api/accounts/overview
@@ -425,10 +463,7 @@ module.exports = {
       }
 
       const term = String(req.query.q || '').trim();
-      if (term) {
-        const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        match.$or = [{ orderNumber: rx }, { 'customerInfo.fullName': rx }, { 'customerInfo.email': rx }];
-      }
+      if (term) match.$or = await salesSearch(term);
 
       // One row per payment -- a renewal is a sale in the period it was paid
       // -- and every total worked out over the whole period in the database,
