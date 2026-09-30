@@ -17,6 +17,7 @@ const Lead = require('../models/leadModel');
 const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const pnl = require('../accounts/services/profitAndLoss');
+const categories = require('../accounts/services/categories');
 const T = require('../attendance/services/timeUtils');
 const { sendCsv } = require('../services/csv');
 const { sendXlsx } = require('../services/xlsx');
@@ -451,12 +452,16 @@ module.exports = {
       }
 
       if (kind === 'expenses') {
-        const rows = await Expense.find({ incurredOn: inRange }).sort({ incurredOn: -1 }).limit(EXPORT_LIMIT).lean();
+        const [rows, heads] = await Promise.all([
+          Expense.find({ incurredOn: inRange }).sort({ incurredOn: -1 }).limit(EXPORT_LIMIT).lean(),
+          // The gym's own heads ("Tea") by name, not their stored key.
+          categories.headsFor('expense')
+        ]);
         return sendExport(req, res, `expenses_${stamp}`, 'Expenses', [
           { key: 'reference', label: 'Reference' },
           { key: 'incurredOn', label: 'Date', type: 'date', value: (r) => T.dateKey(r.incurredOn) },
           { key: 'title', label: 'Title' },
-          { key: 'category', label: 'Category' },
+          { key: 'category', label: 'Category', value: (r) => heads.labelOf(r.category) },
           { key: 'vendor', label: 'Vendor' },
           { key: 'amount', label: 'Amount' },
           { key: 'currency', label: 'Currency' },

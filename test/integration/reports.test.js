@@ -185,6 +185,28 @@ function csvRows(res) {
   return String(res.body).replace(/^﻿/, '').trim().split('\r\n').map((line) => line.split(','));
 }
 
+test("expenses export names the gym's own heads, not their stored keys", async () => {
+  await h.inGym(gym, async () => {
+    const categories = h.src('accounts/services/categories');
+    const Expense = h.src('accounts/models/expenseModel');
+    const head = await categories.createHead('expense', 'Tea for members');
+    const tea = await Expense.create({ reference: 'EXP-TEA-1', title: 'Tea', category: head.key, amount: 3, currency: 'GBP', status: 'paid', incurredOn: at('2026-08-12T10:00:00Z'), paidOn: at('2026-08-12T10:00:00Z') });
+    try {
+      const res = await h.call(reports.export, { params: { kind: 'expenses' }, query: AUGUST });
+      assert.equal(res.statusCode, 200);
+      const rows = csvRows(res);
+      const title = rows[0].indexOf('Title');
+      const category = rows[0].indexOf('Category');
+      const row = rows.find((r) => r[title] === 'Tea');
+      assert.ok(row, 'the expense is exported');
+      assert.equal(row[category], 'Tea for members');
+    } finally {
+      await Expense.deleteOne({ _id: tea._id });
+      await head.deleteOne();
+    }
+  });
+});
+
 test('members export: those who joined in the range, or everyone with all=1', async () => {
   await h.inGym(gym, async () => {
     const joined = await h.call(reports.export, { params: { kind: 'members' }, query: AUGUST });
