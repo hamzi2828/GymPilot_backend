@@ -387,6 +387,10 @@ module.exports = {
               amountOverride: amount || undefined,
               discountAmount: Number.isFinite(discount) && discount > 0 ? discount : 0,
               discountNote: Number.isFinite(discount) && discount > 0 ? 'Imported from CSV' : '',
+              // These are existing members moving over from another system:
+              // they joined (and paid any joining fee) there. Charging it here
+              // would file part of the imported amount as admission money.
+              chargeJoiningFee: false,
               notes: cell(row, 'notes') || `Imported from CSV by ${req.user && req.user.email}`,
               by: req.user && req.user.email
             });

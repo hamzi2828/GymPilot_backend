@@ -162,6 +162,20 @@ test('a spreadsheet: one name column, no emails, address, active flag, discount 
   assert.ok(again.body.data.skipped.some((s) => s.reason === 'An account with this email already exists'));
 });
 
+test('imported members are existing members: no joining fee on their imported package', async () => {
+  await h.inGym(gym, () => Package.create({ name: 'With joining fee', price: '50', currency: 'GBP', period: 'month', features: ['Gym floor'], joiningFee: 15 }));
+  const res = await runImport('name,phone,package,paid\nOmar Old,0300 5550001,With joining fee,yes\n');
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const orders = await h.rawDb(gym.database.name).collection('packageorders').find({ 'packageDetails.name': 'With joining fee' }).toArray();
+  assert.equal(orders.length, 1, 'the package was given');
+  const [order] = orders;
+  assert.equal(order.customerInfo.fullName, 'Omar Old');
+  const omar = await rawUsers().findOne({ phone: '0300 5550001' });
+  assert.equal(String(order.userId), String(omar._id), 'on the imported member');
+  assert.equal(order.payment.joiningFee, 0);
+  assert.equal(order.payment.amount, 50, 'the package price, no fee added');
+});
+
 test('a file needs an email or a phone column, and says so', async () => {
   const res = await runImport('Name,Notes\nSome One,hello', true);
   assert.equal(res.statusCode, 400);
