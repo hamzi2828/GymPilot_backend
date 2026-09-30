@@ -76,7 +76,10 @@ const state = {
   server: null,
   mongoose: null,
   // What getStripe() returns while a test has installed a fake (setStripe).
-  stripeFake: null
+  stripeFake: null,
+  // The error every email send reports while a test has made email fail
+  // (setEmailFailure); null: sends succeed.
+  emailFailure: null
 };
 
 // What the stand-ins were asked to do, for assertions.
@@ -97,6 +100,7 @@ function installStubs() {
   const email = require(path.join(SRC, 'services', 'emailService'));
   email.sendEmail = async (to, subject, html) => {
     calls.emails.push({ to, subject, html });
+    if (state.emailFailure) return { success: false, error: state.emailFailure };
     return { success: true, messageId: `stub-${calls.emails.length}` };
   };
   email.verifyConnection = async () => ({ ok: true });
@@ -319,6 +323,11 @@ function setStripe(fake) {
   state.stripeFake = fake || null;
 }
 
+/** Every email send fails with `error` from now on (null: sends succeed again). */
+function setEmailFailure(error) {
+  state.emailFailure = error || null;
+}
+
 module.exports = {
   PLATFORM_DB,
   TENANT_PREFIX,
@@ -337,5 +346,6 @@ module.exports = {
   call,
   middayZone,
   minutesAgo,
-  setStripe
+  setStripe,
+  setEmailFailure
 };

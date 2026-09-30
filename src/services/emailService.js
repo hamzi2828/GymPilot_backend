@@ -94,6 +94,12 @@ async function initTransporter() {
  * @returns {Promise<object>} - Send result
  */
 async function sendEmail(to, subject, html, options = {}) {
+  // A member can have no email address at all (they sign in with their
+  // username). Every send for one ends here, answered like any other failed
+  // send -- never a crash, never a round trip to the mail server.
+  if (!to || (typeof to === 'string' && !to.trim())) {
+    return { success: false, skipped: 'no email address', error: 'No email address' };
+  }
   try {
     const { transport, cfg } = await initTransporter();
 

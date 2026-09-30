@@ -85,8 +85,11 @@ module.exports = {
       const user = await User.findById(req.user.id);
       if (!user) return res.status(404).json({ message: 'Account not found' });
       const enabled = !!(req.body && (req.body.enabled === true || req.body.enabled === 'true'));
-      // The code arrives by email; switching this on with mail broken would
-      // lock the account out at its next sign-in.
+      // The code arrives by email; switching this on with no address, or
+      // with mail broken, would lock the account out at its next sign-in.
+      if (enabled && !user.email) {
+        return res.status(409).json({ message: 'Two-factor sign-in emails you a code, and this account has no email address. Ask the gym to add one first.' });
+      }
       if (enabled) {
         const { verifyConnection } = require('../services/emailService');
         const smtp = await verifyConnection();
@@ -201,14 +204,18 @@ module.exports = {
       const user = await User.findById(req.user.id).select('+medical +documents +employment.payroll');
       if (!user) return res.status(404).json({ message: 'Account not found' });
 
+      // Matched by email as well only when the account has one: without it,
+      // `{ email: undefined }` would match every record that has none -- other
+      // people's orders and enquiries.
       const [orders, bookings, attendance, fingerprints, contacts] = await Promise.all([
-        PackageOrder.find({ $or: [{ userId: user._id }, { 'customerInfo.email': user.email }] }).lean(),
+        PackageOrder.find(user.email ? { $or: [{ userId: user._id }, { 'customerInfo.email': user.email }] } : { userId: user._id }).lean(),
         ClassBooking.find({ userId: user._id }).lean(),
         // Every visit on record, voided ones included: an export is the
         // member's whole data, not what the totals count.
         Attendance.find({ personId: user._id }).setOptions({ withVoided: true }).sort({ checkInAt: -1 }).lean(),
         Fingerprint.find({ personId: user._id }).select('fingerIndex enrolledByName enrolledDevice isActive createdAt updatedAt').lean(),
-        Contact.find({ email: user.email }).lean().catch(() => [])
+        // Enquiries keep the address as `emailAddress`.
+        user.email ? Contact.find({ emailAddress: user.email }).lean().catch(() => []) : []
       ]);
 
       // Start from the sign-in view, then add back what is the member's own.

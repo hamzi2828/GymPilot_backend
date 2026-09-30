@@ -142,10 +142,23 @@ const medicalSchema = new mongoose.Schema({
     }
 }, { _id: false });
 
+// '' and null are "no email": left unset rather than stored, so the partial
+// unique index on email never sees them.
+function blankToUndefined(value) {
+    if (value === null || value === undefined) return undefined;
+    return String(value).trim() === '' ? undefined : value;
+}
+
 const userSchema = new mongoose.Schema({
     firstName: { type: String, required: true, trim: true },
     lastName: { type: String, required: true, trim: true },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    // Optional: plenty of members at a front desk have no email address, and
+    // they sign in with their username instead. Unique only when present (the
+    // partial index below); a blank is stored as no field at all, never '',
+    // so two members without one never collide and a lookup by email can
+    // never match "nobody's". Existing gyms swap the old always-unique index
+    // with scripts/migrateEmailIndex.js.
+    email: { type: String, lowercase: true, trim: true, set: blankToUndefined },
     // What the gym reads out to a member so they can sign in on the phone
     // app: their name (or email) plus three digits, unique across the whole
     // platform. Filled in by the hook below wherever an account is created,
@@ -302,7 +315,9 @@ const userSchema = new mongoose.Schema({
 
     // Short human-readable ID the front desk can search by ("GP-0184"), for
     // the days the fingerprint reader is unplugged or the finger won't read.
-    // Assigned on demand -- see ensureMemberCode() in peopleDirectory.js.
+    // Given to a member when their account is created (assignMemberCode() in
+    // peopleDirectory.js); older accounts get one at the desk on first sight
+    // or from scripts/assignMemberCodes.js.
     memberCode: { type: String, default: null, trim: true },
 
     // ---- Employment -------------------------------------------------------
@@ -358,6 +373,13 @@ userSchema.index(
 userSchema.index(
     { staffCode: 1 },
     { unique: true, partialFilterExpression: { staffCode: { $type: 'string' } } }
+);
+
+// Unique among the accounts that have one. Named as the old always-unique
+// index was, so scripts/migrateEmailIndex.js replaces it in place.
+userSchema.index(
+    { email: 1 },
+    { unique: true, name: 'email_1', partialFilterExpression: { email: { $type: 'string' } } }
 );
 
 // Sparse: accounts created before usernames existed have no field at all and

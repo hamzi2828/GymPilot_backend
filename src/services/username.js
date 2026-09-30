@@ -82,4 +82,90 @@ async function assignUsername(user, { force = false } = {}) {
   return user.username;
 }
 
-module.exports = { generateUsername, assignUsername, baseFor, clean, isFree };
+// ---------------------------------------------------------------------------
+// Signing in with a username
+//
+// The website and the front-desk app take "email or username" in one box.
+// An address has an @ and a username never does (clean() above keeps letters
+// and digits only), so the box's content says which it is. Both are stored
+// lowercased, so the match is case-insensitive.
+// ---------------------------------------------------------------------------
+
+/** The account filter for what was typed into a sign-in box, or null. */
+function loginFilter(identifier) {
+  const value = String(identifier || '').toLowerCase().trim();
+  if (!value) return null;
+  return value.includes('@') ? { email: value } : { username: value };
+}
+
+// ---------------------------------------------------------------------------
+// A username chosen by staff
+//
+// Generated ones are the name plus digits; a gym may prefer something else
+// ("ali.khan" is not allowed, "alikhan" is). The rules are the generator's:
+// letters and digits only, so it can be read out and typed on a phone, and
+// at least one letter, so it is never mistaken for a phone or member number.
+// ---------------------------------------------------------------------------
+
+const MIN_CHOSEN = 3;
+const MAX_CHOSEN = 30;
+
+/** Why `value` cannot be a username, or null. Case is ignored. */
+function usernameProblem(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return 'A username is required';
+  if (!/^[a-z0-9]+$/.test(text)) return 'A username is letters and digits only: no spaces, dots or symbols';
+  if (text.length < MIN_CHOSEN) return `A username needs at least ${MIN_CHOSEN} characters`;
+  if (text.length > MAX_CHOSEN) return `A username can be at most ${MAX_CHOSEN} characters`;
+  if (!/[a-z]/.test(text)) return 'A username needs at least one letter';
+  return null;
+}
+
+/**
+ * The `PUT .../:id/username { username }` handler for one screen. `load(id)`
+ * finds the account the screen may touch. The old username stops working at
+ * once -- on the website, the desk and the phone app (the model's save hook
+ * moves the platform directory row) -- so the person has to be told.
+ */
+function setUsernameHandler({ load, notFound = 'User not found' }) {
+  return async (req, res) => {
+    try {
+      const mongoose = require('mongoose');
+      if (!mongoose.Types.ObjectId.isValid(String(req.params.id || ''))) {
+        return res.status(404).json({ success: false, message: notFound });
+      }
+      const user = await load(req.params.id);
+      if (!user) return res.status(404).json({ success: false, message: notFound });
+
+      // An administrator's sign-in name is an administrator's business.
+      const { isAdmin } = require('./roleGuards');
+      const actorRole = req.roleSlug || (req.user && req.user.role) || '';
+      if (isAdmin(user.role) && !isAdmin(actorRole)) {
+        return res.status(403).json({ success: false, message: "Only an administrator can change an administrator's username." });
+      }
+
+      const wanted = req.body && req.body.username;
+      const problem = usernameProblem(wanted);
+      if (problem) return res.status(400).json({ success: false, message: problem });
+      const username = String(wanted).trim().toLowerCase();
+
+      if (username !== user.username) {
+        if (!(await isFree(username, { userId: user._id }))) {
+          return res.status(409).json({ success: false, message: 'That username is already taken. Try adding a few digits.' });
+        }
+        user.username = username;
+        await user.save();
+      }
+
+      return res.json({ success: true, message: `Username set to ${username}.`, data: { id: String(user._id), username } });
+    } catch (error) {
+      if (error && error.code === 11000) {
+        return res.status(409).json({ success: false, message: 'That username is already taken. Try adding a few digits.' });
+      }
+      console.error('[username] set failed:', error);
+      return res.status(500).json({ success: false, message: 'Could not change the username' });
+    }
+  };
+}
+
+module.exports = { generateUsername, assignUsername, baseFor, clean, isFree, loginFilter, usernameProblem, setUsernameHandler };

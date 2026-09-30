@@ -14,6 +14,8 @@ const guards = require('../services/roleGuards');
 const { gymSiteName } = require('../services/gymName');
 const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
+const { assignMemberCode } = require('../attendance/services/peopleDirectory');
+const { profileFieldsFrom } = require('../services/memberFields');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -129,26 +131,6 @@ async function subscriptionsBlockDeletion(userId, { self, by = null }) {
     return live ? refusal('') : null;
 }
 
-/** Generates a readable but strong temporary password. */
-function generatePassword(length = 14) {
-  // Ambiguous glyphs (0/O, 1/l/I) omitted so the password survives being read
-  // out of an email and retyped.
-  const upper = 'ABCDEFGHJKMNPQRSTUVWXYZ';
-  const lower = 'abcdefghijkmnpqrstuvwxyz';
-  const digits = '23456789';
-  const symbols = '!@#$%^&*';
-  const all = upper + lower + digits + symbols;
-  const pick = (set) => set[crypto.randomInt(0, set.length)];
-  // Guarantee one of each class, then fill and shuffle.
-  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
-  while (chars.length < length) chars.push(pick(all));
-  for (let i = chars.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(0, i + 1);
-    [chars[i], chars[j]] = [chars[j], chars[i]];
-  }
-  return chars.join('');
-}
-
 function welcomeEmailHtml({ firstName, email, username, password, siteName, loginUrl }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
@@ -157,12 +139,12 @@ function welcomeEmailHtml({ firstName, email, username, password, siteName, logi
     <table style="width:100%;border-collapse:collapse;background:#fafafa;border:1px solid #e4e4e7;border-radius:8px;margin-bottom:16px">
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Email</td>
           <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${email}</td></tr>
-      ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username <span style="color:#a1a1aa">(phone app)</span></td>
+      ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username</td>
           <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${username}</td></tr>` : ''}
       <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
           <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${password}</td></tr>
     </table>
-    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' On the GymPilot phone app, sign in with your username and the same password.' : ''}</p>
+    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' You can sign in with your email or your username, here and on the GymPilot phone app.' : ''}</p>
     <a href="${loginUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
   </div>`;
@@ -195,18 +177,9 @@ function hashResetToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-// Minimum that is worth enforcing. Deliberately a length rule and nothing
-// else: composition rules push people towards "Password1!" and no further.
-const MIN_PASSWORD_LENGTH = 8;
-
-function passwordProblem(password) {
-  if (!password || typeof password !== 'string') return 'A new password is required';
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
-  }
-  if (password.length > 200) return 'Password is too long';
-  return null;
-}
+// The password rule (a length, nothing else) and the generator live with the
+// admin set-password code, so every screen applies the same ones.
+const { passwordProblem, initialPassword, resetRefusal, setPasswordHandler } = require('../services/adminPasswords');
 
 // Stores a fresh reset token on the account and emails the link. Run after
 // the response has gone (see forgotPassword), so it reports trouble in the
@@ -316,72 +289,129 @@ function googleErrorCode(error) {
   return /^[a-z_]{1,64}$/i.test(code) ? code : 'unknown_error';
 }
 
-const userController = {
+// What a duplicate-key refusal on an account means. A second member with no
+// email is refused on the email index only while the gym's database still
+// has the old always-unique one (scripts/migrateEmailIndex.js replaces it).
+function duplicateMessage(error) {
+    const key = (error && (error.keyValue || error.keyPattern)) || {};
+    if ('email' in key && (key.email === null || key.email === undefined)) {
+        return "This gym's database cannot hold a second member without an email yet: it needs a one-off update (scripts/migrateEmailIndex.js). Add an email address for now.";
+    }
+    if ('memberCode' in key) return 'That member ID is already in use';
+    if ('username' in key) return 'That username is already in use';
+    return 'Email already in use';
+}
 
+// ---------------------------------------------------------------------------
+// Creating an account from the admin panel
+//
+// The work behind POST /admin/users, as a function of the request rather
+// than a route, so a screen that does more in one go -- "add a member, sell
+// them a package, take the payment" -- can create the account the same way
+// and carry on with `user`, instead of copying these rules. Resolves to
+// { status, body, user?, noStore? }: the answer to send, the account when
+// one was made, and whether the answer carries a password (never cache it).
+//
+// body: { firstName, lastName, email?, phone?, role?,
+//         gender?, dateOfBirth?, address?, staffNotes?,
+//         credentials?: 'email' | 'show' | 'set', password? }
+//
+// The email is optional -- plenty of members never give one -- but then a
+// phone number is required, so the gym can still reach them and find them
+// at the desk. Such a member signs in with their username. The profile
+// fields are the ones the desk takes down at the counter
+// (services/memberFields.js); the rest of the profile is edited afterwards.
+//
+// How the first password reaches the person (services/adminPasswords.js
+// initialPassword): emailed (the default), generated and shown to the admin
+// once, or typed by the admin. An email that cannot be sent no longer throws
+// the password away: it comes back in `password`, shown once, so a gym whose
+// mail is down can still hand it over.
+// ---------------------------------------------------------------------------
+async function createMemberAccount(req, body = (req && req.body) || {}) {
+    const fail = (status, message, extra = {}) => ({ status, body: { message, ...extra } });
+    try {
+        const { firstName, lastName, email, role, phone } = body;
 
-    // POST /admin/users - Admin creates a user and emails them their password
-    adminCreateUser: async (req, res) => {
-        try {
-            const { firstName, lastName, email, role, phone } = req.body;
+        if (!firstName || !lastName) {
+            return fail(400, 'First name and last name are required');
+        }
 
-            if (!firstName || !lastName || !email) {
-                return res.status(400).json({ message: 'First name, last name and email are required' });
-            }
+        const normalisedEmail = String(email || '').toLowerCase().trim();
+        const cleanPhone = String(phone || '').trim();
+        if (!normalisedEmail && !cleanPhone) {
+            return fail(400, 'Give an email address or a phone number');
+        }
+        if (normalisedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalisedEmail)) {
+            return fail(400, 'Please provide a valid email address');
+        }
 
-            const normalisedEmail = String(email).toLowerCase().trim();
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalisedEmail)) {
-                return res.status(400).json({ message: 'Please provide a valid email address' });
-            }
+        const profile = profileFieldsFrom(body);
+        if (profile.problem) return fail(400, profile.problem);
 
-            const existing = await User.findOne({ email: normalisedEmail });
-            if (existing) {
-                return res.status(409).json({ message: 'Email already in use' });
-            }
+        // Only an address that was given is looked up: `{ email: '' }`
+        // must never be asked, it means nothing.
+        if (normalisedEmail && (await User.exists({ email: normalisedEmail }))) {
+            return fail(409, 'Email already in use');
+        }
 
-            // Any live role may be assigned here, not just the three that
-            // used to be hardcoded -- a gym can invent its own. Anything
-            // unrecognised falls back to an ordinary member.
-            const RoleModel = require('../models/roleModel');
-            const { ensureDefaultRoles: ensureRoles } = require('../services/roleService');
-            await ensureRoles();
-            const requestedRole = await RoleModel.findOne({
-                slug: String(role || '').toLowerCase().trim(),
-                isActive: true
-            });
-            const assignedRole = requestedRole ? requestedRole.slug : 'user';
+        // Any live role may be assigned here, not just the three that
+        // used to be hardcoded -- a gym can invent its own. Anything
+        // unrecognised falls back to an ordinary member.
+        const RoleModel = require('../models/roleModel');
+        const { ensureDefaultRoles: ensureRoles } = require('../services/roleService');
+        await ensureRoles();
+        const requestedRole = await RoleModel.findOne({
+            slug: String(role || '').toLowerCase().trim(),
+            isActive: true
+        });
+        const assignedRole = requestedRole ? requestedRole.slug : 'user';
 
-            // A manager with `users: manage` must not be able to mint an
-            // administrator.
-            const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: assignedRole });
-            if (refusal) return res.status(403).json({ message: refusal });
+        // A manager with `users: manage` must not be able to mint an
+        // administrator.
+        const refusal = guards.createRoleProblem({ actorRole: actorRole(req), role: assignedRole });
+        if (refusal) return fail(403, refusal);
 
-            // The gym's platform plan may cap how many accounts it can hold.
-            const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
-            if (!limit.ok) return res.status(403).json({ message: limit.message, code: limit.code });
+        // Nowhere to email a password: it is shown to the admin instead.
+        const initial = initialPassword(body, { canEmail: !!normalisedEmail });
+        if (initial.problem) return fail(400, initial.problem);
 
-            // Generated server-side so a plaintext password is never accepted
-            // over the wire or persisted anywhere but the outbound email.
-            const password = generatePassword();
-            const salt = await bcrypt.genSalt(10);
-            const hashed = await bcrypt.hash(password, salt);
+        // Knowing a new account's password is being able to sign in as
+        // it, so choosing or seeing one is held to the set-password rule:
+        // not for an account whose role reaches further than the admin's
+        // own. Emailing it to the person stays as it was.
+        const revealRefusal = await resetRefusal(req, { role: assignedRole });
+        if (revealRefusal && initial.mode !== 'email') return fail(403, revealRefusal);
 
-            const user = await User.create({
-                firstName: String(firstName).trim(),
-                lastName: String(lastName).trim(),
-                email: normalisedEmail,
-                password: hashed,
-                role: assignedRole,
-                phone: phone ? String(phone).trim() : null,
-                // Creating someone straight into a staff role should make them
-                // staff, or they would be invisible on the Staff tab that
-                // manages their payroll and roster.
-                employment: { isStaff: !!(requestedRole && requestedRole.isStaff) },
-            });
+        // The gym's platform plan may cap how many accounts it can hold.
+        const limit = await checkLimit(requestedRole && requestedRole.isStaff ? 'staff' : 'members');
+        if (!limit.ok) return fail(403, limit.message, { code: limit.code });
 
-            // The account exists regardless of whether the email lands, so a
-            // send failure is reported rather than failing the whole request.
-            let emailed = false;
-            let emailError = null;
+        const { password } = initial;
+        const salt = await bcrypt.genSalt(10);
+        const hashed = await bcrypt.hash(password, salt);
+
+        const user = await User.create({
+            firstName: String(firstName).trim(),
+            lastName: String(lastName).trim(),
+            email: normalisedEmail || undefined,
+            password: hashed,
+            role: assignedRole,
+            phone: cleanPhone || null,
+            ...profile.fields,
+            // Creating someone straight into a staff role should make them
+            // staff, or they would be invisible on the Staff tab that
+            // manages their payroll and roster.
+            employment: { isStaff: !!(requestedRole && requestedRole.isStaff) },
+        });
+        // A member's ID from the start, for the card and the Users list.
+        await assignMemberCode(user);
+
+        // The account exists regardless of whether the email lands, so a
+        // send failure is reported rather than failing the whole request.
+        let emailed = false;
+        let emailError = null;
+        if (initial.mode === 'email') {
             try {
                 const siteName = await gymSiteName();
                 const loginUrl = `${tenantOrigin()}/authentication`;
@@ -395,22 +425,69 @@ const userController = {
             } catch (err) {
                 emailError = err.message;
             }
+        }
 
-            return res.status(201).json({
-                message: emailed
-                    ? 'User created and credentials emailed'
-                    : 'User created, but the credentials email could not be sent',
+        // Shown to the admin once: a generated password nobody else will
+        // ever see -- asked for, or left over from an email that failed.
+        const reveal = initial.mode === 'show' || (initial.mode === 'email' && !emailed && !revealRefusal);
+        let message = 'User created with the password you chose';
+        if (initial.mode === 'show') message = 'User created. Hand them the password below: it is shown only once';
+        if (initial.mode === 'email') {
+            message = emailed
+                ? 'User created and credentials emailed'
+                : reveal
+                    ? 'User created, but the credentials email could not be sent. Hand them the password below: it is shown only once'
+                    : 'User created, but the credentials email could not be sent. Ask an administrator to set their password';
+        }
+
+        return {
+            status: 201,
+            user,
+            noStore: reveal,
+            body: {
+                message,
                 emailed,
                 emailError,
+                credentials: initial.mode,
+                ...(reveal ? { password } : {}),
                 data: publicUserView(user),
-            });
-        } catch (error) {
-            if (error && error.code === 11000) {
-                return res.status(409).json({ message: 'Email already in use' });
             }
-            return res.status(400).json({ message: 'Error creating user', error: error.message });
-        }
+        };
+    } catch (error) {
+        if (error && error.code === 11000) return fail(409, duplicateMessage(error));
+        return fail(400, 'Error creating user', { error: error.message });
+    }
+}
+
+const userController = {
+
+
+    // POST /admin/users - Admin creates a user (createMemberAccount above)
+    adminCreateUser: async (req, res) => {
+        const result = await createMemberAccount(req);
+        if (result.noStore) res.setHeader('Cache-Control', 'no-store');
+        return res.status(result.status).json(result.body);
     },
+
+    // POST /admin/users/:id/password   { password? }
+    //
+    // An admin sets (or, with no password, generates) a member's or staff
+    // member's password -- the way in when there is no email to reset from,
+    // or the email is down. Ends every session the account had. Who may do
+    // it to whom: services/adminPasswords.js resetProblem.
+    setUserPassword: setPasswordHandler({
+        load: (id) => User.findById(id),
+        notFound: 'User not found'
+    }),
+
+    // PUT /admin/users/:id/username   { username }
+    //
+    // Staff choose the username instead of taking a generated one -- letters
+    // and digits, unique across the platform (services/username.js).
+    setUsername: require('../services/username').setUsernameHandler({
+        load: (id) => User.findById(id),
+        notFound: 'User not found'
+    }),
 
     // POST /admin/users/:id/username - Issue a fresh username
     //
@@ -468,6 +545,8 @@ const userController = {
                 email: email.toLowerCase().trim(),
                 password: hashed,
             });
+
+            await assignMemberCode(user);
 
             // The welcome email carries their username for the phone app,
             // which they are told nowhere else. Not waited for.
@@ -589,6 +668,7 @@ const userController = {
                 });
                 // A new member, as from the sign-up form -- with no password
                 // yet, which the phone app needs.
+                await assignMemberCode(user);
                 afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
             } else {
                 user = await linkGoogleAccount(user, { googleId, picture });
@@ -644,15 +724,22 @@ const userController = {
     },
 
     // POST /user/login - Authenticate user and return JWT
+    //
+    // { email, password, remember? } -- `email` is whatever was typed into
+    // the "Email or username" box (`login` or `username` are read too): an
+    // address, or the username a member without one signs in with. Either
+    // way, case does not matter (services/username.js loginFilter).
     loginUser: async (req, res) => {
         try {
-            const { email, password } = req.body;
+            const { password } = req.body;
+            const login = req.body.login || req.body.email || req.body.username;
             const remember = wantsRemember(req.body);
-            if (!email || !password) {
-                return res.status(400).json({ message: 'Email and password are required' });
+            if (!login || !password) {
+                return res.status(400).json({ message: 'Email or username and password are required' });
             }
 
-            const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+            const { loginFilter } = require('../services/username');
+            const user = await User.findOne(loginFilter(login));
             if (!user) {
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
@@ -934,6 +1021,7 @@ const userController = {
                     googleId: googleId || null,
                     avatarUrl: picture || null,
                 });
+                await assignMemberCode(user);
                 afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
             } else {
                 user = await linkGoogleAccount(user, { googleId, picture });
@@ -1545,3 +1633,5 @@ const userController = {
 };
 
 module.exports = userController;
+// For screens that create an account as one step of something larger.
+module.exports.createMemberAccount = createMemberAccount;

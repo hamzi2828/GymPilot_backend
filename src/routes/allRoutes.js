@@ -65,6 +65,10 @@ router.get('/userDetailForProfile', auth, userController.getUserDetailForProfile
 router.get('/get/allUsers', auth, requirePermission('users'), userController.getAllUsers);
 router.post('/admin/users', auth, requirePermission('users'), userController.adminCreateUser);
 router.post('/admin/users/:id/username', auth, requirePermission('users', 'manage'), userController.regenerateUsername);
+router.put('/admin/users/:id/username', auth, requirePermission('users', 'manage'), userController.setUsername);
+// An admin sets or generates someone's password (no email needed): see
+// services/adminPasswords.js for who may do it to whom.
+router.post('/admin/users/:id/password', auth, requirePermission('users', 'manage'), userController.setUserPassword);
 // The member picker on the desk screens (lockers, till, bookings, PT,
 // messaging, package orders): any staff account, searched and bounded. See
 // controller/memberOptionsController.js.
@@ -175,6 +179,8 @@ router.post('/staff', auth, requirePermission('staff', 'manage'), staffControlle
 router.put('/staff/:id', auth, requirePermission('staff', 'manage'), staffController.update);
 router.patch('/staff/:id/status', auth, requirePermission('staff', 'manage'), staffController.setStatus);
 router.delete('/staff/:id', auth, requirePermission('staff', 'manage'), staffController.remove);
+router.post('/staff/:id/password', auth, requirePermission('staff', 'manage'), staffController.setPassword);
+router.put('/staff/:id/username', auth, requirePermission('staff', 'manage'), staffController.setUsername);
 
 // ---------------------------------------------------------------------------
 // Leave, payslips and the roster -- see controller/hrController.js. The

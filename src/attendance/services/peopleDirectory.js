@@ -8,10 +8,11 @@
 //
 //   { personType, id, name, code, meta }
 //
-// It also owns the short front-desk codes ("GP-0184", "TR-004"). Those are
-// assigned lazily rather than backfilled by a migration: an account only
-// needs one the first time it shows up at the desk, and generating them on
-// demand means this feature can be deployed without touching existing rows.
+// It also owns the short front-desk codes ("GP-0184", "TR-004"). A member
+// gets theirs when the account is created (assignMemberCode, called by every
+// place that creates one), so the ID is on their card and in the Users list
+// from day one; accounts older than that get one the first time they show up
+// at the desk, or from scripts/assignMemberCodes.js.
 
 const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
@@ -30,9 +31,14 @@ function fullName(user) {
 
 // Codes are sequential rather than random so they stay short enough to read
 // aloud across a desk. The scan is over an indexed field and only runs when a
-// person is first seen, so it is not on any hot path.
-async function nextSequentialCode(Model, field, prefix) {
-  const last = await Model.findOne({ [field]: new RegExp('^' + prefix) })
+// person is first given one, so it is not on any hot path.
+//
+// Only codes that are the prefix and digits count: a spreadsheet import can
+// bring "GP-A12" across from an old system, and reading that as the highest
+// code would restart the series at GP-0001 on every call. `offset` is how
+// many codes past the highest to go -- a retry after losing a race.
+async function nextSequentialCode(Model, field, prefix, offset = 0) {
+  const last = await Model.findOne({ [field]: new RegExp('^' + prefix + '\\d+$') })
     .sort({ [field]: -1 })
     .select(field)
     .lean();
@@ -43,7 +49,7 @@ async function nextSequentialCode(Model, field, prefix) {
     if (!Number.isNaN(parsed)) sequence = parsed + 1;
   }
 
-  return prefix + String(sequence).padStart(4, '0');
+  return prefix + String(sequence + offset).padStart(4, '0');
 }
 
 // Both of these tolerate a lost race: two desks enrolling two people at the
@@ -54,7 +60,7 @@ async function ensureMemberCode(user) {
   if (user.memberCode) return user.memberCode;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const code = await nextSequentialCode(User, 'memberCode', MEMBER_PREFIX);
+    const code = await nextSequentialCode(User, 'memberCode', MEMBER_PREFIX, attempt);
     try {
       await User.updateOne({ _id: user._id, memberCode: null }, { $set: { memberCode: code } });
       const saved = await User.findById(user._id).select('memberCode').lean();
@@ -64,6 +70,38 @@ async function ensureMemberCode(user) {
     }
   }
   return '';
+}
+
+/**
+ * A member's ID at the moment their account is made: the admin form, the
+ * sign-up form (checkout signs people up through it), Google, a converted
+ * lead and the CSV import all call this. Staff are left alone -- they are
+ * TR- people, given their code by the Staff screen.
+ *
+ * The code is also set on the document passed in, so the response the
+ * caller is about to send carries it. Never throws: an account without an
+ * ID yet is still an account, and the desk gives it one on first sight.
+ */
+async function assignMemberCode(user) {
+  if (!user || user.memberCode) return (user && user.memberCode) || '';
+  if (user.role === 'admin' || (user.employment && user.employment.isStaff)) return '';
+  try {
+    const code = await ensureMemberCode(user);
+    if (code) {
+      if (typeof user.set === 'function') {
+        // Already saved by ensureMemberCode: mark it clean so a later save of
+        // this document does not write it a second time.
+        user.set('memberCode', code);
+        user.unmarkModified('memberCode');
+      } else {
+        user.memberCode = code;
+      }
+    }
+    return code;
+  } catch (error) {
+    console.error('[people] could not give', String(user._id), 'a member ID:', error.message);
+    return '';
+  }
 }
 
 // Trainers and staff accounts share ONE TR- series. Scanning only the trainer
@@ -663,6 +701,7 @@ module.exports = {
   activePersonKeys,
   findByCode,
   fullName,
+  assignMemberCode,
   ensureMemberCode,
   ensureStaffCode,
   ensureUserStaffCode,
