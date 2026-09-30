@@ -12,6 +12,7 @@ const Settings = require('../models/settings');
 const { toPublicPath, localUploadPath } = require('../helper/upload');
 const { membershipFor } = require('../attendance/services/peopleDirectory');
 const Attendance = require('../attendance/models/attendanceModel');
+const { primaryAddress, oneLine } = require('../services/memberFields');
 
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 const blobUpload = USE_BLOB_STORAGE ? require('../helper/blobUpload') : null;
@@ -241,6 +242,8 @@ module.exports = {
           lastName: user.lastName,
           email: user.email,
           phone: user.phone || '',
+          // The one line the desk typed (the account's primary address).
+          address: primaryAddress(user),
           dateOfBirth: user.dateOfBirth || null,
           gender: user.gender || '',
           avatarUrl: user.avatarUrl || '',
@@ -284,6 +287,14 @@ module.exports = {
         if (value) user[key] = value;
       }
       if (body.phone !== undefined) user.phone = text(body.phone, 40) || null;
+      if (body.address !== undefined) {
+        // The primary address's line, kept in the member's own address book
+        // (addresses[]) rather than a second field that could disagree with it.
+        const line = oneLine(text(body.address, 300));
+        const entry = (user.addresses || []).find((a) => a.isDefault) || (user.addresses || []).find((a) => a.label === 'primary');
+        if (entry) entry.address = line;
+        else if (line) user.addresses.push({ label: 'primary', isDefault: true, address: line });
+      }
       if (body.gender !== undefined) user.gender = text(body.gender, 20) || null;
       if (body.dateOfBirth !== undefined) {
         const d = body.dateOfBirth ? new Date(body.dateOfBirth) : null;

@@ -19,6 +19,7 @@ const Package = require('../gymfolio/models/packageModel');
 const { createManualOrder } = require('../gymfolio/services/membershipService');
 const { checkLimit } = require('../platform/planLimits');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
+const { oneLine } = require('../services/memberFields');
 const T = require('../attendance/services/timeUtils');
 
 const MAX_ROWS = 5000;
@@ -343,7 +344,8 @@ module.exports = {
           }
 
           const dob = parseDate(cell(row, 'dateOfBirth'));
-          const address = cell(row, 'address');
+          // A quoted cell can hold line breaks; the desk's address is one line.
+          const address = oneLine(cell(row, 'address')).slice(0, 300);
           const hashed = await bcrypt.hash(randomPassword(), await bcrypt.genSalt(10));
           const user = await User.create({
             firstName,
