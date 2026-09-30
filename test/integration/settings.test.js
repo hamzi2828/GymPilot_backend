@@ -114,3 +114,17 @@ test('a link that is not a web address, or an email that is not one, is refused 
     assert.equal(data.siteDescription, 'Now with a sauna.');
   });
 });
+
+test('a link carrying markup is stored as the encoded address, never as the text typed', async () => {
+  await h.inGym(gym, async () => {
+    // A real web address whose path would close the structured-data
+    // <script> on every page if it were stored as typed.
+    const saved = await put({ twitterUrl: 'https://x.com/"></script><script>alert(1)</script>', instagramUrl: 'instagram.com/gym?q=</script>' });
+    assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
+
+    const data = (await h.call(settings.getPublicSettings, req())).body.data;
+    assert.equal(data.twitterUrl, 'https://x.com/%22%3E%3C/script%3E%3Cscript%3Ealert(1)%3C/script%3E');
+    assert.equal(data.instagramUrl, 'https://instagram.com/gym?q=%3C/script%3E');
+    for (const key of ['twitterUrl', 'instagramUrl']) assert.doesNotMatch(data[key], /[<>"]/, key);
+  });
+});
