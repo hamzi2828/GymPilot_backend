@@ -11,6 +11,9 @@
 //             bill (incurred 30 Jul); 5 paid with no currency; 1000 PKR paid
 //
 //   revenue 100 + 40 - 40 + 30 + 12 = 142, paid expenses 50 + 5 = 55, net 87
+//
+//   members   two joined 3 Aug, one 20 Aug (23:30), one in July; a staff
+//             account joined 3 Aug and is not a member
 
 const assert = require('node:assert/strict');
 const h = require('./helpers/harness');
@@ -48,6 +51,7 @@ async function setup() {
   const PackageOrder = h.src('gymfolio/models/packageOrderModel');
   const Sale = h.src('models/saleModel');
   const Expense = h.src('accounts/models/expenseModel');
+  const User = h.src('models/user');
 
   gym = await h.createGym('reports-gym', { timezone: 'UTC', currency: 'GBP' });
 
@@ -88,6 +92,15 @@ async function setup() {
       expense('E-5', 5, 'paid', '2026-08-09T09:00:00Z', { currency: undefined }),
       expense('E-6', 1000, 'paid', '2026-08-09T09:00:00Z', { currency: 'PKR' })
     ]);
+
+    const person = (email, createdAt, role = 'user') => ({ firstName: email.split('@')[0], lastName: 'Test', email, role, isActive: true, createdAt: at(createdAt), updatedAt: at(createdAt) });
+    await User.collection.insertMany([
+      person('ann@reports.test', '2026-08-03T10:00:00Z'),
+      person('ben@reports.test', '2026-08-03T15:00:00Z'),
+      person('cat@reports.test', '2026-08-20T23:30:00Z'),
+      person('dan@reports.test', '2026-07-15T10:00:00Z'),
+      person('desk@reports.test', '2026-08-03T11:00:00Z', 'admin')
+    ]);
   });
 }
 
@@ -121,5 +134,48 @@ test('reports leave other currencies out of the totals and count them, a blank c
     assert.deepEqual(res.body.other_currency, { count: 3, currencies: ['PKR'], orders: 1, expenses: 1, shop_sales: 1 });
     assert.equal(res.body.kpis.shop_revenue, 42);
     assert.equal(res.body.kpis.shop_sales, 2);
+  });
+});
+
+test('registrations: members who joined, per local day, beside the chart', async () => {
+  await h.inGym(gym, async () => {
+    const res = await h.call(reports.overview, { query: AUGUST });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.registrations, {
+      total: 3,
+      days: [
+        { date: '2026-08-03', label: '03 Aug 2026', count: 2 },
+        { date: '2026-08-20', label: '20 Aug 2026', count: 1 }
+      ]
+    });
+    assert.equal(res.body.kpis.new_members, 3);
+    const charted = Object.fromEntries(res.body.series.new_members.filter((b) => b.value).map((b) => [b.key, b.value]));
+    assert.deepEqual(charted, { '2026-08-03': 2, '2026-08-20': 1 });
+
+    // Over a long range the chart is by month and the table still by day.
+    const year = await h.call(reports.overview, { query: { from: '2026-01-01', to: '2026-12-31' } });
+    assert.equal(year.body.range.grain, 'month');
+    const months = Object.fromEntries(year.body.series.new_members.filter((b) => b.value).map((b) => [b.key, b.value]));
+    assert.deepEqual(months, { '2026-07': 1, '2026-08': 3 });
+    assert.deepEqual(year.body.registrations.days.map((d) => d.date), ['2026-07-15', '2026-08-03', '2026-08-20']);
+  });
+});
+
+function csvRows(res) {
+  return String(res.body).replace(/^﻿/, '').trim().split('\r\n').map((line) => line.split(','));
+}
+
+test('members export: those who joined in the range, or everyone with all=1', async () => {
+  await h.inGym(gym, async () => {
+    const joined = await h.call(reports.export, { params: { kind: 'members' }, query: AUGUST });
+    assert.equal(joined.statusCode, 200);
+    assert.match(joined.headers['content-disposition'], /members_joined_2026-08-01_2026-08-31\.csv/);
+    const rows = csvRows(joined);
+    const email = rows[0].indexOf('Email');
+    assert.deepEqual(rows.slice(1).map((r) => r[email]).sort(), ['ann@reports.test', 'ben@reports.test', 'cat@reports.test']);
+
+    const everyone = await h.call(reports.export, { params: { kind: 'members' }, query: { ...AUGUST, all: '1' } });
+    assert.match(everyone.headers['content-disposition'], /members_\d{4}-\d{2}-\d{2}\.csv/);
+    assert.deepEqual(csvRows(everyone).slice(1).map((r) => r[email]).sort(), ['ann@reports.test', 'ben@reports.test', 'cat@reports.test', 'dan@reports.test']);
   });
 });

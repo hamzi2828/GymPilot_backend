@@ -90,9 +90,12 @@ module.exports = {
       const [paymentRows, refundRows, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts, otherExpenses, otherSales] = await Promise.all([
         PackageOrder.aggregate([...L.membershipPaymentStages(range), byCurrencyBucketPackage('$at')]),
         PackageOrder.aggregate([...L.membershipRefundStages(range), byCurrencyBucketPackage('$at')]),
+        // Per local day whatever the chart's grain: the registrations table
+        // lists days, and the chart adds them up into its months.
         User.aggregate([
           { $match: { role: 'user', createdAt: { $gte: range.start, $lt: range.end } } },
-          { $group: { _id: dateBucketExpr('$createdAt', grain, tz), n: { $sum: 1 } } }
+          { $group: { _id: dateBucketExpr('$createdAt', 'day', tz), n: { $sum: 1 } } },
+          { $sort: { _id: 1 } }
         ]),
         Attendance.aggregate([
           { $match: { personType: 'member', shiftDate: { $gte: range.from, $lte: range.to } } },
@@ -191,7 +194,7 @@ module.exports = {
 
       const revenue = fill(buckets, revenueRows, (r) => r._id, (r) => r.total);
       const orders = fill(buckets, revenueRows, (r) => r._id, (r) => r.n);
-      const members = fill(buckets, newMembers, (r) => r._id, (r) => r.n);
+      const members = fill(buckets, newMembers, (r) => (grain === 'day' ? r._id : r._id.slice(0, 7)), (r) => r.n);
       const visits = fill(buckets, attendanceRows, (r) => r._id, (r) => r.n);
       const expenses = fill(buckets, expenseRows.filter((r) => r._id.paid), (r) => r._id.bucket, (r) => r.total);
       const pendingExpenses = expenseRows.filter((r) => !r._id.paid).reduce((s, r) => s + r.total, 0);
@@ -254,6 +257,13 @@ module.exports = {
           expenses: otherExpenseCount,
           shop_sales: otherSaleCount
         },
+        // New registrations per day, for the table beside the chart: the
+        // days on which somebody joined, oldest first. The Members export
+        // lists the same people.
+        registrations: {
+          total: newMembers.reduce((s, r) => s + r.n, 0),
+          days: newMembers.map((r) => ({ date: r._id, label: T.dateLabelForKey(r._id), count: r.n }))
+        },
         classes: classRows.map((r) => ({ name: r._id || '—', booked: r.booked, attended: r.attended, no_show: r.no_show, waitlisted: r.waitlisted, attendance_rate: r.booked ? Math.round((r.attended / r.booked) * 100) : null })),
         pt,
         leads: { ...leads, total: leadTotal }
@@ -274,8 +284,12 @@ module.exports = {
       const keyRange = { $gte: range.from, $lte: range.to };
 
       if (kind === 'members') {
-        const rows = await User.find({ role: 'user' }).select('firstName lastName email phone memberCode gender dateOfBirth tags source createdAt lastLogin isActive').sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `members_${T.dateKey()}.csv`, [
+        // The members who joined in the range, like every other export and
+        // the registrations table; ?all=1 for the whole list.
+        const everyone = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
+        const filter = everyone ? { role: 'user' } : { role: 'user', createdAt: inRange };
+        const rows = await User.find(filter).select('firstName lastName email phone memberCode gender dateOfBirth tags source createdAt lastLogin isActive').sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
+        return sendCsv(res, everyone ? `members_${T.dateKey()}.csv` : `members_joined_${stamp}.csv`, [
           { key: 'memberCode', label: 'Member code' },
           { key: 'firstName', label: 'First name' },
           { key: 'lastName', label: 'Last name' },
