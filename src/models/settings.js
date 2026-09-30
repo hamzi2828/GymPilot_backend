@@ -223,6 +223,16 @@ const settingsSchema = new mongoose.Schema(
       footerNote: { type: String, default: '', trim: true }
     },
 
+    // The till's printed receipt. Set from the POS page, not the general
+    // settings page (controller/posController.js receiptSettings). The gym's
+    // name, address, phone and tax number come from the fields above; an
+    // empty footerText falls back to invoice.footerNote.
+    receipt: {
+      paperWidth: { type: String, enum: ['80mm', '58mm'], default: '80mm' },
+      showLogo: { type: Boolean, default: true },
+      footerText: { type: String, default: '', trim: true, maxlength: 300 }
+    },
+
     // Set when the owner has been through the setup wizard (or the gym was
     // adopted from a pre-platform deployment). Until then the admin panel
     // points at /admin/setup.
