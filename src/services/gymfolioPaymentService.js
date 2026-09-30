@@ -169,7 +169,10 @@ class GymfolioPaymentService {
     const currency = resolveCurrency(packageData.currency, settings && settings.currency).toLowerCase();
     const snapshot = membership.packageSnapshot(packageData);
     const recurring = snapshot.billing.mode === 'recurring';
-    const joiningFee = round2(snapshot.joiningFee);
+    // Charged once, with the first membership: a member coming back -- by
+    // account, or by the email a guest checkout gives -- is not charged it
+    // again (membershipService.joiningFeeDue).
+    const joiningFee = (await membership.joiningFeeDue({ userId, email: customerInfo.email })) ? round2(snapshot.joiningFee) : 0;
 
     const { coupon, discount } = await membership.applyCoupon(options.couponCode, packageData, listPrice);
 

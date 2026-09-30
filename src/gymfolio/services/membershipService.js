@@ -136,6 +136,32 @@ async function startDateFor({ userId, email, kind = 'membership', now = new Date
   return latest ? new Date(latest.subscription.endDate) : now;
 }
 
+/* ----------------------------- joining fee ----------------------------- */
+
+/**
+ * Whether this person still owes a package's joining fee. It is charged
+ * once, with the first membership: anybody who has ever paid for one --
+ * refunded since or not -- has joined, and is not charged it again when
+ * they come back. A day pass, trial or pack bought before does not count as
+ * joining, so the membership that follows it still carries the fee.
+ *
+ * Renewals and package changes never ask: they are not joining at all
+ * (createManualOrder's `chargeJoiningFee: false`).
+ */
+async function joiningFeeDue({ userId, email } = {}) {
+  const owner = [];
+  if (userId) owner.push({ userId });
+  if (email) owner.push({ 'customerInfo.email': String(email).toLowerCase().trim() });
+  if (!owner.length) return true;
+
+  const joined = await PackageOrder.exists({
+    $or: owner,
+    'payment.status': { $in: ['paid', 'refunded'] },
+    $and: [{ $or: [{ 'packageDetails.kind': 'membership' }, { 'packageDetails.kind': { $exists: false } }] }]
+  });
+  return !joined;
+}
+
 /* ------------------------------- coupons ------------------------------- */
 
 /**
@@ -266,6 +292,10 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
 /**
  * An order created by staff: cash or bank at the desk, a comped package, a
  * renewal, or an upgrade. Returns the saved order.
+ *
+ * `chargeJoiningFee`: left out, the package's joining fee is added when the
+ * member has never joined (joiningFeeDue); renewals and package changes
+ * pass false.
  */
 async function createManualOrder({
   user,
@@ -281,6 +311,7 @@ async function createManualOrder({
   discountAmount = 0,
   discountNote = '',
   renewedFrom = null,
+  chargeJoiningFee,
   by = null
 }) {
   const settings = await Settings.getSettings().catch(() => null);
@@ -293,8 +324,10 @@ async function createManualOrder({
   }
   const currency = resolveCurrency(pkg.currency, settings && settings.currency);
   const snapshot = packageSnapshot(pkg);
+  const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: user.email }) : !!chargeJoiningFee;
+  const joiningFee = feeDue ? round2(snapshot.joiningFee) : 0;
 
-  let amount = listPrice + (snapshot.joiningFee || 0);
+  let amount = listPrice + joiningFee;
   let coupon = null;
   let discount = round2(discountAmount);
   if (couponCode) {
@@ -337,7 +370,7 @@ async function createManualOrder({
     payment: {
       method: ['stripe', 'card', 'bank_transfer', 'cash'].includes(paymentMethod) ? paymentMethod : 'cash',
       amount,
-      subtotal: round2(listPrice + (snapshot.joiningFee || 0)),
+      subtotal: round2(listPrice + joiningFee),
       discountAmount: discount,
       discountNote,
       couponCode: coupon ? coupon.code : '',
@@ -377,7 +410,9 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
   const snapshot = packageSnapshot(pkg);
 
   const { coupon, discount } = await applyCoupon(couponCode, pkg, listPrice);
-  const amount = round2(Math.max(0, listPrice + (snapshot.joiningFee || 0) - discount));
+  // Charged once: not to a member coming back (joiningFeeDue).
+  const joiningFee = (await joiningFeeDue({ userId: user._id, email: user.email })) ? round2(snapshot.joiningFee) : 0;
+  const amount = round2(Math.max(0, listPrice + joiningFee - discount));
 
   // The same rule as card checkout: one running subscription per member.
   await assertNoActiveSubscription({ userId: user._id, email: user.email, snapshot });
@@ -400,7 +435,7 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
     payment: {
       method: 'bank_transfer',
       amount,
-      subtotal: round2(listPrice + (snapshot.joiningFee || 0)),
+      subtotal: round2(listPrice + joiningFee),
       discountAmount: discount,
       couponCode: coupon ? coupon.code : '',
       currency: currency.toLowerCase(),
@@ -819,6 +854,8 @@ async function renew(order, { paymentMethod = 'cash', markPaid = true, months, n
     startDate: start,
     notes: notes || `Renewal of ${order.orderNumber}`,
     renewedFrom: order._id,
+    // A renewal is not joining: the fee was taken with the first term.
+    chargeJoiningFee: false,
     by
   });
 }
@@ -888,6 +925,8 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     discountNote: `Credit for ${Math.floor(remainingDays)} unused day(s) of ${order.packageDetails && order.packageDetails.name}`,
     notes: notes || `Changed from ${order.orderNumber} (${order.packageDetails && order.packageDetails.name})`,
     renewedFrom: order._id,
+    // Nor is moving to another package: the member joined long ago.
+    chargeJoiningFee: false,
     by
   });
 
@@ -1220,6 +1259,7 @@ module.exports = {
   addMonths,
   termEnd,
   startDateFor,
+  joiningFeeDue,
   applyCoupon,
   redeemCoupon,
   assertNoActiveSubscription,

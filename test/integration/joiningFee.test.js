@@ -1,0 +1,157 @@
+// The joining fee is charged once, with a member's first membership.
+//
+// It used to be added to every order a package made: renewing at the desk,
+// changing package, and a returning member's card checkout all charged it
+// again, while the Packages screen said "charged once". Now it is taken only
+// when the member has never had a paid (or refunded) membership order, and
+// never on a renewal or a package change.
+
+const assert = require('node:assert/strict');
+const h = require('./helpers/harness');
+
+let gym;
+let PackageOrder;
+let Package;
+let User;
+let service;
+let payments;
+let orders;
+let monthly;
+let gold;
+let dayPass;
+
+const STRIPE_READY = {
+  stripe: { enabled: true, publishableKey: 'pk_test_fee', secretKey: 'sk_test_fee', webhookSecret: 'whsec_fee' }
+};
+
+const test = h.suite(async () => {
+  PackageOrder = h.src('gymfolio/models/packageOrderModel');
+  Package = h.src('gymfolio/models/packageModel');
+  User = h.src('models/user');
+  service = h.src('gymfolio/services/membershipService');
+  payments = h.src('services/gymfolioPaymentService');
+  orders = h.src('gymfolio/controller/gymfolioPaymentController');
+  gym = await h.createGym('fee-gym', { currency: 'GBP', settings: STRIPE_READY });
+  await h.inGym(gym, async () => {
+    await h.ensureIndexes(PackageOrder);
+    monthly = await Package.create({ name: 'Monthly', price: '40', currency: 'GBP', period: 'month', features: ['Gym floor'], joiningFee: 25 });
+    gold = await Package.create({ name: 'Gold', price: '60', currency: 'GBP', period: 'month', features: ['Everything'], joiningFee: 25 });
+    dayPass = await Package.create({ name: 'Day pass', price: '8', currency: 'GBP', period: 'day', kind: 'day_pass', features: ['One visit'], joiningFee: 0 });
+  });
+});
+
+let seq = 0;
+async function newMember(name) {
+  seq += 1;
+  return User.create({ firstName: name, lastName: 'Fee', email: `${name.toLowerCase()}${seq}@fee.test`, role: 'user' });
+}
+
+const assign = (member, pkg, body = {}) =>
+  h.call(orders.assignPackageToUser, {
+    body: { userId: String(member._id), packageId: String(pkg._id), paymentMethod: 'cash', ...body },
+    user: { id: 'staff', email: 'desk@fee.test' }
+  });
+
+test('a first membership carries the joining fee; the next one does not', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember('First');
+    const first = await assign(member, monthly);
+    assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+    assert.equal(first.body.data.payment.amount, 65);
+    assert.equal(first.body.data.payment.subtotal, 65);
+
+    // Assigned again later -- a lapse and a rejoin, say: joined already.
+    const again = await assign(member, monthly);
+    assert.equal(again.body.data.payment.amount, 40);
+    assert.equal(again.body.data.payment.subtotal, 40);
+  });
+});
+
+test('a refunded membership still counts as having joined; a pending one does not', async () => {
+  await h.inGym(gym, async () => {
+    const refunded = await newMember('Refunded');
+    const first = await service.createManualOrder({ user: refunded, pkg: monthly });
+    await service.refund(first, { reason: 'changed mind' });
+    assert.equal((await service.createManualOrder({ user: refunded, pkg: monthly })).payment.amount, 40);
+
+    const pendingOnly = await newMember('Pending');
+    await service.createManualOrder({ user: pendingOnly, pkg: monthly, markPaid: false });
+    assert.equal((await service.createManualOrder({ user: pendingOnly, pkg: monthly })).payment.amount, 65);
+  });
+});
+
+test('a day pass before joining is not joining: the membership after it carries the fee', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember('Visitor');
+    await service.createManualOrder({ user: member, pkg: dayPass });
+    const joined = await service.createManualOrder({ user: member, pkg: monthly });
+    assert.equal(joined.payment.amount, 65);
+  });
+});
+
+test('renewing at the desk and changing package never charge it again', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember('Loyal');
+    const first = await service.createManualOrder({ user: member, pkg: monthly });
+    assert.equal(first.payment.amount, 65);
+
+    const renewal = await service.renew(first, { paymentMethod: 'cash' });
+    assert.equal(renewal.payment.amount, 40);
+    assert.equal(renewal.payment.subtotal, 40);
+
+    const { order: changed, credit } = await service.changePackage(renewal, { packageId: gold._id });
+    // The unused days of the renewal come off Gold's price; nothing is added.
+    assert.equal(changed.payment.subtotal, 60);
+    assert.equal(changed.payment.amount, Math.round(Math.max(0, 60 - credit) * 100) / 100);
+  });
+});
+
+test('a bank transfer from a member who has joined leaves the fee off', async () => {
+  await h.inGym(gym, async () => {
+    const newcomer = await newMember('Transfer');
+    const firstTransfer = await service.createBankTransferOrder({ user: newcomer, pkg: monthly });
+    assert.equal(firstTransfer.payment.amount, 65);
+
+    const member = await newMember('Returning');
+    await service.createManualOrder({ user: member, pkg: monthly });
+    const transfer = await service.createBankTransferOrder({ user: member, pkg: monthly });
+    assert.equal(transfer.payment.amount, 40);
+    assert.equal(transfer.payment.subtotal, 40);
+  });
+});
+
+test('card checkout: a returning member is not sent a joining-fee line; a new one is', async () => {
+  const asked = [];
+  h.setStripe({
+    checkout: {
+      sessions: {
+        create: async (params) => {
+          asked.push(params);
+          return { id: `cs_fee_${asked.length}`, url: 'https://stripe.test/pay' };
+        }
+      }
+    }
+  });
+  try {
+    await h.inGym(gym, async () => {
+      const member = await newMember('Card');
+      await service.createManualOrder({ user: member, pkg: monthly });
+      await payments.createPackageCheckoutSession(member._id, monthly._id, { email: member.email, fullName: 'Card Fee' });
+      const back = await PackageOrder.findOne({ 'payment.stripeSessionId': 'cs_fee_1' }).lean();
+      assert.equal(asked[0].line_items.length, 1);
+      assert.equal(back.payment.amount, 40);
+
+      // A guest checking out with an email that has joined is known by it.
+      await payments.createPackageCheckoutSession(null, monthly._id, { email: member.email, fullName: 'Card Fee' });
+      assert.equal(asked[1].line_items.length, 1);
+
+      await payments.createPackageCheckoutSession(null, monthly._id, { email: 'someone-new@fee.test', fullName: 'New' });
+      assert.equal(asked[2].line_items.length, 2);
+      assert.equal(asked[2].line_items[1].price_data.product_data.name, 'Joining fee');
+      const fresh = await PackageOrder.findOne({ 'payment.stripeSessionId': 'cs_fee_3' }).lean();
+      assert.equal(fresh.payment.amount, 65);
+    });
+  } finally {
+    h.setStripe(null);
+  }
+});

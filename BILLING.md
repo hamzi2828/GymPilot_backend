@@ -17,7 +17,7 @@ Packages**.
 | `billing.mode` | `one_time` (a term paid up front) or `recurring` (Stripe subscription) |
 | `billing.interval` / `intervalCount` / `trialDays` | what Stripe bills on, for recurring |
 | `sessions` | sessions on a pack (packs expire when used up or when `durationDays` passes) |
-| `joiningFee` | charged once, on top of the first payment |
+| `joiningFee` | charged once, on top of a member's first membership: not to anyone who has had a paid (or refunded) membership before, and never on a renewal or a package change (`membershipService.joiningFeeDue`) |
 
 ## Ways to pay
 
