@@ -231,7 +231,13 @@ module.exports = {
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/renew  (staff)  { paymentMethod, markPaid, months, notes, force }
+  // POST /api/gymfolio/package-orders/:id/renew  (staff)
+  //   { paymentMethod, markPaid, months, notes, force,
+  //     startDate, discountAmount, discountNote, amountOverride, amountPaid }
+  //
+  // The pricing and start fields are read as on a sale (readDeskTerms; no
+  // trainer on a renewal). Left out, the term starts when the current one
+  // ends, at the package's price.
   //
   // A card subscription renews itself: a manual renewal on top would be paid
   // for twice. One whose card payment failed is Stripe's to collect, not a
@@ -253,11 +259,18 @@ module.exports = {
           'AUTO_RENEWS'
         );
       }
+      const terms = service.readDeskTerms(body, { trainer: false });
       const renewal = await service.renew(order, {
-        paymentMethod: body.paymentMethod,
+        paymentMethod: terms.paymentMethod,
         markPaid: body.markPaid !== false && body.markPaid !== 'false',
         months: body.months,
-        notes: body.notes,
+        notes: terms.notes,
+        startDate: terms.startDate,
+        discountAmount: terms.discountAmount,
+        discountNote: terms.discountNote,
+        amountOverride: terms.amountOverride,
+        amountPaid: terms.amountPaid,
+        paidBy: userId(req),
         by: req.user && req.user.email
       });
       if (renewal.payment.status === 'paid') tell('membershipConfirmed', renewal);
@@ -287,6 +300,52 @@ module.exports = {
         data: result.order,
         previous: result.previous,
         credit: result.credit
+      });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // POST /api/gymfolio/package-orders/:id/payments  (staff)  { amount, method?, note? }
+  //
+  // Money received at the desk against an order's balance due; see
+  // membershipService.recordPayment for what is refused and why.
+  recordPayment: async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await PackageOrder.findById(req.params.id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const body = req.body || {};
+      const updated = await service.recordPayment(order, { amount: body.amount, method: body.method, note: body.note, by: userId(req) });
+      const currency = String(updated.payment.currency || '').toUpperCase();
+      const due = Number(updated.payment.balanceDue || 0);
+      return res.json({
+        success: true,
+        message: due > 0 ? `Payment recorded. ${currency} ${due.toFixed(2)} still due.` : 'Payment recorded. Paid in full.',
+        data: updated
+      });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // PATCH /api/gymfolio/package-orders/:id/terms  (staff)
+  //   { startDate?, endDate?, discountAmount?, discountNote?, note? }
+  //
+  // Moves a membership's dates or changes its discount after the sale, with
+  // the change kept in termsHistory (membershipService.editTerms).
+  editTerms: async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await PackageOrder.findById(req.params.id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const updated = await service.editTerms(order, req.body || {}, { by: userId(req) });
+      const due = Number(updated.payment.balanceDue || 0);
+      const currency = String(updated.payment.currency || '').toUpperCase();
+      return res.json({
+        success: true,
+        message: `Terms updated.${due > 0 ? ` ${currency} ${due.toFixed(2)} is due.` : ''}`,
+        data: updated
       });
     } catch (error) {
       return fail(res, error);

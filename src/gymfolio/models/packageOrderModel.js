@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { PAYMENT_METHODS } = require('../../services/paymentMethods');
 
 const packageOrderSchema = new mongoose.Schema(
   {
@@ -41,8 +42,10 @@ const packageOrderSchema = new mongoose.Schema(
         trialDays: { type: Number, default: 0 }
       }
     },
-    // Who the membership is for. Name and email are required because an order
-    // that identifies nobody is not an order.
+    // Who the membership is for. The name is required because an order that
+    // identifies nobody is not an order. The email is not: a member may be
+    // on file with only a phone number, and an order for them is no less
+    // real (the member record says who they are).
     //
     // Phone and country are NOT required, deliberately. They come from the
     // public checkout form, which asks for them -- but an admin assigning a
@@ -54,7 +57,7 @@ const packageOrderSchema = new mongoose.Schema(
     // prompt for what is actually missing.
     customerInfo: {
       fullName: { type: String, required: true },
-      email: { type: String, required: true },
+      email: { type: String, default: '' },
       phone: { type: String, default: '' },
       country: { type: String, default: '' },
       address: String,
@@ -63,9 +66,10 @@ const packageOrderSchema = new mongoose.Schema(
       zipCode: String
     },
     payment: {
+      // services/paymentMethods.js: the list, and what each is called.
       method: {
         type: String,
-        enum: ['stripe', 'card', 'bank_transfer', 'cash'],
+        enum: PAYMENT_METHODS,
         default: 'stripe'
       },
       stripeSessionId: String,
@@ -92,8 +96,47 @@ const packageOrderSchema = new mongoose.Schema(
       lastPaidAt: { type: Date, default: null },
       transactionId: String,
 
+      // ---- What the amount is made of (gymfolio/services/orderMoney.js) ----
+      // The admission fee and the personal trainer's fee charged on THIS
+      // order, inside `amount`; the membership is the rest. joiningFee is 0
+      // on a renewal, a package change, or when waived. Orders from before
+      // these existed read 0 (scripts/backfillOrderFees.js fills joiningFee
+      // in where it was charged).
+      joiningFee: { type: Number, default: 0 },
+      trainerFee: { type: Number, default: 0 },
+
+      // ---- Paying in parts (membershipService.recordPayment) ----
+      // A membership sold at the desk may be paid for over time: it is
+      // granted -- status 'paid', so everything that treats paid as active
+      // keeps working -- while balanceDue > 0. amountPaid is the money
+      // received so far; null on orders from before part payments, which
+      // were paid in full.
+      amountPaid: { type: Number, default: null },
+      balanceDue: { type: Number, default: 0 },
+      // When non-empty, these ARE the money received for the order, the
+      // first payment included, each on the day it arrived with its own
+      // method and its admission / trainer-fee shares (admission first).
+      // An order paid in full at once keeps none.
+      installments: {
+        type: [
+          new mongoose.Schema(
+            {
+              amount: { type: Number, required: true },
+              joiningFee: { type: Number, default: 0 },
+              trainerFee: { type: Number, default: 0 },
+              method: { type: String, default: '' },
+              at: { type: Date, required: true },
+              by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+              note: { type: String, default: '' }
+            },
+            { _id: false }
+          )
+        ],
+        default: []
+      },
+
       // ---- Discounts ----
-      subtotal: { type: Number, default: null },        // list price (+ joining fee) before discount
+      subtotal: { type: Number, default: null },        // list price (+ joining and trainer fees) before discount
       discountAmount: { type: Number, default: 0 },
       discountNote: { type: String, default: '' },      // e.g. credit for unused days on an upgrade
       couponCode: { type: String, default: '' },
@@ -201,6 +244,24 @@ const packageOrderSchema = new mongoose.Schema(
       immediate: { type: Boolean, default: false },
       resumedAt: { type: Date, default: null }
     },
+    // Every change staff made to the terms after the sale -- dates moved, the
+    // discount changed (membershipService.editTerms) -- with what they were
+    // before and after, who did it and why. Appended, never rewritten.
+    termsHistory: {
+      type: [
+        new mongoose.Schema(
+          {
+            at: { type: Date, required: true },
+            by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+            from: { type: mongoose.Schema.Types.Mixed, default: {} },
+            to: { type: mongoose.Schema.Types.Mixed, default: {} },
+            note: { type: String, default: '' }
+          },
+          { _id: false }
+        )
+      ],
+      default: []
+    },
     // Money given back, and by whom. Set once, when payment.status becomes
     // 'refunded'; stripeRefundId is null for cash, bank and terminal refunds,
     // which move by hand and are only recorded here.
@@ -229,6 +290,26 @@ const packageOrderSchema = new mongoose.Schema(
         ],
         default: []
       }
+    },
+    // The personal trainer sold with this membership at the desk, what the
+    // member pays for them (the same figure as payment.trainerFee), and the
+    // trainer's commission on it: `commissionValue` is a percentage of the
+    // fee ('percent') or a fixed sum ('amount'); `commissionAmount` is what
+    // that comes to, earned on the order's first payment date. null when the
+    // order was sold without one.
+    trainerAssignment: {
+      type: new mongoose.Schema(
+        {
+          trainerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Trainer', required: true },
+          trainerName: { type: String, default: '' },
+          fee: { type: Number, default: 0 },
+          commissionType: { type: String, enum: ['percent', 'amount'], default: 'percent' },
+          commissionValue: { type: Number, default: 0 },
+          commissionAmount: { type: Number, default: 0 }
+        },
+        { _id: false }
+      ),
+      default: null
     },
     // The order this one renewed or replaced.
     renewedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageOrder', default: null },
@@ -330,6 +411,9 @@ packageOrderSchema.index({ 'payment.stripePaymentIntentId': 1 }, { sparse: true 
 // and each renewal (see accounts/services/ledger.js).
 packageOrderSchema.index({ 'payment.paidAt': -1 });
 packageOrderSchema.index({ 'subscription.renewals.at': -1 });
+packageOrderSchema.index({ 'payment.installments.at': -1 }, { sparse: true });
+// Who still owes money: only the few orders with a balance are indexed.
+packageOrderSchema.index({ 'payment.balanceDue': 1 }, { partialFilterExpression: { 'payment.balanceDue': { $gt: 0 } } });
 
 // Virtual for subscription duration
 packageOrderSchema.virtual('subscriptionDuration').get(function() {

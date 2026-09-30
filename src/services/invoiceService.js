@@ -15,6 +15,8 @@ const PDFDocument = require('pdfkit');
 const Counter = require('../gymfolio/models/counterModel');
 const Settings = require('../models/settings');
 const { currentTenant } = require('../platform/tenantContext');
+const { methodLabel } = require('./paymentMethods');
+const { paidSoFar } = require('../gymfolio/services/orderMoney');
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -126,7 +128,7 @@ async function renderInvoicePdf(order, options = {}) {
 
   doc.fillColor(muted).fontSize(8).font('Helvetica-Bold').text('PAYMENT', 350, y, { width: 195, align: 'right' });
   doc.fillColor(dark).fontSize(10).font('Helvetica').text(
-    `${(payment.method || '').replace('_', ' ')} · ${payment.status || ''}`.trim(),
+    `${methodLabel(payment.method)} · ${round2(payment.balanceDue || 0) > 0 ? 'part paid' : payment.status || ''}`.trim(),
     350,
     y + 12,
     { width: 195, align: 'right' }
@@ -144,7 +146,12 @@ async function renderInvoicePdf(order, options = {}) {
   y += 30;
 
   const subtotal = invoice.subtotal !== undefined ? invoice.subtotal : round2(payment.amount);
-  const listPrice = payment.subtotal !== undefined && payment.subtotal !== null ? round2(payment.subtotal) : round2(payment.amount);
+  // The admission and trainer's fees are lines of their own; the package
+  // line is what is left of the pre-discount subtotal. (Orders from before
+  // the fees were recorded apart keep the one combined line they had.)
+  const joiningFee = round2(payment.joiningFee || 0);
+  const trainerFee = round2(payment.trainerFee || 0);
+  const listPrice = payment.subtotal !== undefined && payment.subtotal !== null ? round2(payment.subtotal - joiningFee - trainerFee) : round2(payment.amount);
   const discount = round2(payment.discountAmount || 0);
 
   doc.fillColor(dark).fontSize(10).font('Helvetica').text(`${pkg.name || 'Membership'}${pkg.kind && pkg.kind !== 'membership' ? ` (${String(pkg.kind).replace('_', ' ')})` : ''}`, left + 10, y);
@@ -153,6 +160,17 @@ async function renderInvoicePdf(order, options = {}) {
   doc.fillColor(dark).fontSize(9).text(period, 300, y, { width: 140 });
   doc.fillColor(dark).fontSize(10).text(money(listPrice, currency), 445, y, { width: 90, align: 'right' });
   y += 34;
+
+  const trainerName = (order.trainerAssignment && order.trainerAssignment.trainerName) || '';
+  for (const [label, amount] of [
+    ['Admission fee (one-off)', joiningFee],
+    [`Personal trainer fee${trainerName ? ` (${trainerName})` : ''}`, trainerFee]
+  ]) {
+    if (!(amount > 0)) continue;
+    doc.fillColor(dark).fontSize(10).text(label, left + 10, y);
+    doc.text(money(amount, currency), 445, y, { width: 90, align: 'right' });
+    y += 20;
+  }
 
   if (discount > 0) {
     doc.fillColor(dark).fontSize(10).text(`Discount${payment.couponCode ? ` (${payment.couponCode})` : ''}`, left + 10, y);
@@ -168,7 +186,17 @@ async function renderInvoicePdf(order, options = {}) {
     totals.push([`Subtotal (excl. ${invoice.taxLabel || 'tax'})`, money(subtotal, currency)]);
     totals.push([`${invoice.taxLabel || 'Tax'} ${invoice.taxRate}% (included)`, money(invoice.taxAmount, currency)]);
   }
-  totals.push(['Total paid', money(invoice.total !== undefined ? invoice.total : payment.amount, currency)]);
+  const total = invoice.total !== undefined ? invoice.total : payment.amount;
+  // Paid in part: what came in so far and what is still owed, the balance
+  // as the bottom line.
+  const due = round2(payment.balanceDue || 0);
+  if (due > 0) {
+    totals.push(['Total', money(total, currency)]);
+    totals.push(['Paid so far', money(paidSoFar(payment), currency)]);
+    totals.push(['Balance due', money(due, currency)]);
+  } else {
+    totals.push(['Total paid', money(total, currency)]);
+  }
   totals.forEach(([label, value], i) => {
     const isTotal = i === totals.length - 1;
     doc.fillColor(isTotal ? dark : muted).fontSize(isTotal ? 12 : 10).font(isTotal ? 'Helvetica-Bold' : 'Helvetica');
@@ -176,6 +204,20 @@ async function renderInvoicePdf(order, options = {}) {
     doc.text(value, 445, y, { width: 90, align: 'right' });
     y += isTotal ? 22 : 16;
   });
+
+  // Each payment received, when the order was paid in parts.
+  const parts = Array.isArray(payment.installments) ? payment.installments : [];
+  if (parts.length) {
+    y += 10;
+    doc.fillColor(muted).fontSize(8).font('Helvetica-Bold').text('PAYMENTS RECEIVED', left, y);
+    y += 14;
+    doc.font('Helvetica').fontSize(9);
+    for (const part of parts.slice(0, 12)) {
+      doc.fillColor(dark).text(`${dateLabel(part.at)} · ${methodLabel(part.method || payment.method)}${part.note ? ` · ${part.note}` : ''}`, left + 10, y, { width: 380 });
+      doc.text(money(part.amount, currency), 445, y, { width: 90, align: 'right' });
+      y += 14;
+    }
+  }
 
   // Footer
   const footer = inv.footerNote || 'Thank you for training with us.';

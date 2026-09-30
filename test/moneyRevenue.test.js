@@ -45,13 +45,16 @@ test('the payments pipeline counts renewals as payments of their own', () => {
   const clauses = match.$match.$and;
   assert.deepEqual(clauses[0], { 'payment.status': { $in: ['paid', 'refunded'] } });
   const paths = clauses[clauses.length - 1].$or.map((clause) => Object.keys(clause)[0]);
-  assert.deepEqual(paths, ['payment.paidAt', 'createdAt', 'subscription.renewals.at']);
+  assert.deepEqual(paths, ['payment.paidAt', 'createdAt', 'subscription.renewals.at', 'payment.installments.at']);
 
-  // Each order becomes its first payment plus one entry per renewal, and
-  // only the entries inside the range are kept.
-  const [initial, renewals] = project.$project.entries.$concatArrays;
-  assert.equal(initial[0].kind, 'initial');
-  assert.equal(initial[0].amount, '$payment.amount');
+  // Each order becomes its first payment (or its parts, when it was paid in
+  // parts) plus one entry per renewal, and only the entries inside the
+  // range are kept.
+  const [own, renewals] = project.$project.entries.$concatArrays;
+  const [, , [initial]] = own.$cond;
+  assert.equal(initial.kind, 'initial');
+  // What was taken: all of it on an order from before part payments.
+  assert.deepEqual(initial.amount, { $ifNull: ['$payment.amountPaid', '$payment.amount'] });
   assert.equal(renewals.$map.in.kind, 'renewal');
   assert.equal(renewals.$map.in.amount, '$$renewal.amount');
   assert.equal(renewals.$map.in.at, '$$renewal.at');

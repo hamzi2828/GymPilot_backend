@@ -17,7 +17,14 @@ Packages**.
 | `billing.mode` | `one_time` (a term paid up front) or `recurring` (Stripe subscription) |
 | `billing.interval` / `intervalCount` / `trialDays` | what Stripe bills on, for recurring |
 | `sessions` | sessions on a pack (packs expire when used up or when `durationDays` passes) |
-| `joiningFee` | charged once, on top of the first payment |
+| `joiningFee` | charged once, on top of a member's first membership: not to anyone who has had a paid (or refunded) membership before, and never on a renewal or a package change (`membershipService.joiningFeeDue`) |
+
+A package members still hold cannot be deleted: `DELETE /packages/:id`
+answers `409 { code: 'PACKAGE_IN_USE', live, renewable }` while any order
+for it is running or awaiting payment (`live`), or is a lapsed membership
+that is still its member's latest order (`renewable` — the desk may renew
+it, and renewing reads the package). Deactivate it instead; the Packages
+screen offers that on the refusal.
 
 ## Ways to pay
 
@@ -35,8 +42,33 @@ Packages**.
   (`POST /package-orders/:id/proof`, multipart `proof` + `reference`, `note`);
   staff **Confirm payment received** or **Reject** on Package Orders. The
   member is emailed at each step.
-* **At the desk** — **Assign Package** on Package Orders: cash, bank or a card
-  terminal, with an optional coupon, amount override and start date.
+* **At the desk** — **Assign Package** on Package Orders: cash, bank, a card
+  terminal or a mobile wallet (JazzCash, Easypaisa, other). `POST
+  /package-orders/assign` (package-orders · manage) `{ userId, packageId,
+  paymentMethod?, markPaid?, couponCode?, durationMonths?, startDate? |
+  startAfterDays?, discountAmount?, discountNote?, amountOverride? (or
+  amount), waiveJoiningFee?, trainerId?, trainerFee?,
+  trainerCommissionType? ('percent' | 'amount'), trainerCommissionValue?,
+  notes? }` → `201 { success, message, data: order }`. `startDate` (a bare
+  `YYYY-MM-DD` is the start of that day at the gym) or `startAfterDays`
+  (0–365: the start of that day from today; 0 = now) — not both — lets a
+  member register today and start later; the end date is worked out from
+  that start. Left out, a membership bought while another is live starts
+  when that one ends. The discount comes off the package price; a trainer
+  adds `trainerFee` to the total, records `trainerAssignment` (commission
+  as a percentage of the fee, or a fixed amount; `commissionAmount` is what
+  it comes to) and makes them the member's `assignedTrainerId`. Each field
+  is checked by `membershipService.readDeskTerms`: a value that cannot be
+  used is `400 INVALID_TERMS` naming it; an unknown trainer `404
+  TRAINER_NOT_FOUND`, an inactive one `409 TRAINER_INACTIVE`.
+
+`payment.method` is one of `src/services/paymentMethods.js`: `stripe` (Card
+(Stripe)), `card` (Card — the desk terminal), `bank_transfer`, `cash`,
+`jazzcash`, `easypaisa`, `wallet` (Other mobile wallet); invoices and the
+admin screens show those labels. Staff may record any of them but `stripe`,
+which is only ever paid through checkout. A method outside the list — or
+`stripe` at the desk — is refused with `422 PAYMENT_METHOD_INVALID`, never
+recorded as cash.
 
 ## Coupons
 
@@ -64,8 +96,28 @@ issues the invoice number, redeems the coupon and activates the order.
   Members always cancel *at period end* (recurring: Stripe
   `cancel_at_period_end`; one-off: the term simply runs out). Staff may cancel
   immediately. `/resume` undoes a pending cancellation.
-* **Renew** — `POST /package-orders/:id/renew` (staff): a fresh term of the
-  same package, starting when the current one ends.
+* **Renew** — `POST /package-orders/:id/renew` (staff) `{ paymentMethod?,
+  markPaid?, months?, notes?, force?, startDate?, discountAmount?,
+  discountNote?, amountOverride? }`: a fresh term of the same package,
+  starting when the current one ends (or on `startDate`), priced like a
+  sale. Never a joining fee; no trainer (400).
+* **Edit terms** — `PATCH /package-orders/:id/terms { startDate?, endDate?,
+  discountAmount?, discountNote?, note? }` (package-orders · manage) → `{
+  success, message, data: order }`. Moves the dates (a bare date is the
+  start / the whole of that day at the gym; the end must follow the start;
+  a lapsed membership extended into the future is live again, a live one
+  ended in the past is expired) or sets the order's whole discount, off the
+  package price only: the total moves by the difference, never below the
+  fees it carries (400). Money received stays as it was — `amountPaid` is
+  written down — and the balance follows; a discount that would take the
+  total below what was paid is `409 REFUND_NEEDED`. The invoice keeps its
+  number and takes the new total. Each change is appended to
+  `termsHistory[] { at, by, from, to, note }` (`from` / `to`: `startDate,
+  endDate, discountAmount, discountNote, amount, balanceDue`). Refused on a
+  card subscription (`409 STRIPE_BILLED`: Stripe's billing sets its dates and
+  price), on the price of any card payment, and on a closed order (`409
+  ORDER_CLOSED`: refunded, failed or cancelled); `409 TERMS_CHANGED` when the
+  order moved on while it was being saved.
 * **Change package** — `POST /package-orders/:id/change-package {packageId}`
   (staff): the unused days of the old package are credited pro rata against
   the new price; on a Stripe subscription the subscription item is switched
@@ -99,7 +151,84 @@ number per gym (`<prefix>-<year>-<seq>`, prefix under **Settings → Invoices**)
 tax shown as *included* in the price at **Settings → Tax rate**, rendered as a
 PDF on demand (`GET /package-orders/:id/invoice.pdf`) and attached to the
 membership-confirmation email. Members download theirs from the account page;
-staff from Package Orders.
+staff from Package Orders. The admission fee and the personal trainer's fee
+are lines of their own under the package.
+
+## What an order's money is made of — `src/gymfolio/services/orderMoney.js`
+
+`payment.amount` is the whole order. Inside it, every order written records
+`payment.joiningFee` (the admission fee charged on *this* order: 0 on a
+renewal, a package change, or when waived) and `payment.trainerFee` (the
+personal trainer's fee); the membership is the rest, `amount − joiningFee −
+trainerFee`, never below 0. A discount comes off the package price only;
+an amount override, or a payment covering part of the order, is allocated
+to admission first, then the trainer's fee, then the membership
+(`orderMoney.allocate`).
+
+`ledger.membershipPaymentStages` — what the accounts, dashboard, reports and
+the platform's gym stats all read membership money through — gives every
+payment row `admission`, `trainerFee` and `membership` beside `amount`,
+the payment's own `method`, and `kind` (`initial`, `installment` for later
+parts of an order paid in parts, `renewal` — which carries neither fee).
+
+### Paying in parts
+
+A membership sold at the desk may be paid for over time. `amountPaid` on
+assign or renew (less than the total; 0 = nothing yet) grants it at once —
+`payment.status` is `paid` and the order `active`, so everything that treats
+paid as live keeps working — with `payment.amountPaid` (money received so
+far; `null` on older orders, which were paid in full) and
+`payment.balanceDue`. `amountPaid` above the total, or on an order left
+pending, is a 400. Every order paid from now on records `amountPaid` (the
+whole amount when paid in full).
+
+`payment.installments[]` — `{ amount, joiningFee, trainerFee, method, at,
+by, note }` — are, when there are any, the money received for the order, the
+first payment included; each is allocated admission first, then trainer's
+fee, then membership. An order paid in full at once keeps none.
+
+| Route | Permission | Answer |
+|---|---|---|
+| `POST /package-orders/:id/payments { amount, method?, note? }` | package-orders · manage | `{ success, message, data: order }` — money received against the balance, recorded as an installment (the fees still owed first; `method` defaults to the order's). An order paid in part at once gets that first payment as its opening installment. Refused: `400 INVALID_PAYMENT` (not above 0), `400 OVERPAYMENT` (more than the balance), `422 PAYMENT_METHOD_INVALID`, `409 STRIPE_BILLED` (the order goes through Stripe), `409 NOT_PAID` (pending or refunded), `409 NO_BALANCE`, `409 BALANCE_CHANGED` (somebody recorded a payment at the same moment: one conditional write on the balance it started from). |
+| `GET /package-orders/dues?search=&page=&limit=` | package-orders · view | `{ success, data: [{ memberId, name, phone, email, gender, memberCode, currency, balanceDue, orders: [{ orderId, orderNumber, packageName, status, amount, amountPaid, balanceDue, startDate, endDate, lastPaidAt }] }], totals: [{ currency, balanceDue, members, orders }], pagination: { page, limit, total, pages } }` — one row per member and currency with money still owed on a granted order, largest balance first; `limit` at most 200 (default 50). Member fields come from the member's record, else the order's own copy (a guest). |
+| `GET /package-orders?hasDues=1` | package-orders · view | the orders list, only those with a balance due |
+
+A refund gives back at most what came in (`amountPaid`) and clears the
+balance; an order with nothing paid yet is cancelled, not refunded. Changing
+package is refused while money is owed (`409 BALANCE_DUE`): the credit for
+unused days would be worked out on money that never came in. The invoice
+shows the total, what was paid so far and the balance due, and lists the
+payments received.
+
+Orders from before `payment.joiningFee` existed read 0. Where their total
+did include the fee (subtotal = price + fee), fill it in per gym:
+
+    node scripts/backfillOrderFees.js --gym <slug>           # report only
+    node scripts/backfillOrderFees.js --gym <slug> --apply   # write it
+
+## Member lists for the desk — `src/gymfolio/services/membershipLists.js`
+
+One row per **member**, not per order, for the desk's screens to be built
+on. "Membership" means a package of kind `membership` (orders from before
+kinds read as memberships); packs, passes and trials are not what runs out
+and gets renewed. All are package-orders · view, and sweep lapsed orders
+first (throttled), like the orders list.
+
+Every list row carries the member — `memberId` (null for a guest order),
+`name`, `phone`, `email`, `gender`, `memberCode` (from the member's record,
+read-only; else the order's own copy) — and the membership it is about:
+`orderId`, `orderNumber`, `packageName`, `status`, `paymentStatus`,
+`startDate`, `endDate`, `amount`, `balanceDue`, `currency`. Lists answer
+`{ success, data: [row], pagination: { page, limit, total, pages } }`
+(`limit` at most 200, default 50) and take `search` (order number, name,
+email or phone).
+
+| Route | Answer |
+|---|---|
+| `GET /package-orders/expiring?days=7&includeAutoRenew=0` | Members whose membership ends within `days` (1–365, default 7; else `400 INVALID_QUERY`) and who have not renewed: each member's live membership (paid; active, frozen or past due) that runs **latest** must end inside the window, so a paid renewal running past it takes the member off the list — an unpaid one does not. Rows add `daysLeft` (whole days at the gym; 0 = ends today) and `autoRenews`; card subscriptions Stripe renews by itself are left out unless `includeAutoRenew=1`. Soonest first; the answer also says `days`. |
+| `GET /package-orders/expired?withinDays=` | Members whose latest membership — the one ending last among those not cancelled or refunded: paid, paid in part, **or never paid** (assigned pending) — has ended, and no paid membership of theirs runs past it (a renewal waiting to be paid does not count). `withinDays` (1–3650) keeps those that ended in the last so many days. Rows add `daysOverdue`. Most recently lapsed first. |
+| `POST /package-orders/summary { userIds: [...] }` | At most 500 member ids (`400 INVALID_QUERY` for more, none, or one that is not an id). `{ success, data: [{ userId, membership }] }` in the order asked, each member once: their current membership (paid, live and running today; the one ending last if several), else their latest (ending last, whatever became of it), else `null`. `membership`: `{ orderId, orderNumber, packageName, status, paymentStatus, method, current, startDate, endDate, daysLeft, amount, discountAmount, joiningFee, trainerFee, amountPaid (money received; the whole amount on older paid orders), balanceDue, currency, trainerName }`. A read sent as a POST because 500 ids do not fit in an address. |
+| `GET /package-orders/dues` | see *Paying in parts* above |
 
 ## Settings that matter here
 

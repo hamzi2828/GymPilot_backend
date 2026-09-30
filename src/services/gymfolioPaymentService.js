@@ -50,6 +50,9 @@ function recordTrialCharge(order, amountMinor, currency) {
   if (!(Number(billing.trialDays) > 0)) return;
   if (amountMinor === undefined || amountMinor === null || !Number.isFinite(Number(amountMinor))) return;
   order.payment.amount = fromMinorUnits(amountMinor, currency);
+  // What was taken is the joining fee, or part of it: the admission share
+  // can never be more than the payment it is part of.
+  order.payment.joiningFee = Math.min(round2(order.payment.joiningFee), order.payment.amount);
 }
 
 async function memberFor(order) {
@@ -169,7 +172,10 @@ class GymfolioPaymentService {
     const currency = resolveCurrency(packageData.currency, settings && settings.currency).toLowerCase();
     const snapshot = membership.packageSnapshot(packageData);
     const recurring = snapshot.billing.mode === 'recurring';
-    const joiningFee = round2(snapshot.joiningFee);
+    // Charged once, with the first membership: a member coming back -- by
+    // account, or by the email a guest checkout gives -- is not charged it
+    // again (membershipService.joiningFeeDue).
+    const joiningFee = (await membership.joiningFeeDue({ userId, email: customerInfo.email })) ? round2(snapshot.joiningFee) : 0;
 
     const { coupon, discount } = await membership.applyCoupon(options.couponCode, packageData, listPrice);
 
@@ -204,6 +210,10 @@ class GymfolioPaymentService {
       payment: {
         method: 'stripe',
         amount: round2(Math.max(0, listPrice + joiningFee - discount)),
+        // The coupon is worked out on the package price alone, so the fee
+        // is charged whole (a trial's charge is re-read: recordTrialCharge).
+        joiningFee,
+        trainerFee: 0,
         subtotal: round2(listPrice + joiningFee),
         discountAmount: discount,
         couponCode: coupon ? coupon.code : '',
@@ -585,11 +595,13 @@ class GymfolioPaymentService {
   }
 
   async getAllOrders(options = {}) {
-    const { page = 1, limit = 20, status, paymentStatus, paymentMethod, search, sort = '-createdAt' } = options;
+    const { page = 1, limit = 20, status, paymentStatus, paymentMethod, search, hasDues = false, sort = '-createdAt' } = options;
     const query = {};
     if (status) query.status = status;
     if (paymentStatus) query['payment.status'] = paymentStatus;
     if (paymentMethod) query['payment.method'] = paymentMethod;
+    // Money still owed on a membership already granted (paid in part).
+    if (hasDues) query['payment.balanceDue'] = { $gt: 0 };
     if (search) {
       const term = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$or = [{ orderNumber: term }, { 'customerInfo.email': term }, { 'customerInfo.fullName': term }];

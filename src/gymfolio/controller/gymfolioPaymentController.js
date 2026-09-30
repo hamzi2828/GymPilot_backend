@@ -33,15 +33,27 @@ const gymfolioPaymentController = {
   /**
    * POST /api/gymfolio/package-orders/assign
    *
-   * Staff creating a membership without checkout: cash or bank taken in
-   * person, a card charged on the desk terminal, or a comped package.
+   * Staff creating a membership without checkout: cash, bank, a card
+   * charged on the desk terminal or a mobile wallet taken in person, or a
+   * comped package.
+   *
+   * { userId, packageId, paymentMethod?, markPaid?, couponCode?, durationMonths?,
+   *   startDate? | startAfterDays?, discountAmount?, discountNote?,
+   *   amountOverride? (or amount), waiveJoiningFee?, amountPaid?, trainerId?,
+   *   trainerFee?, trainerCommissionType?, trainerCommissionValue?, notes? }
+   * -- the desk terms are read and checked by membershipService.readDeskTerms
+   * (400 INVALID_TERMS naming the field).
    */
   async assignPackageToUser(req, res) {
     try {
-      const { userId, packageId, paymentMethod = 'cash', markPaid = true, notes, durationMonths, couponCode, amount, startDate } = req.body || {};
+      const body = req.body || {};
+      const { userId, packageId, markPaid = true, durationMonths, couponCode } = body;
       if (!userId || !packageId) {
         return res.status(400).json({ success: false, message: 'userId and packageId are required' });
       }
+      if (!mongoose.Types.ObjectId.isValid(String(userId))) return res.status(404).json({ success: false, message: 'User not found' });
+      if (!mongoose.Types.ObjectId.isValid(String(packageId))) return res.status(404).json({ success: false, message: 'Package not found' });
+      const terms = membership.readDeskTerms(body);
 
       const [user, pkg] = await Promise.all([
         User.findById(userId).select('firstName lastName email phone addresses'),
@@ -51,21 +63,20 @@ const gymfolioPaymentController = {
       if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
 
       const order = await membership.createManualOrder({
+        ...terms,
         user,
         pkg,
-        paymentMethod,
         markPaid: markPaid !== false && markPaid !== 'false',
-        notes,
         durationMonths,
-        startDate,
         couponCode,
-        amountOverride: amount,
+        paidBy: userIdOf(req),
         by: req.user && req.user.email
       });
 
       if (order.payment.status === 'paid') afterResponse(notify.membershipConfirmed(order, user), 'membershipConfirmed');
 
-      return res.status(201).json({ success: true, message: `${pkg.name} assigned to ${user.email}`, data: order });
+      const who = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || 'the member';
+      return res.status(201).json({ success: true, message: `${pkg.name} assigned to ${who}`, data: order });
     } catch (error) {
       return fail(res, error, 'Failed to assign package');
     }
@@ -235,10 +246,10 @@ const gymfolioPaymentController = {
     }
   },
 
-  /** GET /api/gymfolio/package-orders (staff) */
+  /** GET /api/gymfolio/package-orders (staff)  ?hasDues=1: only orders with a balance due */
   async getAllOrders(req, res) {
     try {
-      const { page, limit, status, paymentStatus, paymentMethod, search, sort } = req.query;
+      const { page, limit, status, paymentStatus, paymentMethod, search, sort, hasDues } = req.query;
       await sweepIfDue();
       const result = await gymfolioPaymentService.getAllOrders({
         page: page ? parseInt(page, 10) : 1,
@@ -247,6 +258,7 @@ const gymfolioPaymentController = {
         paymentStatus,
         paymentMethod,
         search,
+        hasDues: hasDues === '1' || hasDues === 'true',
         sort
       });
       return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });

@@ -6,14 +6,18 @@
 // approval path. The payment controllers and the Stripe webhook all come
 // through here, so an order changes state in one place whatever paid for it.
 
+const mongoose = require('mongoose');
 const PackageOrder = require('../models/packageOrderModel');
 const Package = require('../models/packageModel');
 const Coupon = require('../models/couponModel');
+const Trainer = require('../models/trainerModel');
 const User = require('../../models/user');
 const Settings = require('../../models/settings');
 const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
+const { readDeskMethod } = require('../../services/paymentMethods');
+const { allocate, paidSoFar, partsSoFar, nextPart } = require('./orderMoney');
 const T = require('../../attendance/services/timeUtils');
 
 const DAY_MS = 86400000;
@@ -136,6 +140,32 @@ async function startDateFor({ userId, email, kind = 'membership', now = new Date
   return latest ? new Date(latest.subscription.endDate) : now;
 }
 
+/* ----------------------------- joining fee ----------------------------- */
+
+/**
+ * Whether this person still owes a package's joining fee. It is charged
+ * once, with the first membership: anybody who has ever paid for one --
+ * refunded since or not -- has joined, and is not charged it again when
+ * they come back. A day pass, trial or pack bought before does not count as
+ * joining, so the membership that follows it still carries the fee.
+ *
+ * Renewals and package changes never ask: they are not joining at all
+ * (createManualOrder's `chargeJoiningFee: false`).
+ */
+async function joiningFeeDue({ userId, email } = {}) {
+  const owner = [];
+  if (userId) owner.push({ userId });
+  if (email) owner.push({ 'customerInfo.email': String(email).toLowerCase().trim() });
+  if (!owner.length) return true;
+
+  const joined = await PackageOrder.exists({
+    $or: owner,
+    'payment.status': { $in: ['paid', 'refunded'] },
+    $and: [{ $or: [{ 'packageDetails.kind': 'membership' }, { 'packageDetails.kind': { $exists: false } }] }]
+  });
+  return !joined;
+}
+
 /* ------------------------------- coupons ------------------------------- */
 
 /**
@@ -221,6 +251,12 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
   order.payment.lastPaidAt = paidAt;
   if (transactionId) order.payment.transactionId = transactionId;
   if (method) order.payment.method = method;
+  // Paid in full -- unless the desk took only part of it, in which case
+  // createManualOrder has already said how much and what is left.
+  if (order.payment.amountPaid === null || order.payment.amountPaid === undefined) {
+    order.payment.amountPaid = order.payment.amount;
+    order.payment.balanceDue = 0;
+  }
 
   const snapshot = order.packageDetails || {};
   const start = startDate
@@ -261,11 +297,164 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
   return order;
 }
 
+/* ------------------------------ desk terms ----------------------------- */
+//
+// What staff may set when they sell or renew a membership at the desk, read
+// from the request and checked before anything is written. A value that
+// cannot be used is a 400 naming the field -- never quietly dropped, which
+// would sell the member something other than what the desk agreed.
+
+const MAX_START_AHEAD_DAYS = 365;
+
+function present(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function truthy(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function money(value, field) {
+  if (!present(value)) return undefined;
+  const amount = typeof value === 'number' ? value : parseAmount(value);
+  if (amount === null || !Number.isFinite(amount) || amount < 0) {
+    throw new MembershipError(`${field} must be an amount of 0 or more`, 400, 'INVALID_TERMS');
+  }
+  return round2(amount);
+}
+
+/**
+ * A date the desk sent. A bare 'YYYY-MM-DD' (a date input) names a whole
+ * day at the gym: its first moment for a start, its last for an end (a
+ * membership "until 30 Sep" still works at 23:59 that day). Anything else
+ * must read as an instant.
+ */
+function readDeskDate(value, edge, field) {
+  let at = null;
+  if (T.isDateOnly(value)) {
+    const key = String(value).trim();
+    at = edge === 'end' ? T.lastMomentOfLocalDay(key) : T.startOfLocalDay(key);
+  } else if (typeof value === 'string' || value instanceof Date) {
+    at = new Date(value);
+  }
+  if (!at || Number.isNaN(at.getTime())) throw new MembershipError(`${field} is not a date`, 400, 'INVALID_TERMS');
+  return at;
+}
+
+/**
+ * A start date the desk sent (readDeskDate, from the start of a bare day).
+ * Starting more than a year ahead is refused as the typo it almost
+ * certainly is.
+ */
+function readStartDate(value, now = new Date()) {
+  const at = readDeskDate(value, 'start', 'startDate');
+  if (at.getTime() > now.getTime() + MAX_START_AHEAD_DAYS * DAY_MS) {
+    throw new MembershipError(`A membership can start at most ${MAX_START_AHEAD_DAYS} days ahead`, 400, 'INVALID_TERMS');
+  }
+  return at;
+}
+
+/**
+ * The desk's terms from a request body, for createManualOrder.
+ *
+ *   startDate | startAfterDays   when the term starts: a date, or so many
+ *                                days from today (the start of that day at
+ *                                the gym; 0 = now). Not both. Left out, a
+ *                                membership starts when the current one
+ *                                ends. The end date follows from the start.
+ *   discountAmount, discountNote off the package price
+ *   amountOverride (or amount)   charge this total instead
+ *   waiveJoiningFee              no admission fee on this order
+ *   amountPaid                   paid now, when less than the total: the
+ *                                membership is granted and the rest is a
+ *                                balance due (recordPayment settles it)
+ *   paymentMethod                checked by createManualOrder
+ *   trainerId, trainerFee,       a personal trainer sold with it (sale only,
+ *   trainerCommissionType,       not renewals): 'percent' of the fee, or a
+ *   trainerCommissionValue       fixed 'amount'
+ *   notes
+ *
+ * @param {object} body
+ * @param {{ trainer?: boolean, now?: Date }} [options] trainer: whether
+ *   trainer fields are accepted at all
+ * @throws {MembershipError} 400 INVALID_TERMS naming the field
+ */
+function readDeskTerms(body = {}, { trainer: allowTrainer = true, now = new Date() } = {}) {
+  const terms = {};
+
+  if (present(body.startDate) && present(body.startAfterDays)) {
+    throw new MembershipError('Send startDate or startAfterDays, not both', 400, 'INVALID_TERMS');
+  }
+  if (present(body.startDate)) terms.startDate = readStartDate(body.startDate, now);
+  if (present(body.startAfterDays)) {
+    const days = Number(body.startAfterDays);
+    if (!Number.isInteger(days) || days < 0 || days > MAX_START_AHEAD_DAYS) {
+      throw new MembershipError(`startAfterDays must be a whole number from 0 to ${MAX_START_AHEAD_DAYS}`, 400, 'INVALID_TERMS');
+    }
+    terms.startDate = days === 0 ? now : T.startOfLocalDay(T.shiftDateKey(T.dateKey(now), days));
+  }
+
+  const discount = money(body.discountAmount, 'discountAmount');
+  if (discount !== undefined) terms.discountAmount = discount;
+  if (present(body.discountNote)) terms.discountNote = String(body.discountNote).trim().slice(0, 200);
+
+  const override = money(present(body.amountOverride) ? body.amountOverride : body.amount, 'amountOverride');
+  if (override !== undefined) terms.amountOverride = override;
+  // Part of the total taken now; the rest is the member's balance due.
+  const paidNow = money(body.amountPaid, 'amountPaid');
+  if (paidNow !== undefined) terms.amountPaid = paidNow;
+
+  if (truthy(body.waiveJoiningFee)) terms.chargeJoiningFee = false;
+  if (present(body.paymentMethod)) terms.paymentMethod = body.paymentMethod;
+  if (present(body.notes)) terms.notes = String(body.notes).trim().slice(0, 1000);
+
+  const trainerFields = ['trainerId', 'trainerFee', 'trainerCommissionType', 'trainerCommissionValue'].filter((key) => present(body[key]));
+  if (trainerFields.length) {
+    if (!allowTrainer) throw new MembershipError('A trainer is chosen when the membership is sold, not on a renewal', 400, 'INVALID_TERMS');
+    if (!present(body.trainerId)) throw new MembershipError('Choose the trainer the fee or commission is for (trainerId)', 400, 'INVALID_TERMS');
+    if (!mongoose.Types.ObjectId.isValid(String(body.trainerId))) throw new MembershipError('trainerId is not a trainer', 400, 'INVALID_TERMS');
+    const commissionType = present(body.trainerCommissionType) ? body.trainerCommissionType : 'percent';
+    if (!['percent', 'amount'].includes(commissionType)) {
+      throw new MembershipError("trainerCommissionType must be 'percent' or 'amount'", 400, 'INVALID_TERMS');
+    }
+    const commissionValue = money(body.trainerCommissionValue, 'trainerCommissionValue') || 0;
+    if (commissionType === 'percent' && commissionValue > 100) {
+      throw new MembershipError('A percentage commission cannot be over 100', 400, 'INVALID_TERMS');
+    }
+    terms.trainer = {
+      trainerId: String(body.trainerId),
+      fee: money(body.trainerFee, 'trainerFee') || 0,
+      commissionType,
+      commissionValue
+    };
+  }
+  return terms;
+}
+
+/** What a trainer's commission on a fee comes to. */
+function commissionOn(fee, { commissionType, commissionValue }) {
+  return commissionType === 'amount' ? round2(commissionValue) : round2((Number(fee) || 0) * (Number(commissionValue) || 0) / 100);
+}
+
 /* ---------------------------- manual orders ---------------------------- */
 
 /**
  * An order created by staff: cash or bank at the desk, a comped package, a
  * renewal, or an upgrade. Returns the saved order.
+ *
+ * `chargeJoiningFee`: left out, the package's joining fee is added when the
+ * member has never joined (joiningFeeDue); renewals and package changes
+ * pass false.
+ *
+ * `trainer` ({ trainerId, fee, commissionType, commissionValue }, from
+ * readDeskTerms): a personal trainer sold with the membership. The fee is
+ * charged on top as payment.trainerFee, the commission is recorded on
+ * trainerAssignment, and the member's assigned trainer becomes this one.
+ *
+ * `amountPaid`: what was taken now, when it is less than the total. The
+ * membership is granted all the same (paid, active) with the rest as
+ * payment.balanceDue, and what was taken is the order's first installment,
+ * recorded as received by `paidBy` (a staff account id).
  */
 async function createManualOrder({
   user,
@@ -281,6 +470,10 @@ async function createManualOrder({
   discountAmount = 0,
   discountNote = '',
   renewedFrom = null,
+  chargeJoiningFee,
+  trainer = null,
+  amountPaid,
+  paidBy = null,
   by = null
 }) {
   const settings = await Settings.getSettings().catch(() => null);
@@ -291,10 +484,22 @@ async function createManualOrder({
       422
     );
   }
+  // An unknown method is refused rather than recorded as cash.
+  const { method, problem } = readDeskMethod(paymentMethod);
+  if (problem) throw new MembershipError(problem, 422, 'PAYMENT_METHOD_INVALID');
   const currency = resolveCurrency(pkg.currency, settings && settings.currency);
   const snapshot = packageSnapshot(pkg);
+  const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: user.email }) : !!chargeJoiningFee;
+  const joiningFee = feeDue ? round2(snapshot.joiningFee) : 0;
 
-  let amount = listPrice + (snapshot.joiningFee || 0);
+  let coach = null;
+  if (trainer) {
+    coach = await Trainer.findById(trainer.trainerId).select('name isActive').lean();
+    if (!coach) throw new MembershipError('That trainer was not found', 404, 'TRAINER_NOT_FOUND');
+    if (coach.isActive === false) throw new MembershipError(`${coach.name} is not an active trainer`, 409, 'TRAINER_INACTIVE');
+  }
+  const trainerFee = coach ? round2(trainer.fee) : 0;
+
   let coupon = null;
   let discount = round2(discountAmount);
   if (couponCode) {
@@ -302,15 +507,36 @@ async function createManualOrder({
     coupon = applied.coupon;
     discount = round2(discount + applied.discount);
   }
-  amount = round2(Math.max(0, amount - discount));
+  // A discount comes off the package price, never off the fees charged
+  // beside it -- and never below nothing (a package-change credit can be
+  // worth more than the new package).
+  discount = Math.min(discount, listPrice);
+  let amount = round2(listPrice - discount + joiningFee + trainerFee);
   if (amountOverride !== undefined && amountOverride !== null && amountOverride !== '') {
     const override = parseAmount(amountOverride);
     if (override === null) throw new MembershipError('Amount must be a number', 400);
     amount = override;
   }
+  // What the total carries, admission first: an override below the fees
+  // settles them before the membership (orderMoney.allocate).
+  const parts = allocate(amount, { joiningFee, trainerFee });
 
   const paid = markPaid !== false;
   const now = new Date();
+
+  // Paid in part: checked against the total before anything is written.
+  let taken = amount;
+  if (amountPaid !== undefined && amountPaid !== null && amountPaid !== '') {
+    taken = parseAmount(amountPaid);
+    if (taken === null || taken < 0) throw new MembershipError('amountPaid must be an amount of 0 or more', 400, 'INVALID_TERMS');
+    taken = round2(taken);
+    if (!paid && taken > 0) {
+      throw new MembershipError('An order left pending has nothing paid yet: mark it paid to take part of the money now', 400, 'INVALID_TERMS');
+    }
+    if (taken > amount) throw new MembershipError(`amountPaid cannot be more than the ${amount} charged`, 400, 'INVALID_TERMS');
+  }
+  const balance = paid ? round2(amount - taken) : 0;
+  const staff = paidBy && mongoose.Types.ObjectId.isValid(String(paidBy)) ? paidBy : null;
   const start = startDate ? new Date(startDate) : await startDateFor({ userId: user._id, email: user.email, kind: snapshot.kind, now });
   let end = termEnd(start, snapshot);
   const months = Number(durationMonths);
@@ -329,21 +555,28 @@ async function createManualOrder({
     packageId: pkg._id,
     packageDetails: snapshot,
     customerInfo: {
-      fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
-      email: user.email,
+      fullName: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || user.phone || 'Member',
+      email: user.email || '',
       phone: user.phone || '',
       country: (address && address.country) || ''
     },
     payment: {
-      method: ['stripe', 'card', 'bank_transfer', 'cash'].includes(paymentMethod) ? paymentMethod : 'cash',
+      method,
       amount,
-      subtotal: round2(listPrice + (snapshot.joiningFee || 0)),
+      joiningFee: parts.joiningFee,
+      trainerFee: parts.trainerFee,
+      subtotal: round2(listPrice + joiningFee + trainerFee),
       discountAmount: discount,
       discountNote,
       couponCode: coupon ? coupon.code : '',
       currency: currency.toLowerCase(),
       status: paid ? 'paid' : 'pending',
-      paidAt: paid ? now : undefined
+      paidAt: paid ? now : undefined,
+      amountPaid: paid ? taken : null,
+      balanceDue: balance,
+      // Paid in part: what was taken is the first installment (nothing
+      // taken yet, none). Paid in full at once needs none.
+      installments: balance > 0 && taken > 0 ? [{ ...nextPart({ joiningFee: parts.joiningFee, trainerFee: parts.trainerFee }, [], taken), method, at: now, by: staff, note: '' }] : []
     },
     subscription: {
       startDate: start,
@@ -353,6 +586,17 @@ async function createManualOrder({
       renewalDate: end
     },
     sessions: snapshot.sessions > 0 ? { total: snapshot.sessions, used: 0 } : undefined,
+    // The commission is on the trainer's fee this order actually carries.
+    trainerAssignment: coach
+      ? {
+          trainerId: coach._id,
+          trainerName: coach.name || '',
+          fee: parts.trainerFee,
+          commissionType: trainer.commissionType,
+          commissionValue: trainer.commissionValue,
+          commissionAmount: commissionOn(parts.trainerFee, trainer)
+        }
+      : null,
     renewedFrom,
     status: paid ? 'active' : 'pending',
     notes: notes || `Created from the admin panel by ${by || 'an administrator'}`,
@@ -364,7 +608,245 @@ async function createManualOrder({
   } else {
     await order.save();
   }
+
+  // The member's trainer from now on (members pages, the trainer's list).
+  if (coach && user._id) {
+    await User.updateOne({ _id: user._id }, { $set: { assignedTrainerId: coach._id } });
+  }
   return order;
+}
+
+/* ---------------------------- part payments ---------------------------- */
+
+/** Whether an order's money goes through Stripe (and so is recorded there). */
+function stripeBilled(order) {
+  const p = (order && order.payment) || {};
+  return p.method === 'stripe' || !!p.stripeSubscriptionId || !!p.stripePaymentIntentId || !!p.stripeSessionId;
+}
+
+/**
+ * Money received at the desk against an order's balance due.
+ *
+ * The payment becomes one of the order's installments -- the day it
+ * arrived, how it was paid, who took it -- with whatever is still owed of
+ * the admission fee and the trainer's fee taken first. An order paid in
+ * part at once, with no installments yet, first gets that payment as its
+ * opening installment (dated when it was paid), so the accounts keep
+ * counting it where it was received.
+ *
+ * Written with one conditional update on the balance it started from: two
+ * people recording the same payment at once take it off once, and the
+ * second is told the balance moved.
+ *
+ * @throws {MembershipError} 409 STRIPE_BILLED / NOT_PAID / NO_BALANCE /
+ *   BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
+ *   than the balance); 422 PAYMENT_METHOD_INVALID
+ */
+async function recordPayment(order, { amount, method, note = '', by = null, now = new Date() } = {}) {
+  if (stripeBilled(order)) {
+    throw new MembershipError('This membership is paid by card through Stripe; there is no balance to take at the desk.', 409, 'STRIPE_BILLED');
+  }
+  if (order.payment.status !== 'paid') {
+    throw new MembershipError(
+      order.payment.status === 'refunded' ? 'This order has been refunded.' : 'This order has not been paid for yet: confirm or assign it first.',
+      409,
+      'NOT_PAID'
+    );
+  }
+  const balance = round2(order.payment.balanceDue || 0);
+  if (!(balance > 0)) throw new MembershipError('Nothing is owed on this order.', 409, 'NO_BALANCE');
+
+  const value = typeof amount === 'number' ? amount : parseAmount(amount);
+  if (value === null || !Number.isFinite(value) || round2(value) <= 0) {
+    throw new MembershipError('The payment must be more than 0', 400, 'INVALID_PAYMENT');
+  }
+  const paying = round2(value);
+  if (paying > balance) {
+    throw new MembershipError(`The balance due is ${balance}; a payment cannot be more than that.`, 400, 'OVERPAYMENT');
+  }
+  const { method: how, problem } = readDeskMethod(method, {
+    fallback: readDeskMethod(order.payment.method).method || 'cash'
+  });
+  if (problem) throw new MembershipError(problem, 422, 'PAYMENT_METHOD_INVALID');
+
+  const parts = partsSoFar(order.payment, { firstAt: order.createdAt });
+  parts.push({
+    ...nextPart(order.payment, parts, paying),
+    method: how,
+    at: now,
+    by: by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null,
+    note: String(note || '').trim().slice(0, 200)
+  });
+
+  const updated = await PackageOrder.findOneAndUpdate(
+    { _id: order._id, 'payment.status': 'paid', 'payment.balanceDue': order.payment.balanceDue },
+    {
+      $set: {
+        'payment.installments': parts,
+        'payment.amountPaid': round2(paidSoFar(order.payment) + paying),
+        'payment.balanceDue': round2(balance - paying),
+        'payment.lastPaidAt': now
+      }
+    },
+    { new: true }
+  );
+  if (!updated) {
+    throw new MembershipError('The balance changed while this payment was being recorded. Reload the order and try again.', 409, 'BALANCE_CHANGED');
+  }
+  return updated;
+}
+
+/* ------------------------------ edit terms ----------------------------- */
+
+// The terms a change is recorded against, before and after.
+function termsOf(order) {
+  const p = order.payment || {};
+  const s = order.subscription || {};
+  return {
+    startDate: s.startDate || null,
+    endDate: s.endDate || null,
+    discountAmount: round2(p.discountAmount || 0),
+    discountNote: p.discountNote || '',
+    amount: round2(p.amount),
+    balanceDue: round2(p.balanceDue || 0)
+  };
+}
+
+/**
+ * Changes a membership's dates or discount after the sale.
+ *
+ * `startDate` / `endDate` (a bare date is the start / the end of that day
+ * at the gym) move the term; the end must come after the start. Moving the
+ * end of a lapsed membership into the future makes it live again, and
+ * moving a live one's into the past ends it.
+ *
+ * `discountAmount` is the order's whole discount from now on; it comes off
+ * the package price only, so the total moves by the difference and can
+ * never go below the fees it carries. On an order already paid, money
+ * received stays exactly what it was -- amountPaid is written down as
+ * received -- and the balance due follows: a smaller discount leaves more
+ * to pay, a larger one may not take the total below what was paid (that
+ * is a refund). The invoice keeps its number and takes the new total.
+ *
+ * Each change is appended to termsHistory with what the terms were before
+ * and after, who made it and `note`. Written with one conditional update
+ * on the money it started from, like recordPayment.
+ *
+ * @throws {MembershipError} 409 STRIPE_BILLED (a card subscription's dates
+ *   and price are Stripe's; a card payment's price is what was charged),
+ *   409 ORDER_CLOSED, 409 REFUND_NEEDED, 409 TERMS_CHANGED; 400
+ *   INVALID_TERMS naming the field, or when nothing would change
+ */
+async function editTerms(order, body = {}, { by = null, now = new Date() } = {}) {
+  const p = order.payment || {};
+  if (p.stripeSubscriptionId) {
+    throw new MembershipError("This membership is a card subscription: its dates and price follow Stripe's billing and are changed there.", 409, 'STRIPE_BILLED');
+  }
+  if (['refunded', 'failed', 'cancelled'].includes(p.status) || order.status === 'cancelled') {
+    throw new MembershipError('This order is closed; its terms can no longer be changed.', 409, 'ORDER_CLOSED');
+  }
+  if (stripeBilled(order) && p.status !== 'paid') {
+    // Its dates are set when Stripe confirms the payment.
+    throw new MembershipError('This card payment has not gone through yet; its terms are set once it does.', 409, 'STRIPE_BILLED');
+  }
+
+  const before = termsOf(order);
+  const after = { ...before };
+  if (present(body.startDate)) after.startDate = readDeskDate(body.startDate, 'start', 'startDate');
+  if (present(body.endDate)) after.endDate = readDeskDate(body.endDate, 'end', 'endDate');
+  if ((present(body.startDate) || present(body.endDate)) && after.startDate && after.endDate && new Date(after.endDate) <= new Date(after.startDate)) {
+    throw new MembershipError('The end date must come after the start date', 400, 'INVALID_TERMS');
+  }
+  if (body.discountNote !== undefined && body.discountNote !== null) after.discountNote = String(body.discountNote).trim().slice(0, 200);
+
+  const discount = money(body.discountAmount, 'discountAmount');
+  if (discount !== undefined && discount !== before.discountAmount) {
+    if (stripeBilled(order)) {
+      throw new MembershipError('This order was paid by card through Stripe: its price is what was charged. Refund part of it instead.', 409, 'STRIPE_BILLED');
+    }
+    const listPrice = parseAmount(order.packageDetails && order.packageDetails.price);
+    if (listPrice !== null && discount > listPrice) {
+      throw new MembershipError(`The discount comes off the package price (${listPrice}) and cannot be more than it`, 400, 'INVALID_TERMS');
+    }
+    const amount = round2(before.amount + before.discountAmount - discount);
+    const fees = round2((p.joiningFee || 0) + (p.trainerFee || 0));
+    if (amount < fees) {
+      throw new MembershipError(`That would take the total below the ${fees} of fees it carries; the discount comes off the package price only`, 400, 'INVALID_TERMS');
+    }
+    after.discountAmount = discount;
+    after.amount = amount;
+    if (p.status === 'paid') {
+      const received = paidSoFar(p);
+      if (amount < received) {
+        throw new MembershipError(`${received} has already been paid, more than the new total of ${amount}. Refund the difference instead.`, 409, 'REFUND_NEEDED');
+      }
+      after.balanceDue = round2(amount - received);
+    }
+  }
+
+  const changed = ['startDate', 'endDate', 'discountAmount', 'discountNote', 'amount'].filter((key) => {
+    const a = before[key] instanceof Date ? before[key].getTime() : before[key];
+    const b = after[key] instanceof Date ? after[key].getTime() : after[key];
+    return a !== b;
+  });
+  if (!changed.length) throw new MembershipError('Nothing to change: send startDate, endDate, discountAmount or discountNote', 400, 'INVALID_TERMS');
+
+  const set = {
+    'subscription.startDate': after.startDate,
+    'subscription.endDate': after.endDate,
+    'subscription.renewalDate': after.endDate,
+    'payment.discountAmount': after.discountAmount,
+    'payment.discountNote': after.discountNote
+  };
+  if (after.amount !== before.amount) {
+    set['payment.amount'] = after.amount;
+    if (p.status === 'paid') {
+      // Money received does not move with the price.
+      set['payment.amountPaid'] = paidSoFar(p);
+      set['payment.balanceDue'] = after.balanceDue;
+    }
+    if (order.invoice && order.invoice.number) {
+      const rate = Number(order.invoice.taxRate) || 0;
+      const tax = rate > 0 ? round2(after.amount - after.amount / (1 + rate / 100)) : 0;
+      set['invoice.total'] = after.amount;
+      set['invoice.taxAmount'] = tax;
+      set['invoice.subtotal'] = round2(after.amount - tax);
+    }
+  }
+  // Live again, or over, as the new end date says.
+  if (after.endDate && p.status === 'paid') {
+    const ends = new Date(after.endDate);
+    if (ends > now && order.status === 'expired') {
+      set.status = 'active';
+      set['subscription.isActive'] = true;
+    } else if (ends <= now && order.status === 'active') {
+      set.status = 'expired';
+      set['subscription.isActive'] = false;
+    }
+  }
+
+  // An order from before balances has none stored: nothing owed.
+  const balanceWas = round2(p.balanceDue || 0) > 0 ? p.balanceDue : { $in: [0, null] };
+  const updated = await PackageOrder.findOneAndUpdate(
+    { _id: order._id, 'payment.amount': p.amount, 'payment.balanceDue': balanceWas, 'payment.status': p.status },
+    {
+      $set: set,
+      $push: {
+        termsHistory: {
+          at: now,
+          by: by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null,
+          from: before,
+          to: after,
+          note: present(body.note) ? String(body.note).trim().slice(0, 500) : ''
+        }
+      }
+    },
+    { new: true }
+  );
+  if (!updated) {
+    throw new MembershipError('The order changed while this was being saved. Reload it and try again.', 409, 'TERMS_CHANGED');
+  }
+  return updated;
 }
 
 /* --------------------------- bank transfers ---------------------------- */
@@ -377,7 +859,9 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
   const snapshot = packageSnapshot(pkg);
 
   const { coupon, discount } = await applyCoupon(couponCode, pkg, listPrice);
-  const amount = round2(Math.max(0, listPrice + (snapshot.joiningFee || 0) - discount));
+  // Charged once: not to a member coming back (joiningFeeDue).
+  const joiningFee = (await joiningFeeDue({ userId: user._id, email: user.email })) ? round2(snapshot.joiningFee) : 0;
+  const amount = round2(Math.max(0, listPrice + joiningFee - discount));
 
   // The same rule as card checkout: one running subscription per member.
   await assertNoActiveSubscription({ userId: user._id, email: user.email, snapshot });
@@ -388,8 +872,8 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
     packageId: pkg._id,
     packageDetails: snapshot,
     customerInfo: {
-      fullName: customerInfo.fullName || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email,
-      email: user.email,
+      fullName: customerInfo.fullName || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || user.phone || 'Member',
+      email: user.email || '',
       phone: customerInfo.phone || user.phone || '',
       country: customerInfo.country || '',
       address: customerInfo.address || '',
@@ -400,7 +884,10 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
     payment: {
       method: 'bank_transfer',
       amount,
-      subtotal: round2(listPrice + (snapshot.joiningFee || 0)),
+      // The coupon came off the price alone, so the fee is all there.
+      joiningFee,
+      trainerFee: 0,
+      subtotal: round2(listPrice + joiningFee),
       discountAmount: discount,
       couponCode: coupon ? coupon.code : '',
       currency: currency.toLowerCase(),
@@ -800,25 +1287,39 @@ async function resume(order, { by = null } = {}) {
   return order;
 }
 
-/** A fresh term of the same package, starting when the current one ends. */
-async function renew(order, { paymentMethod = 'cash', markPaid = true, months, notes, by } = {}) {
+/**
+ * A fresh term of the same package, starting when the current one ends --
+ * or on `startDate` when the desk says. `discountAmount` / `discountNote`
+ * and `amountOverride` price it as on a sale (readDeskTerms).
+ */
+async function renew(
+  order,
+  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride, amountPaid, paidBy } = {}
+) {
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(order.packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
   if (!pkg) throw new MembershipError('The package no longer exists; assign a current one instead', 404);
 
   const now = new Date();
   const currentEnd = order.subscription && order.subscription.endDate ? new Date(order.subscription.endDate) : null;
-  const start = currentEnd && currentEnd > now && ['active', 'frozen'].includes(order.status) ? currentEnd : now;
+  const start = startDate || (currentEnd && currentEnd > now && ['active', 'frozen'].includes(order.status) ? currentEnd : now);
 
   return createManualOrder({
     user,
     pkg,
     paymentMethod,
     markPaid,
+    discountAmount,
+    discountNote,
+    amountOverride,
+    amountPaid,
+    paidBy,
     durationMonths: months,
     startDate: start,
     notes: notes || `Renewal of ${order.orderNumber}`,
     renewedFrom: order._id,
+    // A renewal is not joining: the fee was taken with the first term.
+    chargeJoiningFee: false,
     by
   });
 }
@@ -830,6 +1331,15 @@ async function renew(order, { paymentMethod = 'cash', markPaid = true, months, n
  */
 async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by } = {}) {
   assertActive(order);
+  // The credit is for days already paid for; with money still owed it
+  // would be worked out on money that never came in.
+  if (round2(order.payment.balanceDue) > 0) {
+    throw new MembershipError(
+      `${round2(order.payment.balanceDue)} is still owed on this membership. Record that payment first, then change the package.`,
+      409,
+      'BALANCE_DUE'
+    );
+  }
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
   if (!pkg) throw new MembershipError('Package not found', 404);
@@ -888,6 +1398,8 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     discountNote: `Credit for ${Math.floor(remainingDays)} unused day(s) of ${order.packageDetails && order.packageDetails.name}`,
     notes: notes || `Changed from ${order.orderNumber} (${order.packageDetails && order.packageDetails.name})`,
     renewedFrom: order._id,
+    // Nor is moving to another package: the member joined long ago.
+    chargeJoiningFee: false,
     by
   });
 
@@ -1084,7 +1596,11 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
   if (order.payment.status === 'refunded') throw new MembershipError('This order has already been refunded', 400);
   if (order.payment.status !== 'paid') throw new MembershipError('Only a paid order can be refunded', 400);
 
-  const paidAmount = round2(order.payment.amount);
+  // What came in, which on an order paid in part is less than its total.
+  const paidAmount = paidSoFar(order.payment);
+  if (!(paidAmount > 0)) {
+    throw new MembershipError('Nothing has been paid on this order yet, so there is nothing to refund. Cancel it instead.', 400);
+  }
   let wanted = null;
   if (amount !== undefined && amount !== null && amount !== '') {
     wanted = parseAmount(amount);
@@ -1170,6 +1686,8 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
       {
         $set: {
           'payment.status': 'refunded',
+          // A refunded membership is over: nothing more is owed on it.
+          'payment.balanceDue': 0,
           status: 'cancelled',
           'subscription.isActive': false,
           'subscription.autoRenew': order.subscription.autoRenew,
@@ -1195,6 +1713,7 @@ async function refund(order, { amount, reason = '', by = null } = {}) {
   }
 
   order.payment.status = 'refunded';
+  order.payment.balanceDue = 0;
   order.status = 'cancelled';
   order.subscription.isActive = false;
   order.refund = record;
@@ -1220,11 +1739,17 @@ module.exports = {
   addMonths,
   termEnd,
   startDateFor,
+  joiningFeeDue,
   applyCoupon,
   redeemCoupon,
   assertNoActiveSubscription,
   markPaidAndActivate,
+  readDeskTerms,
+  commissionOn,
   createManualOrder,
+  stripeBilled,
+  recordPayment,
+  editTerms,
   createBankTransferOrder,
   submitTransferProof,
   approveTransfer,
