@@ -14,7 +14,6 @@
 // that gym. The two exceptions live at the bottom of this file -- the push
 // token routes -- because they are the app's own and nobody else's.
 
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Gym = require('../platform/models/gymModel');
 const MemberDirectory = require('../platform/models/memberDirectoryModel');
@@ -22,6 +21,7 @@ const { runWithTenant, tenantContextFor } = require('../platform/tenantContext')
 const { branding } = require('../services/branding');
 const { isExpoPushToken } = require('../services/messaging');
 const { MEMBER_APP_CLAIM } = require('../middleware/auth');
+const { passwordMatches } = require('../services/passwordCheck');
 
 // One message for "no such username" and "wrong password" alike: a member
 // list is worth money to a competitor, and a login form that says which
@@ -159,11 +159,20 @@ module.exports = {
         return res.status(400).json({ success: false, message: 'Username and password are required.' });
       }
 
+      // A username nobody has costs the same bcrypt work as a real one, so
+      // how long the answer takes does not say which exist
+      // (services/passwordCheck.js).
       const entry = await MemberDirectory.lookup(username);
-      if (!entry) return res.status(401).json({ success: false, message: REJECTED });
+      if (!entry) {
+        await passwordMatches(password, null);
+        return res.status(401).json({ success: false, message: REJECTED });
+      }
 
       const gym = await gymById(entry.gymId);
-      if (!gym) return res.status(401).json({ success: false, message: REJECTED });
+      if (!gym) {
+        await passwordMatches(password, null);
+        return res.status(401).json({ success: false, message: REJECTED });
+      }
 
       // A suspended gym, or one whose subscription lapsed, is closed to its
       // members too -- the same check the website gets from the tenant gate.
@@ -174,8 +183,8 @@ module.exports = {
       const result = await runWithTenant(context, async () => {
         const User = require('../models/user');
         const user = await User.findById(entry.userId);
-        if (!user || !user.password) return { status: 401, body: { success: false, message: REJECTED } };
-        if (!(await bcrypt.compare(password, user.password))) {
+        // No account, or no password on it, is never a match.
+        if (!(await passwordMatches(password, user && user.password))) {
           return { status: 401, body: { success: false, message: REJECTED } };
         }
         if (user.isActive === false) {

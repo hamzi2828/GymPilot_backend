@@ -17,6 +17,7 @@ const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
+const { passwordMatches } = require('../services/passwordCheck');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -498,6 +499,11 @@ const userController = {
             const user = await User.findById(req.params.id);
             if (!user) return res.status(404).json({ message: 'User not found' });
 
+            // The same line as choosing one (services/adminPasswords.js).
+            const { usernameRefusal } = require('../services/adminPasswords');
+            const refusal = await usernameRefusal(req, user);
+            if (refusal) return res.status(403).json({ message: refusal });
+
             const { assignUsername } = require('../services/username');
             const username = await assignUsername(user, { force: true });
             return res.json({ message: 'New username issued', data: { id: String(user._id), username } });
@@ -746,6 +752,9 @@ const userController = {
 
             const user = await User.findOne(filter);
             if (!user) {
+                // The bcrypt work a real account costs, so a name nobody
+                // has is not answered faster (services/passwordCheck.js).
+                await passwordMatches(password, null);
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
 

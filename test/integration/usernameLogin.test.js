@@ -182,6 +182,65 @@ test('a chosen username is letters and digits, unique, and an administrator\'s i
   assert.equal((await set(admin, admin, 'bossada')).statusCode, 200);
 });
 
+test('nobody renames an account that reaches further than their own', async () => {
+  // The set-password rule, for the other half of what a person signs in
+  // with: a receptionist cannot move the manager's username (the phone
+  // app's only sign-in name) out from under them.
+  const desk = await h.inGym(gym, async () =>
+    User.create({ firstName: 'Rae', lastName: 'Renamer', email: 'rae@username.test', role: 'receptionist', password: await bcrypt.hash(PASSWORD, 4), employment: { isStaff: true } })
+  );
+  const before = (await h.inGym(gym, () => User.findById(manager._id).lean())).username;
+
+  const upward = await h.inGym(gym, () => h.call(users.setUsername, { ...as(desk), params: { id: String(manager._id) }, body: { username: 'renamedmax' } }));
+  assert.equal(upward.statusCode, 403, JSON.stringify(upward.body));
+  assert.match(upward.body.message, /more access than yours/);
+  const staffScreen = await h.inGym(gym, () => h.call(staff.setUsername, { ...as(desk), params: { id: String(manager._id) }, body: { username: 'renamedmax' } }));
+  assert.equal(staffScreen.statusCode, 403, JSON.stringify(staffScreen.body));
+  // Nor have a fresh one generated for them, the administrator least of all.
+  for (const target of [manager, admin]) {
+    const regenerated = await h.inGym(gym, () => h.call(users.regenerateUsername, { ...as(desk), params: { id: String(target._id) } }));
+    assert.equal(regenerated.statusCode, 403, JSON.stringify(regenerated.body));
+  }
+  assert.equal((await h.inGym(gym, () => User.findById(manager._id).lean())).username, before);
+
+  // A member's is fine, and so is your own.
+  const down = await h.inGym(gym, () => h.call(users.setUsername, { ...as(desk), params: { id: String(member._id) }, body: { username: 'saramalik1' } }));
+  assert.equal(down.statusCode, 200, JSON.stringify(down.body));
+  const own = await h.inGym(gym, () => h.call(users.setUsername, { ...as(desk), params: { id: String(desk._id) }, body: { username: 'raedesk' } }));
+  assert.equal(own.statusCode, 200, JSON.stringify(own.body));
+});
+
+test('an unknown sign-in name costs the same bcrypt work as a real one', async () => {
+  // Stopping early for a name nobody has answered measurably faster than
+  // checking a real account's password, and generated usernames are a name
+  // plus three digits -- easy to walk through.
+  const desktop = h.src('attendance/controller/desktopAppController');
+  const mobile = h.src('controller/mobileAuthController');
+  const bcryptjs = require('bcryptjs');
+  const original = bcryptjs.compare;
+  let compared = 0;
+  bcryptjs.compare = async (...args) => {
+    compared += 1;
+    return original(...args);
+  };
+  try {
+    const unknown = [
+      () => login({ email: 'nobodyatall999', password: PASSWORD }),
+      () => login({ email: 'nobody@username.test', password: PASSWORD }),
+      () => h.inGym(gym, () => h.call(desktop.login, { body: { email: 'nobodyatall999', password: PASSWORD } })),
+      () => h.call(mobile.login, { body: { username: 'nobodyatall999', password: PASSWORD } })
+    ];
+    for (const attempt of unknown) {
+      const before = compared;
+      const res = await attempt();
+      assert.equal(res.statusCode, 401, JSON.stringify(res.body));
+      assert.equal(compared, before + 1, 'bcrypt ran once, as for a real account');
+    }
+  } finally {
+    bcryptjs.compare = original;
+  }
+});
+
 test('the Staff screen lists usernames and sets them for staff only', async () => {
   const list = await h.inGym(gym, () => h.call(staff.list, { query: {} }));
   assert.equal(list.statusCode, 200);

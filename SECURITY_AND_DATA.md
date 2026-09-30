@@ -37,7 +37,12 @@ of, deactivates, deletes or sets the password of one whose role holds any tab
 at a higher level than their own, or switches on a front-desk grant they lack
 (`src/services/roleGuards.js`, `src/services/adminPasswords.js`). A new
 account's emailed password counts: it goes to whatever address was typed.
-Only an administrator touches an administrator.
+Changing or regenerating somebody's username holds the same line (your own
+is yours to change). Only an administrator touches an administrator.
+
+Signing in with a name nobody has costs the same bcrypt work as a real
+account (`src/services/passwordCheck.js`), so the time an answer takes does
+not say which usernames or addresses exist.
 
 ## Staff pay
 

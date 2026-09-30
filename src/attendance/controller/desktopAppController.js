@@ -27,6 +27,7 @@ const { verifyQrToken } = require('../services/qrToken');
 const { findByCode } = require('../services/peopleDirectory');
 const { tenantKey } = require('../../platform/tenantContext');
 const { loginFilter } = require('../../services/username');
+const { passwordMatches } = require('../../services/passwordCheck');
 
 // The 1:N false-accept target the desktop matcher scales by candidate count.
 // 1-in-100,000 is the DigitalPersona default and what the reference reader
@@ -138,6 +139,9 @@ module.exports = {
       }
 
       if (!user || !user.password || !user.isActive) {
+        // The bcrypt work a real account costs, so a name nobody has is not
+        // answered faster (services/passwordCheck.js).
+        await passwordMatches(password, null);
         noteFailure(key);
         return res.status(401).json({ success: false, message: 'Invalid credentials.' });
       }

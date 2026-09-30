@@ -10,6 +10,7 @@ const SuperAdmin = require('../models/superAdminModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
 const { signPlatformToken, ensureBootstrapSuperAdmin } = require('../middleware/platformAuth');
 const { sendEmail } = require('../../services/emailService');
+const { passwordMatches } = require('../../services/passwordCheck');
 const { shell, paragraph, button, escapeHtml } = require('../../templates/gymEmails');
 
 const MIN_PASSWORD_LENGTH = 10;
@@ -98,7 +99,10 @@ module.exports = {
       await ensureBootstrapSuperAdmin();
 
       const admin = await SuperAdmin.findOne({ email: String(email).toLowerCase().trim() }).select('+password');
-      if (!admin || !admin.isActive || !(await bcrypt.compare(password, admin.password))) {
+      // bcrypt runs whether or not the address has an account, so the time
+      // taken does not say which do (services/passwordCheck.js).
+      const matches = await passwordMatches(password, admin && admin.password);
+      if (!admin || !admin.isActive || !matches) {
         return res.status(401).json({ success: false, message: 'Invalid credentials' });
       }
 

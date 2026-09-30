@@ -13,6 +13,7 @@
 //   passwordProblem   -- the one rule a chosen password must meet
 //   resetProblem      -- who may set whose password (pure, testable)
 //   resetRefusal      -- the same, with the two accounts' access looked up
+//   usernameRefusal   -- the same line for changing somebody's username
 //   applyPassword     -- hash it and end every session the old one opened
 //
 // The password itself is never stored or logged in the clear. A generated
@@ -88,8 +89,17 @@ function resetProblem({ actorId, actorRole, actorPermissions, actorGrants = {}, 
     return 'Change your own password from your account page, where it asks for the current one.';
   }
 
+  return reachProblem({ actorRole, actorPermissions, actorGrants, target, targetPermissions, action: 'set', thing: 'password' });
+}
+
+// The two lines resetProblem holds beyond "not your own", for anything that
+// changes how another account signs in: an administrator's only by an
+// administrator, and nothing on an account whose role holds any tab at a
+// higher level than the actor's, or a front-desk grant the actor lacks.
+// `action` and `thing` word the refusal ("set" its "password").
+function reachProblem({ actorRole, actorPermissions, actorGrants = {}, target, targetPermissions, action, thing }) {
   if (isAdmin(target.role) && !isAdmin(actorRole)) {
-    return "Only an administrator can set an administrator's password.";
+    return `Only an administrator can ${action} an administrator's ${thing}.`;
   }
 
   // An administrator reaches everything already.
@@ -97,11 +107,11 @@ function resetProblem({ actorId, actorRole, actorPermissions, actorGrants = {}, 
 
   const wider = widerTab(actorPermissions, targetPermissions);
   if (wider) {
-    return `This account has more access than yours (${wider}), so ask an administrator to set its password.`;
+    return `This account has more access than yours (${wider}), so ask an administrator to ${action} its ${thing}.`;
   }
 
   if (deskGrantBeyond(actorGrants, target)) {
-    return 'This account can use the front-desk app and yours cannot, so ask an administrator to set its password.';
+    return `This account can use the front-desk app and yours cannot, so ask an administrator to ${action} its ${thing}.`;
   }
 
   return null;
@@ -118,6 +128,19 @@ async function resetRefusal(req, target) {
     target,
     targetPermissions: await permissionsFor(target.role)
   });
+}
+
+/**
+ * The same line for changing somebody's username -- the other half of what
+ * they sign in with, and the phone app's only sign-in name. Unlike a
+ * password, your own username is yours to change from here: knowing it
+ * already, nobody gains anything by it.
+ */
+async function usernameRefusal(req, target) {
+  const { actorAccess, permissionsFor } = require('./roleService');
+  const actor = await actorAccess(req);
+  if (same(actor.actorId, target._id || target.id)) return null;
+  return reachProblem({ ...actor, target, targetPermissions: await permissionsFor(target.role), action: 'change', thing: 'username' });
 }
 
 /**
@@ -236,6 +259,7 @@ module.exports = {
   initialPassword,
   resetProblem,
   resetRefusal,
+  usernameRefusal,
   applyPassword,
   setPasswordHandler
 };
