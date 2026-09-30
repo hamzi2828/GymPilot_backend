@@ -153,6 +153,48 @@ unreadable without a key the store never sees:
   released before it is authenticated, a changed byte anywhere fails, and so
   does a file cut short even at a chunk boundary.
 
+**Restore** (Settings → Data & backup; `src/services/backupRestore.js`),
+from a stored backup or from a file the owner uploads — a `.tar.gz` this gym
+downloaded. Administrators only, every step in the audit log:
+
+1. *Preview* (`POST /api/backups/restore/preview { backupId }`): the whole
+   file is read — decrypted, every chunk authenticated, every count checked
+   against the manifest — and described: the gym it is of, when it was taken,
+   each collection and its record count. Nothing changes.
+2. The owner types the gym's slug (`POST /api/backups/restore { backupId,
+   confirm }`); anything else is `400 CONFIRMATION_MISMATCH`.
+3. A backup of another gym is refused (`409 BACKUP_OTHER_GYM`): its header
+   names the gym by id. An uploaded file is also encrypted with this gym's
+   key, and another gym's stored backups cannot be named at all.
+4. A backup of the gym as it is now is stored (kind `pre-restore`). If it
+   cannot be made, nothing is touched.
+5. Every collection in the file is loaded into a staging collection
+   (`__restoring__<name>`) with its options and indexes, beside the live one.
+   Until the whole file has been read and checked the live data is untouched;
+   any failure drops the staging collections and leaves the gym as it was.
+6. Each staging collection replaces its live one (`renameCollection` with
+   `dropTarget`), and live collections the backup does not have are dropped.
+
+Never touched: the platform's and MongoDB's collections, and the admin audit
+log (`gym_admin_audit_logs`), which keeps its history — a restore must not be
+a way to erase the record of what was done, the restore included. One restore
+per gym at a time (`platform_job_runs`, job `restore`; a lock older than 15
+minutes is taken over). The whole restore runs inside one request, so the
+function's time limit bounds the size of gym it can restore (DEPLOYMENT.md);
+this server's caches are reset afterwards, other instances' expire within a
+minute. Restored accounts keep the `tokenVersion` they had in the backup, so
+sessions issued since may end.
+
+Uploading: Vercel refuses request bodies over 4.5 MB (streaming does not lift
+that), so the file goes from the browser straight to the Blob store with a
+client token good for one path (`POST /api/backups/uploads`, the same
+client-upload mechanism as the admin pages' big images). The store is public
+and the file is the membership in plain text, so the browser encrypts it
+first, in the stored backups' own format, with a key the server derives for
+this gym and that one file; `POST /api/backups/uploads/:id/complete` accepts
+only the exact path granted. Uploads are never listed as backups and are
+removed once restored, or after a day. Largest upload: 500 MB.
+
 **By hand:**
 
     node scripts/backupGym.js --gym <slug> [--out backups]

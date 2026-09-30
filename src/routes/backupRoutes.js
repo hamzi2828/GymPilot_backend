@@ -22,6 +22,10 @@ router.post('/api/backups/download', ...ownerOnly, backupController.download);
 router.get('/api/backups', ...ownerOnly, backupController.list);
 router.post('/api/backups/run', ...ownerOnly, backupController.run);
 router.post('/api/backups/:id/download', ...ownerOnly, backupController.downloadStored);
+router.post('/api/backups/uploads', ...ownerOnly, backupController.grantUpload);
+router.post('/api/backups/uploads/:id/complete', ...ownerOnly, backupController.completeUpload);
+router.post('/api/backups/restore/preview', ...ownerOnly, backupController.previewRestore);
+router.post('/api/backups/restore', ...ownerOnly, backupController.restore);
 
 // The daily backup of every gym, for Vercel Cron (which only sends GET) and
 // anything else holding CRON_SECRET. /api/jobs/* is exempt from the tenant

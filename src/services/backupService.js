@@ -29,8 +29,9 @@
 // What goes in: every collection of the gym's database except MongoDB's own
 // (system.*) and the platform's (gyms, super_admins, platform_*) -- the gym
 // the platform started with shares the platform's database, and its backup
-// must carry neither the other gyms' records nor the super admins. Views are
-// skipped (their definition, not data; none exist today).
+// must carry neither the other gyms' records nor the super admins -- and a
+// restore's leftover staging collections. Views are skipped (their
+// definition, not data; none exist today).
 //
 // Secrets stay sealed. Documents are copied exactly as stored, so the
 // Settings secrets (Stripe, SMTP, messaging) and fingerprint templates are in
@@ -66,9 +67,14 @@ function isPlatformCollection(name) {
 }
 
 /** Whether a listCollections entry belongs in a gym's backup. */
+// A restore loads into collections with this prefix before swapping them in
+// (services/backupRestore.js); one cut off part-way may leave some behind,
+// and they are nobody's data.
+const STAGING_PREFIX = '__restoring__';
+
 function isGymCollection(info) {
   const name = String((info && info.name) || '');
-  if (!name || name.startsWith('system.')) return false;
+  if (!name || name.startsWith('system.') || name.startsWith(STAGING_PREFIX)) return false;
   if (info.type && info.type !== 'collection') return false;
   return !isPlatformCollection(name);
 }
@@ -475,6 +481,7 @@ module.exports = {
   FORMAT,
   VERSION,
   PART_BYTES,
+  STAGING_PREFIX,
   isGymCollection,
   isPlatformCollection,
   tenantDb,

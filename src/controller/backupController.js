@@ -12,6 +12,11 @@
 //   POST /api/backups/run           "Back up now": a stored backup
 //   POST /api/backups/:id/download  a stored backup, decrypted here and
 //                                   streamed as the same .tar.gz
+//   POST /api/backups/uploads       to restore from a file: an upload grant
+//                                   (see below)
+//   POST /api/backups/uploads/:id/complete   the file has arrived
+//   POST /api/backups/restore/preview        what a backup holds (dry run)
+//   POST /api/backups/restore                restore it (services/backupRestore.js)
 //
 // and, for the scheduler rather than a person,
 //
@@ -28,6 +33,17 @@
 // written to the response as it is read (from the database, or from the
 // store through the decryption), so neither the size limit nor the
 // function's memory decides how big a gym can be.
+//
+// Uploading a file to restore from: the same 4.5 MB cap applies to request
+// bodies, and streaming does not lift it. So the file goes from the browser
+// straight to the Blob store, with a client token good for one path -- the
+// mechanism the admin pages use for big images (controller/
+// uploadController.js). But the store is public and the file is the whole
+// membership in plain text, so the browser encrypts it first, in the stored
+// backups' own format (services/backupCrypto.js), with a file key this
+// server derives from BACKUP_ENCRYPTION_KEY for this gym and hands over with
+// the grant. The store only ever holds ciphertext, and the server opens it
+// exactly as it opens any stored backup.
 
 const crypto = require('crypto');
 const { Readable } = require('stream');
@@ -38,7 +54,15 @@ const { currentTenant } = require('../platform/tenantContext');
 const backups = require('../services/backupService');
 const backupCrypto = require('../services/backupCrypto');
 const backupJobs = require('../services/backupJobs');
+const backupRestore = require('../services/backupRestore');
 const storage = require('../services/backupStorage');
+const { ownBlobUrl } = require('../helper/blobUpload');
+
+// The largest file that can be uploaded to restore from. A gym whose
+// compressed backup is bigger than this could not be restored inside one
+// function call anyway.
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+const UPLOAD_FOLDER = 'backups/uploads';
 
 function actorOf(req) {
   return { actorId: (req.user && req.user.id) || null, actorEmail: (req.user && req.user.email) || '', actorRole: req.roleSlug || '' };
@@ -60,19 +84,24 @@ function auditBrokenDownload(req, error) {
 
 function sendError(res, error, fallback) {
   const status = Number(error && error.status) || 500;
-  if (status >= 500) console.error(`[backups] ${fallback}:`, error);
+  const shown = status < 500 || (error && error.expose);
+  if (!shown) console.error(`[backups] ${fallback}:`, error);
   return res.status(status).json({
     success: false,
     code: (error && error.code) || undefined,
-    message: status >= 500 ? fallback : error.message
+    message: shown ? error.message : fallback
   });
 }
 
-function findOwnBackup(id) {
+async function findOwnBackup(id, { ready = true } = {}) {
   if (!/^[a-f0-9]{24}$/i.test(String(id || ''))) return null;
   // The gym is part of the query: another gym's id is simply not found.
-  return PlatformBackup.findOne({ _id: id, gymId: currentTenant()._id }).lean();
+  const filter = { _id: id, gymId: currentTenant()._id };
+  if (ready) filter.status = { $ne: 'pending' };
+  return PlatformBackup.findOne(filter).lean();
 }
+
+const notFound = (res) => res.status(404).json({ success: false, message: 'Backup not found' });
 
 /**
  * Streams `source` to the response as a download named `filename` -- but
@@ -186,7 +215,7 @@ const backupController = {
     let source;
     try {
       entry = await findOwnBackup(req.params.id);
-      if (!entry) return res.status(404).json({ success: false, message: 'Backup not found' });
+      if (!entry || entry.kind === 'upload') return notFound(res);
       if (!backupCrypto.keyConfigured()) {
         return res.status(409).json({ success: false, code: 'BACKUPS_NOT_CONFIGURED', message: 'Backups cannot be opened: BACKUP_ENCRYPTION_KEY is not set on the server.' });
       }
@@ -197,6 +226,96 @@ const backupController = {
     const decrypted = backupCrypto.decryptStream(String(gym._id));
     pipeline(source, decrypted).catch((error) => decrypted.destroy(error));
     return streamDownload(req, res, decrypted, backups.archiveFileName(gym.slug, new Date(entry.takenAt || entry.createdAt)));
+  },
+
+  // POST /api/backups/uploads { size }
+  //
+  // Grants one upload: where it goes, a client token for exactly that path,
+  // and the header and key the browser encrypts the file with.
+  grantUpload: async (req, res) => {
+    try {
+      const state = backupJobs.readiness();
+      if (!state.ready) return res.status(409).json({ success: false, code: 'BACKUPS_NOT_CONFIGURED', message: state.reason });
+      const size = Number(req.body && req.body.size);
+      if (!Number.isFinite(size) || size <= 0) return res.status(400).json({ success: false, message: 'The file is empty.' });
+      if (size > MAX_UPLOAD_BYTES) {
+        return res.status(413).json({ success: false, code: 'FILE_TOO_LARGE', message: `Backups over ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB cannot be uploaded here.` });
+      }
+      const gym = currentTenant();
+      // The encrypted file: the header, the file, and a tag per chunk.
+      const sealedBytes = backupCrypto.HEADER_BYTES + size + (Math.floor(size / backupCrypto.CHUNK_BYTES) + 1) * backupCrypto.TAG_BYTES;
+      const pathname = `${gym.slug}/${UPLOAD_FOLDER}/${crypto.randomBytes(16).toString('hex')}.gpbackup`;
+      const { header, fileKey } = backupCrypto.newFileKey(String(gym._id));
+      const clientToken = await storage.uploadToken(pathname, sealedBytes);
+      const entry = await PlatformBackup.create({
+        gymId: gym._id,
+        gymSlug: gym.slug,
+        kind: 'upload',
+        status: 'pending',
+        pathname,
+        size: sealedBytes,
+        createdBy: { id: String((req.user && req.user.id) || ''), email: String((req.user && req.user.email) || '') }
+      });
+      return res.status(201).json({
+        success: true,
+        data: {
+          uploadId: String(entry._id),
+          pathname,
+          clientToken,
+          header: header.toString('base64'),
+          key: fileKey.toString('base64'),
+          chunkBytes: backupCrypto.CHUNK_BYTES
+        }
+      });
+    } catch (error) {
+      return sendError(res, error, 'The upload could not be started');
+    }
+  },
+
+  // POST /api/backups/uploads/:id/complete { url }
+  completeUpload: async (req, res) => {
+    try {
+      const entry = await findOwnBackup(req.params.id, { ready: false });
+      if (!entry || entry.kind !== 'upload') return notFound(res);
+      const gym = currentTenant();
+      // Only the file this upload was granted: on the store, in this gym's
+      // folder, at exactly the path the token was for.
+      const url = ownBlobUrl(req.body && req.body.url, gym.slug, UPLOAD_FOLDER);
+      if (!url || new URL(url).pathname !== `/${entry.pathname}`) {
+        return res.status(400).json({ success: false, message: 'That is not the file this upload was for.' });
+      }
+      await PlatformBackup.updateOne({ _id: entry._id }, { $set: { url, status: 'ready' } });
+      return res.status(200).json({ success: true, data: { id: String(entry._id) } });
+    } catch (error) {
+      return sendError(res, error, 'The upload could not be finished');
+    }
+  },
+
+  // POST /api/backups/restore/preview { backupId }
+  previewRestore: async (req, res) => {
+    try {
+      const entry = await findOwnBackup(req.body && req.body.backupId);
+      if (!entry) return notFound(res);
+      if (!backupCrypto.keyConfigured()) {
+        return res.status(409).json({ success: false, code: 'BACKUPS_NOT_CONFIGURED', message: 'Backups cannot be opened: BACKUP_ENCRYPTION_KEY is not set on the server.' });
+      }
+      const data = await backupRestore.previewRestore(entry, { actorId: req.user && req.user.id });
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      return sendError(res, error, 'The backup could not be read');
+    }
+  },
+
+  // POST /api/backups/restore { backupId, confirm }
+  restore: async (req, res) => {
+    try {
+      const entry = await findOwnBackup(req.body && req.body.backupId);
+      if (!entry) return notFound(res);
+      const data = await backupRestore.restoreBackup(entry, { confirm: req.body && req.body.confirm, actor: req.user });
+      return res.status(200).json({ success: true, message: 'Restored', data });
+    } catch (error) {
+      return sendError(res, error, 'The restore failed');
+    }
   },
 
   // GET/POST /api/jobs/backups

@@ -44,6 +44,25 @@ async function open(url) {
   return Readable.fromWeb(res.body);
 }
 
+/**
+ * A client token that lets a browser put ONE file, at exactly `pathname`,
+ * of at most `maxBytes`, within the hour -- the same client-upload mechanism
+ * the admin pages use for big images (controller/uploadController.js), for
+ * a backup the owner uploads to restore from. No random suffix: the server
+ * already chose an unguessable name, and must know where the file lands.
+ */
+async function uploadToken(pathname, maxBytes) {
+  const { generateClientTokenFromReadWriteToken } = require('@vercel/blob/client');
+  return generateClientTokenFromReadWriteToken({
+    pathname,
+    maximumSizeInBytes: maxBytes,
+    allowedContentTypes: ['application/octet-stream'],
+    validUntil: Date.now() + 60 * 60 * 1000,
+    addRandomSuffix: false,
+    cacheControlMaxAge: 60
+  });
+}
+
 /** Removes stored files; a file already gone is not an error. */
 async function remove(urls) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
@@ -52,4 +71,4 @@ async function remove(urls) {
   await del(list);
 }
 
-module.exports = { configured, save, open, remove };
+module.exports = { configured, save, open, remove, uploadToken };

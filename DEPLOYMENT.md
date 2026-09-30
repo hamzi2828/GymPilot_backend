@@ -37,7 +37,8 @@ runs with the project's (Vercel → Project → Settings → Functions). Two thi
 run long inside one request: the daily job, which paces itself by
 `DAILY_JOB_BUDGET_MS`, and a self-serve sign-up's webhook, which builds a
 whole gym before it answers. The daily backup paces itself by the same
-budget. Give the function as long as the plan allows and set
+budget, and a restore (Settings → Data & backup) rewrites a whole gym inside
+one request. Give the function as long as the plan allows and set
 `DAILY_JOB_BUDGET_MS` to match.
 
 Everything else the API reads, with its default or an example in `.env.example`:

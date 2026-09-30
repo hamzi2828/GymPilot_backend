@@ -11,7 +11,7 @@
 const mongoose = require('mongoose');
 const { platformModel } = require('../platformDb');
 
-const KINDS = ['daily', 'manual', 'pre-restore'];
+const KINDS = ['daily', 'manual', 'pre-restore', 'upload'];
 
 const platformBackupSchema = new mongoose.Schema(
   {
@@ -21,12 +21,19 @@ const platformBackupSchema = new mongoose.Schema(
     //   daily        the scheduled backup (/api/jobs/backups)
     //   manual       "Back up now" in Settings → Data & backup
     //   pre-restore  taken automatically just before a restore
+    //   upload       a file the owner uploaded to restore from (encrypted by
+    //                the browser for this gym); removed once restored, or a
+    //                day later. Never shown in the list of backups.
     kind: { type: String, enum: KINDS, required: true },
+    // An upload is 'pending' from the moment it is granted until the browser
+    // says it has arrived; everything else is 'ready' from the start.
+    status: { type: String, enum: ['pending', 'ready'], default: 'ready' },
     url: { type: String, default: '' },
     pathname: { type: String, default: '' },
     // Bytes stored (encrypted).
     size: { type: Number, default: 0 },
-    // From the archive's manifest.
+    // From the archive's manifest (an upload's stay empty: nobody has
+    // vouched for them until they are read).
     takenAt: { type: Date, default: null },
     documents: { type: Number, default: 0 },
     collections: {

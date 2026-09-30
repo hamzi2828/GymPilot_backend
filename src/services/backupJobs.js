@@ -116,16 +116,23 @@ async function storeBackup({ kind, actor = null, now = new Date() }) {
   return entry;
 }
 
+// An uploaded file waits this long to be restored from, then goes.
+const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Removes this gym's backups beyond the newest keepCount() of each kind.
- * The list entry goes only once the file is gone from the store, so nothing
- * is ever left in the store unlisted; a file the store cannot remove now is
- * tried again after the next backup.
+ * Removes this gym's backups beyond the newest keepCount() of each kind, and
+ * uploaded files more than a day old (restored or not). The list entry goes
+ * only once the file is gone from the store, so nothing is ever left in the
+ * store unlisted; a file the store cannot remove now is tried again after
+ * the next backup.
  */
-async function prune(gym, { keep = keepCount() } = {}) {
+async function prune(gym, { keep = keepCount(), now = new Date() } = {}) {
   const removed = [];
   for (const kind of PlatformBackup.schema.statics.KINDS) {
-    const old = await PlatformBackup.find({ gymId: gym._id, kind }).sort({ createdAt: -1 }).skip(keep).select('_id url').lean();
+    const old =
+      kind === 'upload'
+        ? await PlatformBackup.find({ gymId: gym._id, kind, createdAt: { $lt: new Date(now.getTime() - UPLOAD_TTL_MS) } }).select('_id url').lean()
+        : await PlatformBackup.find({ gymId: gym._id, kind }).sort({ createdAt: -1 }).skip(keep).select('_id url').lean();
     if (!old.length) continue;
     try {
       await storage.remove(old.map((b) => b.url));
@@ -139,10 +146,16 @@ async function prune(gym, { keep = keepCount() } = {}) {
   return removed;
 }
 
+/** Removes one stored file and its list entry (an upload once restored from). */
+async function removeBackup(entry) {
+  if (entry.url) await storage.remove(entry.url);
+  await PlatformBackup.deleteOne({ _id: entry._id });
+}
+
 /** The gym in context's stored backups, newest first, as the owner sees them. */
 async function listBackups() {
   const gym = currentTenant();
-  const rows = await PlatformBackup.find({ gymId: gym._id }).sort({ createdAt: -1 }).lean();
+  const rows = await PlatformBackup.find({ gymId: gym._id, kind: { $ne: 'upload' } }).sort({ createdAt: -1 }).lean();
   return rows.map(publicBackup);
 }
 
@@ -179,6 +192,7 @@ module.exports = {
   readiness,
   storeBackup,
   prune,
+  removeBackup,
   listBackups,
   publicBackup,
   dailyBackup
