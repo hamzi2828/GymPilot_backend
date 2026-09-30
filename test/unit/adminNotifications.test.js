@@ -20,6 +20,7 @@ const Lead = require('../../src/models/leadModel');
 const LeaveRequest = require('../../src/models/leaveRequestModel');
 const PackageOrder = require('../../src/gymfolio/models/packageOrderModel');
 const PackageRegistration = require('../../src/gymfolio/models/packageRegistrationModel');
+const Asset = require('../../src/accounts/models/assetModel');
 const bell = require('../../src/controller/adminNotificationsController');
 
 const permissionsOf = (slug) => fullPermissionMap(DEFAULT_ROLES.find((role) => role.slug === slug).permissions);
@@ -38,13 +39,15 @@ test('a follow-up is due on or before the gym\'s today, read as the date the inp
 
 test('each role is told only about the tabs it can open', () => {
   assert.deepEqual(keysOf(bell.visibleChecks(allowAll())), [
-    'failed_payments', 'bank_transfers', 'contact_queries', 'registrations', 'lead_follow_ups', 'leave_requests', 'expiring_memberships'
+    'failed_payments', 'bank_transfers', 'contact_queries', 'registrations', 'lead_follow_ups', 'leave_requests', 'expiring_memberships',
+    'asset_services_due', 'asset_warranties_ending'
   ]);
   assert.deepEqual(keysOf(bell.visibleChecks(permissionsOf('receptionist'))), [
     'failed_payments', 'bank_transfers', 'contact_queries', 'registrations', 'lead_follow_ups', 'expiring_memberships'
   ]);
   assert.deepEqual(keysOf(bell.visibleChecks(permissionsOf('accountant'))), [
-    'failed_payments', 'bank_transfers', 'registrations', 'leave_requests', 'expiring_memberships'
+    'failed_payments', 'bank_transfers', 'registrations', 'leave_requests', 'expiring_memberships',
+    'asset_services_due', 'asset_warranties_ending'
   ]);
   assert.deepEqual(keysOf(bell.visibleChecks(permissionsOf('trainer'))), []);
   assert.deepEqual(keysOf(bell.visibleChecks(fullPermissionMap())), []);
@@ -76,7 +79,11 @@ test('each item opens its page filtered to what it counted, where the page can f
     lead_follow_ups: '/admin/leads?due=1',
     leave_requests: '/admin/staff/leave?status=pending',
     // The orders list has no end-date filter yet.
-    expiring_memberships: '/admin/package-orders'
+    expiring_memberships: '/admin/package-orders',
+    // The asset register's own filters (assetController.list), which apply
+    // the same rule (accounts/services/assetReminders.js).
+    asset_services_due: '/admin/accounts?tab=assets&service=due',
+    asset_warranties_ending: '/admin/accounts?tab=assets&warranty=ending'
   });
 });
 
@@ -135,7 +142,14 @@ function stubModels(seen, { failContacts = false } = {}) {
     seen.leave = filter;
     return 1;
   };
+  Asset.countDocuments = async (filter) => {
+    (seen.assets = seen.assets || []).push(filter);
+    return assetCounts(filter);
+  };
 }
+
+// Nothing waiting on the equipment unless a test says otherwise.
+let assetCounts = () => 0;
 
 test('the handler counts what a receptionist may see and leaves out the zeros', async () => {
   await runWithTenant(nextGym(), async () => {
@@ -191,5 +205,34 @@ test('a role with none of the tabs gets an empty bell', async () => {
     const res = respond();
     await bell.list({ roleSlug: 'trainer' }, res);
     assert.deepEqual(res.body, { success: true, data: [], total: 0 });
+  });
+});
+
+test('an accountant is told about equipment services due and warranties ending, counted by the register\'s rule', async () => {
+  await runWithTenant(nextGym(), async () => {
+    const seen = { orders: [] };
+    stubModels(seen);
+    assetCounts = (filter) => (filter.nextServiceDue ? 3 : 2);
+    try {
+      const res = respond();
+      await bell.list({ roleSlug: 'accountant' }, res);
+      assert.equal(res.statusCode, 200);
+      const items = Object.fromEntries(res.body.data.map((item) => [item.key, item]));
+      assert.equal(items.asset_services_due.count, 3);
+      assert.equal(items.asset_services_due.label, 'Equipment services due within 7 days or overdue');
+      assert.equal(items.asset_warranties_ending.count, 2);
+      assert.equal(items.asset_warranties_ending.label, 'Equipment warranties ending within 30 days');
+
+      const [service, warranty] = seen.assets;
+      // Equipment still in use, due inside the week or already overdue.
+      assert.deepEqual(service.status, { $nin: ['retired', 'sold', 'lost'] });
+      assert.equal(service.nextServiceDue.$ne, null);
+      assert.ok(service.nextServiceDue.$lt instanceof Date);
+      // Warranties that have not ended and end inside the month.
+      const window = warranty.warrantyUntil;
+      assert.equal(Math.round((window.$lt - window.$gte) / 86400000), 30);
+    } finally {
+      assetCounts = () => 0;
+    }
   });
 });

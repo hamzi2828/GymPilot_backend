@@ -109,6 +109,33 @@ const CHECKS = [
   }
 ];
 
+// ---- Equipment (the Accounts asset register) ----
+//
+// Kept as a block of its own after the list above. Both are counted by the
+// rule the register's filters use (accounts/services/assetReminders.js), so
+// the number here is the number of rows the link opens on. These are the only
+// place a gym's admins are told about them: nothing is emailed or pushed, and
+// the bell is worked out when it is opened, so it is never a day stale.
+const Asset = require('../accounts/models/assetModel');
+const assetReminders = require('../accounts/services/assetReminders');
+
+CHECKS.push(
+  {
+    key: 'asset_services_due',
+    label: `Equipment services due within ${assetReminders.SERVICE_DUE_WINDOW_DAYS} days or overdue`,
+    tab: 'accounts',
+    href: '/admin/accounts?tab=assets&service=due',
+    count: (now) => Asset.countDocuments(assetReminders.serviceDueQuery(now))
+  },
+  {
+    key: 'asset_warranties_ending',
+    label: `Equipment warranties ending within ${assetReminders.WARRANTY_WINDOW_DAYS} days`,
+    tab: 'accounts',
+    href: '/admin/accounts?tab=assets&warranty=ending',
+    count: (now) => Asset.countDocuments(assetReminders.warrantyEndingQuery(now))
+  }
+);
+
 /** The checks a permission map may see: those whose tab it can view. */
 function visibleChecks(permissions, checks = CHECKS) {
   return checks.filter((check) => grants(permissions, check.tab, 'view'));

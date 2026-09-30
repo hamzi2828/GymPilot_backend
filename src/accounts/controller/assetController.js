@@ -11,9 +11,11 @@ const Asset = require('../models/assetModel');
 const Expense = require('../models/expenseModel');
 const L = require('../services/ledger');
 const categories = require('../services/categories');
+const reminders = require('../services/assetReminders');
 const T = require('../../attendance/services/timeUtils');
 
 const CONDITIONS = ['new', 'good', 'fair', 'poor', 'unusable'];
+const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = ['active', 'maintenance', 'retired', 'sold', 'lost'];
 
 // AST-0042, printed on the sticker that goes on the machine.
@@ -103,6 +105,23 @@ function shape(asset, now = new Date(), heads = null) {
   };
 }
 
+// The purchase dates the register is narrowed to, from ?from= / ?to=. Either
+// end may be left open, and neither given means every date: unlike the money
+// tabs, the register does not default to this month -- a list that hid
+// everything bought before the 1st would look like the gym owned nothing.
+function purchaseRange(query = {}) {
+  let from = DATE_KEY.test(String(query.from || '')) ? String(query.from) : '';
+  let to = DATE_KEY.test(String(query.to || '')) ? String(query.to) : '';
+  if (!from && !to) return null;
+  if (from && to && from > to) [from, to] = [to, from];
+
+  const purchasedOn = {};
+  if (from) purchasedOn.$gte = L.startOfLocalDay(from);
+  if (to) purchasedOn.$lt = L.endOfLocalDay(to);
+  const label = from && to ? L.rangeLabel(from, to) : from ? `From ${T.dateLabelForKey(from)}` : `Up to ${T.dateLabelForKey(to)}`;
+  return { from, to, label, filter: { purchasedOn } };
+}
+
 // A text field from the body, or what is stored when the body leaves it out.
 function text(value, current) {
   return value !== undefined ? String(value || '').trim() : current || '';
@@ -186,17 +205,25 @@ module.exports = {
         filter.$or = [{ name: rx }, { tag: rx }, { supplier: rx }, { serialNumber: rx }, { location: rx }];
       }
 
+      // Bought in a period: the summary above the list and the list agree.
+      const purchased = purchaseRange(req.query);
+      if (purchased) Object.assign(filter, purchased.filter);
+
       let rows = await Asset.find(filter).sort({ createdAt: -1 }).lean();
       const shaped = rows.map((row) => shape(row, now, heads));
 
-      // Applied after shaping because "overdue" is derived, not stored.
+      // Applied after shaping because "overdue" is derived, not stored. 'due'
+      // and the warranty filter are what the admin bell counts and links to
+      // (services/assetReminders.js), read off the stored asset the same way.
       const due = String(req.query.service || 'all');
-      const visible =
-        due === 'overdue'
-          ? shaped.filter((row) => row.service_overdue)
-          : due === 'soon'
-          ? shaped.filter((row) => row.days_to_service !== null && row.days_to_service >= 0 && row.days_to_service <= 30)
-          : shaped;
+      const warranty = String(req.query.warranty || 'all');
+      const visible = shaped.filter((row, i) => {
+        if (due === 'overdue' && !row.service_overdue) return false;
+        if (due === 'soon' && !(row.days_to_service !== null && row.days_to_service >= 0 && row.days_to_service <= 30)) return false;
+        if (due === 'due' && !reminders.isServiceDue(rows[i], now)) return false;
+        if (warranty === 'ending' && !reminders.isWarrantyEnding(rows[i], now)) return false;
+        return true;
+      });
 
       const cost = {};
       const book = {};
@@ -235,6 +262,12 @@ module.exports = {
         archived_categories: heads.archived.map((head) => ({ key: head.key, label: head.label })),
         conditions: CONDITIONS,
         statuses: STATUSES,
+        // The purchase dates asked for, or null for every date.
+        purchased: purchased ? { from: purchased.from, to: purchased.to, label: purchased.label } : null,
+        reminder_windows: {
+          service_due_days: reminders.SERVICE_DUE_WINDOW_DAYS,
+          warranty_days: reminders.WARRANTY_WINDOW_DAYS
+        },
         summary: {
           count: shaped.length,
           units: shaped.reduce((sum, row) => sum + (row.status === 'sold' ? 0 : row.quantity), 0),
@@ -245,6 +278,8 @@ module.exports = {
             (row) => row.days_to_service !== null && row.days_to_service >= 0 && row.days_to_service <= 30
           ).length,
           needs_attention: shaped.filter((row) => ['poor', 'unusable'].includes(row.condition)).length,
+          service_due: rows.filter((row) => reminders.isServiceDue(row, now)).length,
+          warranty_ending: rows.filter((row) => reminders.isWarrantyEnding(row, now)).length,
           by_category: [...byCategory.values()]
             .map((entry) => ({ ...entry, totals: L.presentTotals(entry.totals, base) }))
             .sort((a, b) => b.totals.base_amount - a.totals.base_amount)
