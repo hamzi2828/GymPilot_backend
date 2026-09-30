@@ -35,6 +35,9 @@ const ptSessionSchema = new mongoose.Schema(
     price: { type: Number, default: 0 },
     currency: { type: String, default: '' },
     commission: {
+      // 'percent' of the session's price, or a fixed 'amount' per session
+      // (the trainer's terms when it was completed; ptService.commissionFor).
+      basis: { type: String, enum: ['percent', 'amount'], default: 'percent' },
       percent: { type: Number, default: 0 },
       amount: { type: Number, default: 0 }
     },

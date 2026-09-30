@@ -41,26 +41,21 @@ async function payrollFor(range) {
   // without this join their hours were invisible to payroll and an hourly
   // trainer's wages came out as zero. Trainer.userId is what ties the two
   // records back to one person.
-  const [linkedTrainers, unlinkedTrainerCount] = await Promise.all([
+  const [linkedTrainers, unlinkedTrainers, trainerCurrency] = await Promise.all([
     Trainer.find({ isActive: true, userId: { $ne: null } })
       .select('userId')
       .lean(),
-    // Counted so the screen can say the figure excludes them, rather than
-    // quietly reporting a wage bill that leaves the coaching staff out.
-    Trainer.countDocuments({ isActive: true, userId: null })
+    // Trainers with no staff account are costed at the salary on their
+    // trainer record, in the gym's currency (the one new records are written
+    // in). Those with none set are counted, so the screen can say the figure
+    // leaves them out rather than quietly omitting the coaching staff.
+    Trainer.find({ isActive: true, userId: null })
+      .select('name role +salary +salaryCycle')
+      .lean(),
+    L.recordCurrency()
   ]);
-
-  if (!staff.length) {
-    return {
-      totals: {},
-      salaried: 0,
-      hourly: 0,
-      headcount: 0,
-      hours: 0,
-      people: [],
-      unlinked_trainers: unlinkedTrainerCount
-    };
-  }
+  const salariedTrainers = unlinkedTrainers.filter((trainer) => trainer.salary !== null && trainer.salary !== undefined);
+  const unlinkedTrainerCount = unlinkedTrainers.length - salariedTrainers.length;
 
   const staffIds = new Set(staff.map((person) => String(person._id)));
 
@@ -141,16 +136,35 @@ async function payrollFor(range) {
     });
   }
 
+  // The same pro-rating for a trainer's own salary. 0 is commission only.
+  for (const trainer of salariedTrainers) {
+    const cost = L.salaryForDays(trainer.salary, trainer.salaryCycle, range.from, range.to);
+    if (!cost) continue;
+    salaried += cost;
+    L.addTo(totals, trainerCurrency, cost);
+    people.push({
+      id: String(trainer._id),
+      name: trainer.name,
+      job_title: trainer.role || 'Trainer',
+      basis: 'salaried',
+      currency: trainerCurrency,
+      hours: null,
+      cost: L.round(cost),
+      trainer: true
+    });
+  }
+
   return {
     totals,
     salaried: L.round(salaried),
     hourly: L.round(hourly),
-    headcount: staff.length,
+    headcount: staff.length + salariedTrainers.length,
     hours: Math.round((totalMinutes / 60) * 10) / 10,
     people: people.sort((a, b) => b.cost - a.cost),
-    // Active trainers with no staff account behind them. They punch in and
-    // out like everyone else, but nothing here knows what they are paid, so
-    // they are not in the total above. Surfaced rather than swallowed.
+    // Active trainers with no staff account and no salary on their trainer
+    // record. They punch in and out like everyone else, but nothing here
+    // knows what they are paid, so they are not in the total above.
+    // Surfaced rather than swallowed.
     unlinked_trainers: unlinkedTrainerCount
   };
 }

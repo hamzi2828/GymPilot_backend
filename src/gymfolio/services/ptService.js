@@ -216,14 +216,38 @@ async function cancel(session, { by, reason = '', byStaff = false }) {
   return session;
 }
 
+const isSet = (value) => value !== null && value !== undefined && value !== '';
+
+/**
+ * What a trainer earns per completed session: `{ basis: 'percent', value }`
+ * of what the session was worth, or `{ basis: 'amount', value }` flat. The
+ * trainer's own terms (commissionType / commissionValue), else a percent set
+ * before those existed (commissionPercent), else the gym's default percent.
+ */
+function commissionTerms(trainer, defaultPercent = 0) {
+  if (trainer && ['percent', 'amount'].includes(trainer.commissionType) && isSet(trainer.commissionValue)) {
+    return { basis: trainer.commissionType, value: Number(trainer.commissionValue) || 0 };
+  }
+  if (trainer && isSet(trainer.commissionPercent)) return { basis: 'percent', value: Number(trainer.commissionPercent) || 0 };
+  return { basis: 'percent', value: Number(defaultPercent) || 0 };
+}
+
+/** One session's commission under those terms: { basis, percent, amount }. */
+function commissionFor(price, terms) {
+  if (terms.basis === 'amount') return { basis: 'amount', percent: 0, amount: Math.round(terms.value * 100) / 100 };
+  return { basis: 'percent', percent: terms.value, amount: Math.round((Number(price) || 0) * terms.value) / 100 };
+}
+
 /** Marks the session done and works out the trainer's cut. */
 async function complete(session, { by } = {}) {
   if (!['scheduled', 'no_show'].includes(session.status)) throw new PtError(`This session is ${session.status}`, 409);
   const [trainer, rules] = await Promise.all([Trainer.findById(session.trainerId).lean(), ptRules()]);
-  const percent = trainer && trainer.commissionPercent !== null && trainer.commissionPercent !== undefined ? Number(trainer.commissionPercent) : rules.defaultCommissionPercent;
   session.status = 'completed';
   session.completedAt = new Date();
-  session.commission = { percent, amount: Math.round((Number(session.price) || 0) * percent) / 100 };
+  // A fixed amount is paid for the session whatever it was worth -- a free
+  // taster included; a percent is of the pack's per-session value or the
+  // trainer's rate, as before.
+  session.commission = commissionFor(session.price, commissionTerms(trainer, rules.defaultCommissionPercent));
   session.markedBy = by || null;
   await session.save();
   return session;
@@ -233,7 +257,7 @@ async function noShow(session) {
   if (session.status !== 'scheduled') throw new PtError(`This session is ${session.status}`, 409);
   // The credit stays used: the trainer turned up.
   session.status = 'no_show';
-  session.commission = { percent: 0, amount: 0 };
+  session.commission = { basis: 'percent', percent: 0, amount: 0 };
   await session.save();
   return session;
 }
@@ -263,7 +287,35 @@ async function summary(from, to) {
     }
     byTrainer.set(key, entry);
   }
+
+  // Who pays the commission, and on what terms. A trainer linked to a staff
+  // account is paid it on their payslip; one with no staff account never gets
+  // a payslip, so what they have earned is payable by hand -- and says so,
+  // rather than looking as if payroll will take care of it.
+  const [trainers, rules] = await Promise.all([
+    Trainer.find({ _id: { $in: [...byTrainer.keys()].filter(isId) } })
+      .select('userId commissionType commissionValue commissionPercent')
+      .lean(),
+    ptRules()
+  ]);
+  const byId = new Map(trainers.map((trainer) => [String(trainer._id), trainer]));
+  // Payslips are drafted for active staff accounts only (payrollService).
+  const payrolled = new Set(
+    (
+      await User.find({ _id: { $in: trainers.map((trainer) => trainer.userId).filter(Boolean) }, 'employment.isStaff': true, isActive: true })
+        .select('_id')
+        .lean()
+    ).map((user) => String(user._id))
+  );
+  for (const entry of byTrainer.values()) {
+    const trainer = byId.get(entry.trainer_id) || null;
+    entry.value = Math.round(entry.value * 100) / 100;
+    entry.commission = Math.round(entry.commission * 100) / 100;
+    entry.commission_terms = commissionTerms(trainer, rules.defaultCommissionPercent);
+    entry.on_payroll = !!(trainer && trainer.userId && payrolled.has(String(trainer.userId)));
+    entry.paid_by = entry.on_payroll ? 'payslip' : 'direct';
+  }
   return [...byTrainer.values()].sort((a, b) => a.trainer_name.localeCompare(b.trainer_name));
 }
 
-module.exports = { PtError, availability, book, cancel, complete, noShow, summary, ptPackFor, perSessionValue };
+module.exports = { PtError, availability, book, cancel, complete, noShow, summary, ptPackFor, perSessionValue, commissionTerms, commissionFor };
