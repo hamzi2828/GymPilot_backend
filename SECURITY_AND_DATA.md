@@ -82,12 +82,57 @@ fingerprint metadata (not the templates) and enquiries as a JSON download;
 
 ## Backups
 
+**Download.** Settings → **Data & backup** → *Download full backup*
+(`POST /api/backups/download`). Administrators only — `settings` at manage
+*and* the administrator role (`src/routes/backupRoutes.js`) — and every call
+is in the audit log (a POST, so the permission gate records it; a download
+that breaks part-way is recorded by the controller). The archive is made on
+the spot and streamed to the browser as it is read from the database: Vercel
+refuses a function response over 4.5 MB unless it is streamed, and streaming
+is on for every Node.js function, so neither that cap nor the function's
+memory limits how big a gym can be.
+
+**The archive** (`src/services/backupService.js`) is a `.tar.gz` any archive
+tool opens:
+
+* `backup.json` — format, version, the gym (id, slug, name), when, and why
+  (`download`, `daily`, `pre-restore`, `cli`);
+* per collection, `collections/<name>.json` (its options and index
+  definitions), then `collections/<name>.jsonl` — one document per line in
+  canonical Extended JSON, in parts of about 8 MB (`<name>.2.jsonl`, …), each
+  a file `mongoimport` takes as it is;
+* `manifest.json` last, with each collection's document count. A file
+  without it did not finish, and is refused.
+
+Every collection of the gym's database is in it except MongoDB's
+(`system.*`) and the platform's (`gyms`, `super_admins`, `platform_*`): the
+first gym shares the platform's database, and its backup must carry neither
+the other gyms' records nor the super admins. Collections are read one after
+another while the gym runs, so it is not a point-in-time snapshot across
+collections (as `mongodump` without `--oplog`).
+
+**Secrets inside a backup stay sealed.** Documents are copied exactly as
+stored, so the Settings secrets (Stripe, SMTP, SMS/WhatsApp tokens, push
+key) and fingerprint templates are in the archive as ciphertext under this
+deployment's `SETTINGS_ENCRYPTION_KEY` / `FINGERPRINT_ENCRYPTION_KEY`, salted
+with the gym's id; a Settings secret still in plaintext from before sealing
+existed is sealed on its way into the archive. A downloaded backup therefore
+holds no working key, and those values only open again when it is restored
+into the same gym on a deployment with the same keys (otherwise they read as
+empty and are typed in again). Everything else — members' details, health
+answers, password hashes — is in the file as it is in the database: treat a
+downloaded backup as the members' personal data it is.
+
+**By hand:**
+
     node scripts/backupGym.js --gym <slug> [--out backups]
     node scripts/backupGym.js --all
 
-One gzipped JSON-lines file per collection plus a manifest, under
-`backups/<slug>/<timestamp>/`. Restore with `mongoimport --gzip`. Copy the
-folder off the server; schedule it with cron / Task Scheduler / a GitHub Action.
+The same archive, as `backups/<slug>/<slug>-backup-<timestamp>.tar.gz`;
+`--all` also writes `backups/_platform/…` with the platform's own collections,
+which no gym's archive carries. To restore one collection by hand, extract
+the archive and `mongoimport --file collections/<name>.jsonl`. Copy the files
+off the server.
 
 ## Newsletter unsubscribe
 

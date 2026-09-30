@@ -312,6 +312,10 @@ router.delete('/banks/:id/qr-code', auth, requirePermission('settings'), bankCon
 router.post('/settings/test-smtp', auth, requirePermission('settings'), settingsController.testSmtp);
 router.post('/settings/stripe/test', auth, requirePermission('settings', 'manage'), settingsController.testStripe);
 
+// Settings → Data & backup: download, stored backups, restore -- see
+// routes/backupRoutes.js (administrators only).
+router.use(require('./backupRoutes'));
+
 // Hero Slide routes
 router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Public route
 router.get('/hero-slides', auth, requirePermission('hero-slides'), heroSlideController.getAllSlides);

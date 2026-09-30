@@ -117,7 +117,9 @@ online or staff recorded consent under Users.
    answers `self_serve_signup: true` when they are. Until then checkout sends
    a request to **Demo requests** for you to set up.
 4. Schedule backups: `node scripts/backupGym.js --all --out /some/where` (cron
-   or a GitHub Action) and copy the folder off the server.
+   or a GitHub Action) and copy the folder off the server. Each gym's owner
+   can also download the whole gym at any time from Settings → Data & backup
+   (SECURITY_AND_DATA.md → *Backups*).
 
 ## 6. Merging
 
