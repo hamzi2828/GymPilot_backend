@@ -1635,3 +1635,5 @@ const userController = {
 module.exports = userController;
 // For screens that create an account as one step of something larger.
 module.exports.createMemberAccount = createMemberAccount;
+// ...and take it back out again when the larger thing fails.
+module.exports.releaseAccount = releaseAccount;
