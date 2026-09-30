@@ -43,6 +43,22 @@ function dateBucketExpr(field, grain, timezone) {
   return { $dateToString: { format: grain === 'day' ? '%Y-%m-%d' : '%Y-%m', date: field, timezone } };
 }
 
+// Which expense and till rows are in the gym's own currency. The accounts
+// screen reads a row with no currency as the base one (`currency || base`),
+// so this report does too -- otherwise the two nets part company over a
+// blank field.
+function currencyPattern(base) {
+  return new RegExp(`^${String(base).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+}
+
+function inBaseCurrency(base) {
+  return { $or: [{ currency: currencyPattern(base) }, { currency: { $in: [null, ''] } }] };
+}
+
+function notInBaseCurrency(base) {
+  return { currency: { $nin: [null, ''], $not: currencyPattern(base) } };
+}
+
 module.exports = {
   // GET /admin/reports/overview?from=&to=
   overview: async (req, res) => {
@@ -57,7 +73,8 @@ module.exports = {
       // Rows in a currency other than the gym's cannot be added to the base
       // totals (there is no exchange rate here), but they must not vanish
       // either: they are counted so the report can say what it left out.
-      const notBase = { $not: new RegExp(`^${base}$`, 'i') };
+      const notBase = notInBaseCurrency(base);
+      const isBaseCurrency = inBaseCurrency(base);
 
       // Membership money by the accounts rule (ledger.js): every payment in
       // the period, renewals included, and the refunds given in it -- each
@@ -105,27 +122,31 @@ module.exports = {
         ]),
         PackageOrder.countDocuments({ 'payment.status': 'paid', renewedFrom: { $ne: null }, $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } }),
         PackageOrder.countDocuments({ 'payment.status': 'paid', status: 'expired', 'subscription.endDate': { $gte: range.start, $lt: range.end } }),
+        // Expenses by the accounts rule, so the net here is the net there:
+        // PAID expenses, filed under the day they belong to (incurredOn),
+        // whenever the money actually left. Pending ones are totalled on
+        // their own below and never taken off.
         Expense.aggregate([
-          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, currency: new RegExp(`^${base}$`, 'i') } },
-          { $group: { _id: dateBucketExpr('$incurredOn', grain, tz), total: { $sum: '$amount' } } }
+          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, ...isBaseCurrency } },
+          { $group: { _id: { bucket: dateBucketExpr('$incurredOn', grain, tz), paid: { $eq: ['$status', 'paid'] } }, total: { $sum: '$amount' } } }
         ]),
         Sale.aggregate([
-          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: new RegExp(`^${base}$`, 'i') } },
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...isBaseCurrency } },
           { $group: { _id: dateBucketExpr('$paidAt', grain, tz), total: { $sum: '$total' }, n: { $sum: 1 } } }
         ]),
         Sale.aggregate([
-          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: new RegExp(`^${base}$`, 'i') } },
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...isBaseCurrency } },
           { $unwind: '$items' },
           { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, total: { $sum: '$items.total' }, cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unitCost', 0] }] } } } },
           { $sort: { total: -1 } },
           { $limit: 8 }
         ]),
         Expense.aggregate([
-          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, currency: notBase } },
+          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, ...notBase } },
           { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
         ]),
         Sale.aggregate([
-          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: notBase } },
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...notBase } },
           { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
         ])
       ]);
@@ -172,7 +193,8 @@ module.exports = {
       const orders = fill(buckets, revenueRows, (r) => r._id, (r) => r.n);
       const members = fill(buckets, newMembers, (r) => r._id, (r) => r.n);
       const visits = fill(buckets, attendanceRows, (r) => r._id, (r) => r.n);
-      const expenses = fill(buckets, expenseRows, (r) => r._id, (r) => r.total);
+      const expenses = fill(buckets, expenseRows.filter((r) => r._id.paid), (r) => r._id.bucket, (r) => r.total);
+      const pendingExpenses = expenseRows.filter((r) => !r._id.paid).reduce((s, r) => s + r.total, 0);
       const shop = fill(buckets, shopRows, (r) => r._id, (r) => r.total);
       const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${String(h).padStart(2, '0')}:00`, value: 0 }));
       for (const row of hourRows) if (row._id >= 0 && row._id < 24) hours[row._id].value = row.n;
@@ -204,7 +226,9 @@ module.exports = {
           membership_revenue: Math.round((revenueTotal - shopTotal) * 100) / 100,
           shop_revenue: Math.round(shopTotal * 100) / 100,
           shop_sales: shopRows.reduce((s, r) => s + r.n, 0),
+          // Paid expenses; the net is the accounts screen's for the range.
           expenses: Math.round(expenseTotal * 100) / 100,
+          expenses_pending: Math.round(pendingExpenses * 100) / 100,
           net: Math.round((revenueTotal - expenseTotal) * 100) / 100,
           paid_orders: orders.reduce((s, b) => s + b.value, 0),
           new_members: members.reduce((s, b) => s + b.value, 0),
