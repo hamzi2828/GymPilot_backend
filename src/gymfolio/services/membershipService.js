@@ -1349,7 +1349,10 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   const start = new Date(order.subscription.startDate || order.createdAt);
   const end = new Date(order.subscription.endDate);
   const totalDays = Math.max(1, (end - start) / DAY_MS);
-  const remainingDays = Math.max(0, (end - now) / DAY_MS);
+  // A term that has not begun (a renewal queued behind the running one) is
+  // unused throughout -- but no more than throughout: counted from now it
+  // ran past its own length and credited up to twice what it cost.
+  const remainingDays = Math.min(totalDays, Math.max(0, (end - now) / DAY_MS));
   // Only the membership is used up by the day. The admission fee and the
   // trainer's fee inside the total were charged once and are not handed
   // back as unused days -- crediting them made a same-day change nearly

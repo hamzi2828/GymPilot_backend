@@ -130,6 +130,19 @@ test('changing package credits the unused membership only, never the fees sold w
   });
 });
 
+test('changing a renewal that has not started credits what it cost, never more', async () => {
+  await h.inGym(gym, async () => {
+    const first = await service.createManualOrder({ user: await newMember('Queued'), pkg: monthly });
+    // Renewed early: the 40 renewal starts when the running term ends.
+    const renewal = await service.renew(first, {});
+    assert.ok(new Date(renewal.subscription.startDate) > new Date());
+    const { order: changed, credit } = await service.changePackage(renewal, { packageId: gold._id });
+    // Every day of it is unused -- which is all of the 40, not twice it.
+    assert.equal(credit, 40);
+    assert.equal(changed.payment.amount, 20);
+  });
+});
+
 test('a bank transfer from a member who has joined leaves the fee off', async () => {
   await h.inGym(gym, async () => {
     const newcomer = await newMember('Transfer');
