@@ -16,6 +16,7 @@
 // rather than failing, or worse, storing a backup anyone could read.
 
 const PlatformBackup = require('../platform/models/platformBackupModel');
+const PlatformJobRun = require('../platform/models/platformJobRunModel');
 const { currentTenant } = require('../platform/tenantContext');
 const backups = require('./backupService');
 const backupCrypto = require('./backupCrypto');
@@ -176,19 +177,84 @@ function publicBackup(row) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// One run of a job per gym at a time: a row per job and gym in
+// platform_job_runs. It is free when no run ever started, when the last one
+// finished (lastRunAt caught up with lastStartedAt), or when one started so
+// long ago that the function running it must have been stopped. Taking it
+// is one conditional write, so two runs cannot both get it.
+// ---------------------------------------------------------------------------
+
+const LOCK_MS = 15 * 60 * 1000;
+
+/** Takes the gym's lock for `job`; false when a run holds it. */
+async function takeLock(job, gym, now = new Date()) {
+  await PlatformJobRun.updateOne({ job, gymId: gym._id }, { $setOnInsert: { gymSlug: gym.slug, lastStartedAt: null } }, { upsert: true }).catch((error) => {
+    // Two first-ever runs racing to create the row: it exists now.
+    if (!error || error.code !== 11000) throw error;
+  });
+  const taken = await PlatformJobRun.updateOne(
+    {
+      job,
+      gymId: gym._id,
+      $or: [{ lastStartedAt: null }, { lastStartedAt: { $lt: new Date(now.getTime() - LOCK_MS) } }, { $expr: { $gte: ['$lastRunAt', '$lastStartedAt'] } }]
+    },
+    { $set: { gymSlug: gym.slug, lastStartedAt: now } }
+  );
+  return taken.matchedCount > 0;
+}
+
+/** Lets the lock go, recording how the run went. Never throws. */
+function releaseLock(job, gym, outcome, began) {
+  return PlatformJobRun.updateOne(
+    { job, gymId: gym._id },
+    {
+      $set: {
+        lastRunAt: new Date(),
+        lastOutcome: outcome.error ? 'error' : 'ok',
+        lastError: outcome.error ? String(outcome.error.message || outcome.error).slice(0, 500) : '',
+        lastDurationMs: Date.now() - began
+      }
+    }
+  ).catch((error) => console.error(`[backups] could not release the ${job} lock for ${gym.slug}:`, error.message));
+}
+
+function recentDaily(gym, now) {
+  return PlatformBackup.findOne({ gymId: gym._id, kind: 'daily', createdAt: { $gt: new Date(now.getTime() - DAILY_EVERY_MS) } })
+    .select('_id createdAt')
+    .lean();
+}
+
 /**
  * The daily run for one gym (inside its tenant context). Skips, with the
- * reason, a gym that already has today's backup.
+ * reason, a gym that already has today's backup -- or whose backup another
+ * run is making right now. Without that lock, two runs overlapping (a retry
+ * of the cron, two instances) both found no backup from today and both
+ * stored one, so fewer different days were kept.
  */
 async function dailyBackup({ dryRun = false, now = new Date() } = {}) {
   const gym = currentTenant();
-  const recent = await PlatformBackup.findOne({ gymId: gym._id, kind: 'daily', createdAt: { $gt: new Date(now.getTime() - DAILY_EVERY_MS) } })
-    .select('_id createdAt')
-    .lean();
+  const recent = await recentDaily(gym, now);
   if (recent) return { skipped: 'backed up in the last 20 hours', last: recent.createdAt };
   if (dryRun) return { would: 'back up' };
-  const entry = await storeBackup({ kind: 'daily', now });
-  return { backup: String(entry._id), size: entry.size, documents: entry.documents };
+
+  // The lock's own clock is the real one: it has to agree with every other
+  // run's, whatever `now` this one was asked to pretend.
+  const began = Date.now();
+  if (!(await takeLock('daily-backup', gym, new Date(began)))) return { skipped: 'another run is backing this gym up' };
+  const outcome = {};
+  try {
+    // Looked at again under the lock: a run that just finished has made it.
+    const made = await recentDaily(gym, now);
+    if (made) return { skipped: 'backed up in the last 20 hours', last: made.createdAt };
+    const entry = await storeBackup({ kind: 'daily', now });
+    return { backup: String(entry._id), size: entry.size, documents: entry.documents };
+  } catch (error) {
+    outcome.error = error;
+    throw error;
+  } finally {
+    await releaseLock('daily-backup', gym, outcome, began);
+  }
 }
 
 module.exports = {
@@ -199,5 +265,7 @@ module.exports = {
   removeBackup,
   listBackups,
   publicBackup,
+  takeLock,
+  releaseLock,
   dailyBackup
 };

@@ -362,3 +362,21 @@ test('the daily job backs up every active gym once a day and keeps the newest BA
     setEnv({ BACKUP_KEEP_DAILY: undefined });
   }
 });
+
+test('two daily runs overlapping store one backup of a gym, not two', async () => {
+  // A retry of the cron while the first run is still going, or two
+  // instances: both used to find no backup from today and both store one,
+  // so fewer different days were kept.
+  const backupJobs = h.src('services/backupJobs');
+  const raw = h.rawDb(h.PLATFORM_DB).collection('platform_backups');
+  await raw.updateMany({ kind: 'daily', gymSlug: 'backup-gym' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
+  const before = await PlatformBackup.countDocuments({ kind: 'daily', gymSlug: 'backup-gym' });
+
+  const runs = await h.inGym(gym, () => Promise.all([backupJobs.dailyBackup(), backupJobs.dailyBackup()]));
+  assert.equal(runs.filter((run) => run.backup).length, 1, JSON.stringify(runs));
+  assert.equal(await PlatformBackup.countDocuments({ kind: 'daily', gymSlug: 'backup-gym' }), before + 1);
+
+  // The lock is let go: once today's is older than 20 hours, the next run backs up.
+  await raw.updateMany({ kind: 'daily', gymSlug: 'backup-gym' }, [{ $set: { createdAt: { $subtract: ['$createdAt', 21 * 3600 * 1000] } } }]);
+  assert.ok((await h.inGym(gym, () => backupJobs.dailyBackup())).backup);
+});

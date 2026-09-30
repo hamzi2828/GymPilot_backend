@@ -82,7 +82,10 @@ of every active gym (`services/backupJobs.js`, SECURITY_AND_DATA.md →
 first (`platform_job_runs`, job `backups`), `?dryRun=1` and `?gym=<slug>` as
 above. A gym with a daily backup from the last 20 hours is skipped
 (`{ skipped: 'backed up in the last 20 hours' }`), so a retried or repeated
-call makes no second one. After each backup the gym's older ones beyond the
+call makes no second one; a run that overlaps another still backing the gym
+up skips it too (`{ skipped: 'another run is backing this gym up' }`: a
+per-gym lock in `platform_job_runs`, job `daily-backup`, let go after 15
+minutes if its run was cut off). After each backup the gym's older ones beyond the
 newest `BACKUP_KEEP_DAILY` (default 7) of each kind are deleted from the store
 and the list.
 

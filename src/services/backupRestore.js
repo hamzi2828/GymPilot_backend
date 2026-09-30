@@ -35,7 +35,6 @@
 // 'restore', released when done or after 15 minutes).
 
 const { pipeline } = require('stream/promises');
-const PlatformJobRun = require('../platform/models/platformJobRunModel');
 const { currentTenant } = require('../platform/tenantContext');
 const backups = require('./backupService');
 const backupCrypto = require('./backupCrypto');
@@ -45,7 +44,6 @@ const storage = require('./backupStorage');
 const { STAGING_PREFIX } = backups;
 // Kept as they are, whatever the backup holds.
 const KEPT_ON_RESTORE = new Set(['gym_admin_audit_logs']);
-const LOCK_MS = 15 * 60 * 1000;
 
 // An error whose message is meant for the owner, whatever its status.
 function refusal(status, code, message) {
@@ -125,42 +123,12 @@ async function readHeader(entry) {
   }
 }
 
-// The gym's 'restore' row is free when no restore ever started, when the
-// last one finished (lastRunAt caught up with lastStartedAt), or when one
-// started so long ago that the function running it must have been stopped.
-// Taking it is one conditional write, so two restores cannot both get it.
+// The gym's 'restore' row in platform_job_runs (backupJobs.takeLock): two
+// restores cannot both get it, and one cut off lets go after 15 minutes.
 async function acquireLock(gym, now = new Date()) {
-  await PlatformJobRun.updateOne(
-    { job: 'restore', gymId: gym._id },
-    { $setOnInsert: { gymSlug: gym.slug, lastStartedAt: null } },
-    { upsert: true }
-  ).catch((error) => {
-    // Two first-ever restores racing to create the row: it exists now.
-    if (!error || error.code !== 11000) throw error;
-  });
-  const taken = await PlatformJobRun.updateOne(
-    {
-      job: 'restore',
-      gymId: gym._id,
-      $or: [{ lastStartedAt: null }, { lastStartedAt: { $lt: new Date(now.getTime() - LOCK_MS) } }, { $expr: { $gte: ['$lastRunAt', '$lastStartedAt'] } }]
-    },
-    { $set: { gymSlug: gym.slug, lastStartedAt: now } }
-  );
-  if (!taken.matchedCount) throw refusal(409, 'RESTORE_IN_PROGRESS', 'A restore of this gym is already running. Wait for it to finish.');
-}
-
-function releaseLock(gym, outcome, began) {
-  return PlatformJobRun.updateOne(
-    { job: 'restore', gymId: gym._id },
-    {
-      $set: {
-        lastRunAt: new Date(),
-        lastOutcome: outcome.error ? 'error' : 'ok',
-        lastError: outcome.error ? String(outcome.error.message || outcome.error).slice(0, 500) : '',
-        lastDurationMs: Date.now() - began
-      }
-    }
-  ).catch((error) => console.error(`[restore] could not release the lock for ${gym.slug}:`, error.message));
+  if (!(await backupJobs.takeLock('restore', gym, now))) {
+    throw refusal(409, 'RESTORE_IN_PROGRESS', 'A restore of this gym is already running. Wait for it to finish.');
+  }
 }
 
 async function dropStaging(db) {
@@ -412,7 +380,7 @@ async function restoreBackup(entry, { confirm, actor = null, now = new Date() } 
     outcome.error = error;
     throw error;
   } finally {
-    await releaseLock(gym, outcome, began);
+    await backupJobs.releaseLock('restore', gym, outcome, began);
   }
 }
 
