@@ -75,6 +75,17 @@ test('the public site is given the contact details, the description and the link
   });
 });
 
+test("the public site is given the gym's timezone, so every admin page's \"today\" is the gym's day", async () => {
+  const karachi = await h.createGym('settings-karachi-gym', { timezone: 'Asia/Karachi', currency: 'PKR' });
+  await h.inGym(karachi, async () => {
+    const res = await h.call(settings.getPublicSettings, req());
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.ianaTimezone, 'Asia/Karachi');
+    // The same value the Settings screen shows and edits.
+    assert.equal((await get()).body.data.ianaTimezone, 'Asia/Karachi');
+  });
+});
+
 test('saving the whole page back as it was read changes nothing and drops nothing', async () => {
   await h.inGym(gym, async () => {
     const before = (await get()).body.data;

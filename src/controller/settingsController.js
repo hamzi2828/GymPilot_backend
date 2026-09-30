@@ -218,6 +218,11 @@ const settingsController = {
         maps: settings.maps || {},
         openingHours: settings.openingHours || [],
         locale: settings.locale || { language: 'en', direction: 'ltr' },
+        // The gym's timezone, the one the server files days in, so an admin
+        // page's "today" is the gym's day wherever the browser is -- and
+        // readable by every role, unlike GET /settings. Not a secret: the
+        // address and opening hours are already here.
+        ianaTimezone: require('../platform/tenantContext').tenantTimezone(),
         // What the sign-in page may offer. Google needs all three values for
         // the redirect flow to complete, so a half-configured deployment
         // shows no button rather than a button that ends in an error page.
