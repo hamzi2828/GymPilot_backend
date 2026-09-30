@@ -704,7 +704,14 @@ module.exports = {
             still_in: isOpenVisit(row, now),
             no_check_out: missedCheckOut(row, now),
             status: verdict.status,
-            status_label: verdict.label
+            status_label: verdict.label,
+            // When the membership they walked in on runs (or ran) out, for
+            // the board's "Valid to". Null for staff, and for a member with
+            // no dated package.
+            end_date_label:
+              row.personType === 'member' && row.membership && row.membership.endDate
+                ? T.dateLabel(row.membership.endDate)
+                : null
           };
         })
       });

@@ -21,6 +21,12 @@ is a desk token, the same as the Windows app's. Then:
 
 Each punch shows a receipt (package, valid-to, visits this month, status)
 for eight seconds and plays a tone; the "Today" board lists everyone in.
+A member's punch carries `detail.alert` (`punchService.memberAlert`): a
+rising tone when all is well, two level mid tones for a warning (expiring
+soon), a falling low tone for a problem (expired, unpaid, frozen) — then,
+unless the gym has turned the voice off, the kiosk speaks `alert.speech` with
+the browser's speech synthesis: the gym's own words from the attendance
+page's **Desk settings** (`attendance.voice`).
 `X-Tenant-Host` is not needed: the browser's origin selects the gym.
 
 ## The member's QR code

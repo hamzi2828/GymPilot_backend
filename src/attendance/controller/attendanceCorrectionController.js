@@ -24,7 +24,7 @@ const Attendance = require('../models/attendanceModel');
 const Settings = require('../../models/settings');
 const User = require('../../models/user');
 const { fullName } = require('../services/peopleDirectory');
-const { arrivalVerdict, departureVerdict, memberScanOut } = require('../services/punchService');
+const { arrivalVerdict, departureVerdict, attendanceSettings, VOICE_DEFAULTS } = require('../services/punchService');
 const { staffOpenUntil, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 const T = require('../services/timeUtils');
 
@@ -174,6 +174,54 @@ async function saveIfUnchanged(row, where) {
     if (error && error.name === 'DocumentNotFoundError') return false;
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Attendance settings
+// ---------------------------------------------------------------------------
+
+// Long enough for a sentence, short enough that the desk is not reading a
+// paragraph at a queue. The settings schema holds the same ceiling.
+const MAX_VOICE_MESSAGE = 200;
+
+// The settings as the page and the kiosk read them. `voice_defaults` is what a
+// message left blank goes back to, so the page can show it as the placeholder.
+function settingsPayload(current) {
+  const voiceOut = (voice) => ({
+    enabled: voice.enabled !== false,
+    expired_message: voice.expiredMessage,
+    expiring_message: voice.expiringMessage,
+    balance_due_message: voice.balanceDueMessage
+  });
+  return {
+    member_scan_out: current.memberScanOut,
+    voice: voiceOut(current.voice),
+    voice_defaults: voiceOut(VOICE_DEFAULTS)
+  };
+}
+
+// The voice fields of a PUT, checked, as the $set they make. A message sent
+// blank is stored blank and read back as the default (punchService
+// voiceSettings), which is how an office puts a message back as it was.
+function readVoice(voice) {
+  if (!voice || typeof voice !== 'object' || Array.isArray(voice)) {
+    return { error: 'voice must be an object.' };
+  }
+  const set = {};
+  if (voice.enabled !== undefined) {
+    if (typeof voice.enabled !== 'boolean') return { error: 'voice.enabled must be true or false.' };
+    set['attendance.voice.enabled'] = voice.enabled;
+  }
+  for (const key of ['expiredMessage', 'expiringMessage', 'balanceDueMessage']) {
+    if (voice[key] === undefined) continue;
+    if (typeof voice[key] !== 'string') return { error: `voice.${key} must be text.` };
+    const text = voice[key].replace(/\s+/g, ' ').trim();
+    if (text.length > MAX_VOICE_MESSAGE) {
+      return { error: `Keep each spoken message under ${MAX_VOICE_MESSAGE} characters.` };
+    }
+    set[`attendance.voice.${key}`] = text;
+  }
+  return { set };
 }
 
 module.exports = {
@@ -333,15 +381,19 @@ module.exports = {
 
   // -------------------------------------------------------------------------
   // GET /api/attendance/settings
-  // PUT /api/attendance/settings   { memberScanOut: boolean }
+  // PUT /api/attendance/settings   { memberScanOut?: boolean,
+  //                                  voice?: { enabled?, expiredMessage?,
+  //                                            expiringMessage?, balanceDueMessage? } }
   //
-  // Whether members scan on the way out as well as in. Off, every member scan
-  // is a new visit (see punchService). Kept here, beside the screen it
-  // changes, rather than on the general settings page.
+  // Whether members scan on the way out as well as in -- off, every member
+  // scan is a new visit (see punchService) -- and what the desk says out loud
+  // for a member whose fee has run out, is running out or has a balance owing.
+  // Kept here, beside the screen they change, rather than on the general
+  // settings page. A PUT changes only what it sends.
   // -------------------------------------------------------------------------
   settings: async (req, res) => {
     try {
-      return res.json({ success: true, settings: { member_scan_out: await memberScanOut() } });
+      return res.json({ success: true, settings: settingsPayload(await attendanceSettings()) });
     } catch (err) {
       console.error('[attendance] settings read failed:', err);
       return fail(res, 500, 'Could not load the attendance settings.');
@@ -350,17 +402,35 @@ module.exports = {
 
   updateSettings: async (req, res) => {
     try {
-      const value = (req.body || {}).memberScanOut;
-      if (typeof value !== 'boolean') return fail(res, 400, 'memberScanOut must be true or false.');
+      const body = req.body || {};
+      const set = {};
+      const said = [];
+
+      if (body.memberScanOut !== undefined) {
+        if (typeof body.memberScanOut !== 'boolean') return fail(res, 400, 'memberScanOut must be true or false.');
+        set['attendance.memberScanOut'] = body.memberScanOut;
+        said.push(body.memberScanOut ? 'Members now scan in and out.' : 'Members now scan in only.');
+      }
+
+      if (body.voice !== undefined) {
+        const voice = readVoice(body.voice);
+        if (voice.error) return fail(res, 400, voice.error);
+        Object.assign(set, voice.set);
+        if (Object.keys(voice.set).length) said.push('Desk voice saved.');
+      }
+
+      if (!Object.keys(set).length) {
+        return fail(res, 400, 'Nothing to change: send memberScanOut (true or false) or voice.');
+      }
 
       // getSettings() creates the gym's settings row if it has none yet.
       const current = await Settings.getSettings();
-      await Settings.updateOne({ _id: current._id }, { $set: { 'attendance.memberScanOut': value } });
+      await Settings.updateOne({ _id: current._id }, { $set: set });
 
       return res.json({
         success: true,
-        message: value ? 'Members now scan in and out.' : 'Members now scan in only.',
-        settings: { member_scan_out: value }
+        message: said.join(' '),
+        settings: settingsPayload(await attendanceSettings())
       });
     } catch (err) {
       console.error('[attendance] settings update failed:', err);

@@ -45,6 +45,7 @@ function run(method, url) {
 
 const OWN_ROUTES = [
   ['get', '/records'],
+  ['get', '/live'],
   ['get', '/people'],
   ['get', '/person/:personType/:personId'],
   ['patch', '/records/:id'],
@@ -94,6 +95,7 @@ test('the fingerprint routes pass through untouched, to be gated once where they
 test('this router\'s own routes still refuse a request without a token', async () => {
   for (const [method, url] of [
     ['GET', '/records'],
+    ['GET', '/live'],
     ['GET', '/people'],
     ['GET', '/person/member/0000000000000000000000a1'],
     ['PATCH', '/records/0000000000000000000000a1'],

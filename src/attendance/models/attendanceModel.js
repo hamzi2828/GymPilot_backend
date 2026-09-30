@@ -113,7 +113,13 @@ const attendanceSchema = new mongoose.Schema(
         type: String,
         enum: ['active', 'expiring', 'expired', 'none', 'frozen', 'past_due', 'pending', 'suspended', 'cancelled'],
         default: 'none'
-      }
+      },
+      // Money still owed on that package when they walked in (the order's
+      // payment.balanceDue) and the currency it is in. Kept with the visit so
+      // the check-out repeats the check-in's "Balance due", and so the day's
+      // board can say who owed what without re-reading every order.
+      balanceDue: { type: Number, default: 0 },
+      currency: { type: String, default: '' }
     },
 
     // Staff: the rostered shift this punch was judged against, taken from the

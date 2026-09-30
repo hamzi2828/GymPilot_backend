@@ -321,7 +321,18 @@ const settingsSchema = new mongoose.Schema(
       // Members scan on the way out as well as in. Off for a gym where they
       // only scan in: every member scan is then a new visit (see
       // attendance/services/punchService.js).
-      memberScanOut: { type: Boolean, default: true }
+      memberScanOut: { type: Boolean, default: true },
+      // What the front desk and the web kiosk SAY after the alert sound, for
+      // a member whose fee has run out, is about to, or has money owing.
+      // Spoken, not shown: the member hears it from across the counter. A
+      // blank message means the default (punchService VOICE_DEFAULTS); off
+      // leaves only the sound.
+      voice: {
+        enabled: { type: Boolean, default: true },
+        expiredMessage: { type: String, default: 'Fee expired, please renew', trim: true, maxlength: 200 },
+        expiringMessage: { type: String, default: 'Your fee expires soon', trim: true, maxlength: 200 },
+        balanceDueMessage: { type: String, default: 'Please clear your balance', trim: true, maxlength: 200 }
+      }
     },
     // Personal training.
     pt: {

@@ -15,6 +15,7 @@ const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const Settings = require('../../models/settings');
 const { resolvePerson, membershipFor } = require('./peopleDirectory');
 const { OPEN_VISIT_HOURS, openVisitMatch, staffOpenUntil } = require('./staleVisits');
+const { defaultCurrency } = require('../../services/currency');
 const T = require('./timeUtils');
 
 // A finger resting on the reader fires repeatedly, and a member who scans
@@ -392,6 +393,13 @@ async function buildReceipt(record, action, person) {
     // The one line the desk must act on, rendered in red above everything
     // else. Null on a normal visit.
     warning: record.warning || null,
+    // The sound and the words for a recorded member punch (memberAlert);
+    // null for staff and for a repeat scan, which each client handles itself.
+    alert: null,
+    // Money still owed on the member's package when they walked in: never a
+    // reason to refuse the visit, always one to say so (see memberWarning).
+    balance_due: record.personType === 'member' ? balanceDueOf(record) : 0,
+    balance_due_label: record.personType === 'member' ? balanceDueLabel(record) : null,
 
     rows,
     footer: splitLine(record)
@@ -430,15 +438,49 @@ async function alreadyCheckedOut(record, person) {
   };
 }
 
+// What the desk says out loud when a gym has not worded it itself (Settings
+// attendance.voice). Also what a message left blank goes back to, so clearing
+// a field can never leave the desk announcing an empty string.
+const VOICE_DEFAULTS = {
+  enabled: true,
+  expiredMessage: 'Fee expired, please renew',
+  expiringMessage: 'Your fee expires soon',
+  balanceDueMessage: 'Please clear your balance'
+};
+
+const VOICE_MESSAGES = ['expiredMessage', 'expiringMessage', 'balanceDueMessage'];
+
+// The gym's voice settings with every gap filled: a gym that has never saved
+// them (no `voice` on its settings row at all) reads exactly the defaults.
+function voiceSettings(stored) {
+  const voice = stored || {};
+  const out = { enabled: voice.enabled !== false };
+  for (const key of VOICE_MESSAGES) {
+    const text = typeof voice[key] === 'string' ? voice[key].trim() : '';
+    out[key] = text || VOICE_DEFAULTS[key];
+  }
+  return out;
+}
+
+// The gym's attendance settings, read from the settings row every time rather
+// than cached, so a change on the website takes effect at the very next scan
+// on every server.
+async function attendanceSettings() {
+  const settings = await Settings.findOne({ isActive: true }).select('attendance').lean();
+  const attendance = (settings && settings.attendance) || {};
+  return {
+    memberScanOut: attendance.memberScanOut !== false,
+    voice: voiceSettings(attendance.voice)
+  };
+}
+
 // Whether this gym asks members to scan on the way OUT as well as in
 // (Settings attendance.memberScanOut, default yes). Where members only scan
 // in, a member's second scan of the day is their next visit, not the end of
-// the first. Read from the settings row on the one scan that needs it -- a
-// member's scan while a visit is open -- rather than cached, so flipping the
-// setting takes effect at the very next scan on every server.
+// the first. Read on the one scan that needs it -- a member's scan while a
+// visit is open.
 async function memberScanOut() {
-  const settings = await Settings.findOne({ isActive: true }).select('attendance').lean();
-  return !(settings && settings.attendance && settings.attendance.memberScanOut === false);
+  return (await attendanceSettings()).memberScanOut;
 }
 
 // Whether the membership the desk is about to warn about will simply renew:
@@ -472,6 +514,10 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
 
   const now = new Date();
   const context = punchContext(operator, device, method);
+  // The gym's attendance settings, read at most once per scan and only by a
+  // scan that needs them (see attendanceSettings).
+  let settingsRead = null;
+  const gymSettings = () => settingsRead || (settingsRead = attendanceSettings());
 
   // An open visit is the whole state machine: if one exists this scan closes
   // it, otherwise this scan opens a new one. Found by checkOutAt and the
@@ -511,7 +557,7 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   // visit -- no check-out time and no duration invented -- which also gives
   // up its one-open-visit slot for the check-in below. Conditional, so a
   // visit another desk has just closed is left as that desk left it.
-  if (openRecord && personType === 'member' && !(await memberScanOut())) {
+  if (openRecord && personType === 'member' && !(await gymSettings()).memberScanOut) {
     await Attendance.updateOne(
       { _id: openRecord._id, checkOutAt: null, autoClosed: { $ne: true } },
       { $set: { autoClosed: true, autoClosedAt: now }, $unset: { open: '' } }
@@ -557,7 +603,8 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     }
 
     const detail = await buildReceipt(openRecord, 'check_out', person);
-    detail.warning = personType === 'member' ? membershipWarningFor(openRecord) : null;
+    detail.warning = personType === 'member' ? memberWarning(openRecord) : null;
+    detail.alert = personType === 'member' ? memberAlert(openRecord, (await gymSettings()).voice) : null;
 
     return {
       success: true,
@@ -587,11 +634,16 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     const membership = await membershipFor(person.record);
     const verdict = membershipVerdict({ ...membership, autoRenews: await autoRenews(membership) });
 
+    const balanceDue = Number(membership.balanceDue ?? 0) > 0 ? Number(membership.balanceDue) : 0;
     record.membership = {
       orderId: membership.orderId,
       packageName: membership.packageName,
       endDate: membership.endDate,
-      status: membership.status
+      status: membership.status,
+      balanceDue,
+      // The order's own currency; the gym's only when the order names none
+      // and there is money to put a currency on.
+      currency: membership.currency || (balanceDue > 0 ? await defaultCurrency() : '')
     };
     record.status = verdict.status;
     record.statusLabel = verdict.label;
@@ -635,7 +687,8 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   }
 
   const detail = await buildReceipt(record, 'check_in', person);
-  detail.warning = personType === 'member' ? membershipWarningFor(record) : null;
+  detail.warning = personType === 'member' ? memberWarning(record) : null;
+  detail.alert = personType === 'member' ? memberAlert(record, (await gymSettings()).voice) : null;
 
   return {
     success: true,
@@ -673,6 +726,127 @@ function membershipWarningFor(record) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The alert: what the desk and the kiosk play and say
+// ---------------------------------------------------------------------------
+
+// Membership verdicts the desk has to act on before the member trains:
+// nothing paid and in date (expired, none, cancelled and run out), money
+// that has not arrived (past due, pending), or a membership on hold (frozen,
+// suspended). They share one sound, distinct from "expiring".
+const PROBLEM_VERDICTS = new Set([
+  'membership_expired',
+  'membership_none',
+  'membership_frozen',
+  'membership_past_due',
+  'membership_pending',
+  'membership_suspended'
+]);
+
+// The problems the gym's "fee expired" message is true of. Frozen, suspended
+// and pending get the sound but no words: the member has paid, or it is the
+// manager's call, and telling them to renew would be wrong.
+const SAY_EXPIRED = new Set(['membership_expired', 'membership_none', 'membership_past_due', 'membership_cancelled']);
+
+function joinSpeech(parts) {
+  const said = parts.filter(Boolean).map((part) => String(part).trim()).filter(Boolean);
+  if (!said.length) return null;
+  if (said.length === 1) return said[0];
+  // Two messages are two sentences, so the voice pauses between them.
+  return said.map((part) => (/[.!?]$/.test(part) ? part : part + '.')).join(' ');
+}
+
+/**
+ * The sound and the words for a member's punch, from the verdict stored on
+ * the visit -- so the check-out repeats what the check-in said, as the
+ * warning does (membershipWarningFor):
+ *
+ *   level    'ok' | 'warning' | 'problem' -- which of the three sounds
+ *   speech   the gym's message to speak after it, or null (none applies, or
+ *            the gym has the voice off)
+ *
+ * Decided here, not in each client, so the Windows desk and the web kiosk
+ * cannot disagree about which sound a frozen member gets. Staff have no
+ * membership and no alert (null): each client keeps its own sounds for them.
+ */
+function memberAlert(record, voice) {
+  if (!record || record.personType !== 'member') return null;
+  const settings = voice || VOICE_DEFAULTS;
+  const status = record.status;
+  const end = record.membership && record.membership.endDate;
+  const daysLeft = end ? Math.ceil((new Date(end).getTime() - Date.now()) / 864e5) : 0;
+
+  let level = 'ok';
+  let say = null;
+
+  if (PROBLEM_VERDICTS.has(status) || (status === 'membership_cancelled' && daysLeft <= 0)) {
+    level = 'problem';
+    if (SAY_EXPIRED.has(status)) say = settings.expiredMessage;
+  } else if (status === 'membership_expiring' || status === 'membership_cancelled') {
+    // A cancelled plan with days left is running out the same way.
+    level = 'warning';
+    say = settings.expiringMessage;
+  }
+
+  // Money owing never blocks the visit and is never more than a word -- but
+  // it is at least that, whatever the membership's own state, and it is
+  // said after anything the membership needed saying.
+  let owed = null;
+  if (balanceDueOf(record) > 0) {
+    if (level === 'ok') level = 'warning';
+    owed = settings.balanceDueMessage;
+  }
+
+  return { level, speech: settings.enabled === false ? null : joinSpeech([say, owed]) };
+}
+
+// ---------------------------------------------------------------------------
+// Balance due
+// ---------------------------------------------------------------------------
+
+function balanceDueOf(record) {
+  const due = Number((record && record.membership && record.membership.balanceDue) ?? 0);
+  return Number.isFinite(due) && due > 0 ? due : 0;
+}
+
+// "£40", "PKR 2,500", "$12.50": the gym's money as the office writes it --
+// no pence on a round amount, which is what a desk sale usually leaves owing.
+function moneyLabel(amount, currency) {
+  const code = String(currency || '').toUpperCase();
+  const value = Number(amount) || 0;
+  try {
+    return new Intl.NumberFormat('en-GB', {
+      style: 'currency',
+      currency: code || 'USD',
+      minimumFractionDigits: Number.isInteger(value) ? 0 : 2
+    })
+      .format(value)
+      // "PKR 2,500" comes with a no-break space; the desk and the kiosk want
+      // plain text.
+      .replace(/ /g, ' ');
+  } catch {
+    return `${code} ${value}`.trim();
+  }
+}
+
+// The line the desk shows for money owing, or null when nothing is.
+function balanceDueLabel(record) {
+  const due = balanceDueOf(record);
+  return due > 0 ? `Balance due ${moneyLabel(due, record.membership.currency)}` : null;
+}
+
+// The receipt's one warning line: the membership's, the balance owing, or
+// both. Both have to fit the desk's one-line banner, so the membership's
+// part loses its advice ("— offer a renewal") and the money follows it:
+// "EXPIRES IN 3 DAYS · Balance due £40".
+function memberWarning(record) {
+  const warning = membershipWarningFor(record);
+  const owed = balanceDueLabel(record);
+  if (!owed) return warning;
+  if (!warning) return owed;
+  return `${warning.split(' — ')[0]} · ${owed}`;
+}
+
 // The verdict helpers are exported alongside recordPunch so anything that has
 // to write an attendance row WITHOUT going through a live punch -- the seeder,
 // or a future backfill -- reaches the same verdict this does. Duplicating the
@@ -682,6 +856,13 @@ module.exports = {
   MIN_PUNCH_GAP_SECONDS,
   OPEN_VISIT_HOURS,
   memberScanOut,
+  attendanceSettings,
+  voiceSettings,
+  VOICE_DEFAULTS,
+  memberAlert,
+  memberWarning,
+  balanceDueLabel,
+  moneyLabel,
   membershipVerdict,
   scheduleFor,
   arrivalVerdict,

@@ -673,3 +673,241 @@ test('the desk does not offer a renewal to a member whose subscription renews it
     assert.match(ends.detail.warning, /^EXPIRES IN 3 DAYS/);
   });
 });
+
+// A member with one paid order, `endIn` days from now (negative: ended).
+async function memberWithOrder(name, n, { endIn = 60, orderStatus = 'active', payment = {} } = {}) {
+  const now = new Date();
+  const user = await User.create({ firstName: name, lastName: 'Fixture', email: `${name.toLowerCase()}@attendance.test` });
+  await PackageOrder.create({
+    orderNumber: `ATT-F${n}`,
+    userId: user._id,
+    packageId: new h.state.mongoose.Types.ObjectId(),
+    packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month' },
+    customerInfo: { fullName: `${name} Fixture`, email: user.email },
+    payment: { method: 'cash', amount: 40, currency: 'GBP', status: 'paid', paidAt: now, ...payment },
+    subscription: { startDate: new Date(now.getTime() - 30 * 86400000), endDate: new Date(now.getTime() + endIn * 86400000), isActive: endIn > 0 },
+    status: orderStatus
+  });
+  return user;
+}
+
+const readSettings = () => h.call(corrections.settings, { user: asOperator() });
+const putSettings = (body) => h.call(corrections.updateSettings, { body, user: asOperator() });
+
+test('the desk voice: defaults until the gym words it, saved field by field, blank goes back to the default', async () => {
+  await h.inGym(gym, async () => {
+    const before = await readSettings();
+    assert.equal(before.statusCode, 200, JSON.stringify(before.body));
+    assert.deepEqual(before.body.settings.voice, {
+      enabled: true,
+      expired_message: 'Fee expired, please renew',
+      expiring_message: 'Your fee expires soon',
+      balance_due_message: 'Please clear your balance'
+    });
+    assert.deepEqual(before.body.settings.voice_defaults, before.body.settings.voice);
+
+    const saved = await putSettings({ voice: { enabled: false, expiredMessage: '  Fees due,   see reception ' } });
+    assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.settings.voice.enabled, false);
+    assert.equal(saved.body.settings.voice.expired_message, 'Fees due, see reception');
+    assert.equal(saved.body.settings.voice.expiring_message, 'Your fee expires soon', 'what was not sent is left alone');
+    assert.equal(saved.body.settings.member_scan_out, true, 'and so is the scan-out setting');
+
+    const after = (await readSettings()).body.settings;
+    assert.equal(after.voice.enabled, false);
+    assert.equal(after.voice.expired_message, 'Fees due, see reception');
+
+    const reset = await putSettings({ voice: { enabled: true, expiredMessage: '' } });
+    assert.equal(reset.statusCode, 200, JSON.stringify(reset.body));
+    assert.equal(reset.body.settings.voice.enabled, true);
+    assert.equal(reset.body.settings.voice.expired_message, 'Fee expired, please renew');
+  });
+});
+
+test('the punch says which sound to play and what to say: expired, expiring, fine, staff, and the voice switched off', async () => {
+  await h.inGym(gym, async () => {
+    const lapsed = await memberWithOrder('Lapsed', 1, { endIn: -4 });
+    const ending = await memberWithOrder('Ending', 2, { endIn: 3 });
+    const fine = await memberWithOrder('Fine', 3, { endIn: 40 });
+    const frozen = await memberWithOrder('Frozen', 4, { endIn: 40, orderStatus: 'frozen' });
+
+    const expired = await scan('member', lapsed);
+    assert.equal(expired.action, 'check_in', expired.message);
+    assert.equal(expired.detail.status, 'membership_expired');
+    assert.deepEqual(expired.detail.alert, { level: 'problem', speech: 'Fee expired, please renew' });
+
+    const soon = await scan('member', ending);
+    assert.equal(soon.detail.status, 'membership_expiring');
+    assert.deepEqual(soon.detail.alert, { level: 'warning', speech: 'Your fee expires soon' });
+
+    const ok = await scan('member', fine);
+    assert.deepEqual(ok.detail.alert, { level: 'ok', speech: null });
+
+    // Frozen sounds like a problem, but nobody is told to renew.
+    const paused = await scan('member', frozen);
+    assert.equal(paused.detail.status, 'membership_frozen');
+    assert.deepEqual(paused.detail.alert, { level: 'problem', speech: null });
+
+    // The desk's JSON carries it as-is.
+    const colleague = await User.create({ firstName: 'Col', lastName: 'League', email: 'col@attendance.test', role: 'receptionist', employment: { isStaff: true, jobTitle: 'Reception' } });
+    const staffPunch = await scan('staff', colleague);
+    assert.equal(staffPunch.action, 'check_in', staffPunch.message);
+    assert.equal(staffPunch.detail.alert, null, 'staff have no membership to warn about');
+
+    // The check-out repeats the check-in's alert, as it repeats the warning.
+    await backdate(lapsed._id, 60);
+    const out = await scan('member', lapsed);
+    assert.equal(out.action, 'check_out', out.message);
+    assert.deepEqual(out.detail.alert, { level: 'problem', speech: 'Fee expired, please renew' });
+
+    // A repeat scan is neither: nothing to play.
+    const repeat = await scan('member', lapsed);
+    assert.equal(repeat.ignored, true);
+    assert.equal(repeat.detail.alert, null);
+
+    // The gym's own words, then the voice off: the sound stays, the words go.
+    await putSettings({ voice: { expiringMessage: 'Renew this week please' } });
+    const worded = await scan('member', await memberWithOrder('Ending2', 5, { endIn: 2 }));
+    assert.equal(worded.action, 'check_in', worded.message);
+    assert.deepEqual(worded.detail.alert, { level: 'warning', speech: 'Renew this week please' });
+
+    await putSettings({ voice: { enabled: false } });
+    try {
+      const quiet = await scan('member', await memberWithOrder('Lapsed2', 6, { endIn: -1 }));
+      assert.deepEqual(quiet.detail.alert, { level: 'problem', speech: null });
+    } finally {
+      await putSettings({ voice: { enabled: true, expiringMessage: '' } });
+    }
+  });
+});
+
+// payment.balanceDue arrives with the package-order work (membership
+// module); written straight to the collection here, so these tests hold
+// whether or not this branch's order schema has the field yet.
+async function owe(user, balanceDue, extra = {}) {
+  await PackageOrder.collection.updateOne({ userId: user._id }, { $set: { 'payment.balanceDue': balanceDue, ...extra } });
+}
+
+test('a balance owing: checked in all the same, told "Balance due" in the order\'s currency, with the warning sound and words', async () => {
+  await h.inGym(gym, async () => {
+    const owes = await memberWithOrder('Owes', 11, { endIn: 40 });
+    await owe(owes, 25);
+
+    const inside = await scan('member', owes);
+    assert.equal(inside.success, true, inside.message);
+    assert.equal(inside.action, 'check_in', 'money owing never stops the visit');
+    assert.equal(inside.detail.status, 'membership_active');
+    assert.equal(inside.detail.warning, 'Balance due £25');
+    assert.equal(inside.detail.balance_due, 25);
+    assert.equal(inside.detail.balance_due_label, 'Balance due £25');
+    assert.deepEqual(inside.detail.alert, { level: 'warning', speech: 'Please clear your balance' });
+    assert.equal(inside.record.membership.balanceDue, 25);
+    assert.equal(inside.record.membership.currency, 'GBP');
+
+    // The check-out says it again, from what was owed on the way in.
+    await backdate(owes._id, 60);
+    const out = await scan('member', owes);
+    assert.equal(out.action, 'check_out', out.message);
+    assert.equal(out.detail.warning, 'Balance due £25');
+    assert.deepEqual(out.detail.alert, { level: 'warning', speech: 'Please clear your balance' });
+
+    // Running out AND owing: one line, both said.
+    const both = await memberWithOrder('Both', 12, { endIn: 3 });
+    await owe(both, 12.5);
+    const bothIn = await scan('member', both);
+    assert.equal(bothIn.detail.status, 'membership_expiring');
+    assert.equal(bothIn.detail.warning, 'EXPIRES IN 3 DAYS · Balance due £12.50');
+    assert.deepEqual(bothIn.detail.alert, { level: 'warning', speech: 'Your fee expires soon. Please clear your balance.' });
+
+    // An order that names no currency is in the gym's.
+    const bare = await memberWithOrder('Bare', 13, { endIn: 40 });
+    await owe(bare, 40, { 'payment.currency': '' });
+    const bareIn = await scan('member', bare);
+    assert.equal(bareIn.detail.warning, 'Balance due £40');
+
+    // Nothing owed (0, or an order from before the field) is nothing at all.
+    const clear = await memberWithOrder('Clear', 14, { endIn: 40 });
+    await owe(clear, 0);
+    const clearIn = await scan('member', clear);
+    assert.equal(clearIn.detail.warning, null);
+    assert.equal(clearIn.detail.balance_due, 0);
+    assert.deepEqual(clearIn.detail.alert, { level: 'ok', speech: null });
+  });
+});
+
+test("the office's live view of today: arrival numbers, contacts, package, expiry, paid or not, and the day's counts", async () => {
+  await h.inGym(gym, async () => {
+    const paidUp = await memberWithOrder('Livepaid', 21, { endIn: 40 });
+    const lapsedLive = await memberWithOrder('Livelapsed', 22, { endIn: -2 });
+    const owesLive = await memberWithOrder('Liveowes', 23, { endIn: 40 });
+    await owe(owesLive, 15);
+    await User.updateOne({ _id: paidUp._id }, { $set: { phone: '+44 7700 900123', gender: 'female' } });
+    await User.updateOne({ _id: lapsedLive._id }, { $set: { phone: '+44 7700 900456', gender: 'male' } });
+
+    for (const person of [paidUp, lapsedLive, owesLive]) {
+      const punched = await scan('member', person);
+      assert.equal(punched.action, 'check_in', punched.message);
+    }
+
+    const res = await h.call(admin.live, { query: {}, user: asOperator() });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const { records, counts } = res.body;
+    assert.equal(res.body.today, T.dateKey());
+    assert.ok(res.body.date_label.includes(T.dateLabelForKey(T.dateKey())));
+
+    // Every visit today, newest first, numbered in the order they arrived.
+    const todayRows = await Attendance.countDocuments({ shiftDate: T.dateKey() });
+    assert.equal(records.length, todayRows);
+    assert.equal(counts.visits, todayRows);
+    assert.equal(records[0].number, todayRows, 'the newest arrival is the highest number');
+    const numbers = records.map((r) => r.number);
+    assert.deepEqual(numbers, [...numbers].sort((a, b) => b - a));
+
+    const row = (user) => records.find((r) => r.person_id === String(user._id));
+    const paidRow = row(paidUp);
+    assert.equal(paidRow.name, 'Livepaid Fixture');
+    assert.match(paidRow.code, /^GP-\d{4}$/);
+    assert.equal(paidRow.phone, '+44 7700 900123');
+    assert.equal(paidRow.gender, 'female');
+    assert.equal(paidRow.package_name, 'Monthly');
+    assert.match(paidRow.end_date_label, /^\d{2} [A-Z][a-z]{2} \d{4}$/);
+    assert.ok(paidRow.check_in_time);
+    assert.equal(paidRow.check_out_time, null);
+    assert.equal(paidRow.still_in, true);
+    assert.deepEqual(paidRow.standing, { key: 'paid', label: 'Paid' });
+    assert.equal(paidRow.paid, true);
+
+    const lapsedRow = row(lapsedLive);
+    assert.deepEqual(lapsedRow.standing, { key: 'unpaid', label: 'Unpaid' });
+    assert.equal(lapsedRow.paid, false);
+    assert.equal(lapsedRow.status, 'membership_expired');
+    assert.equal(lapsedRow.number, paidRow.number + 1, 'scanned straight after');
+
+    const owesRow = row(owesLive);
+    assert.deepEqual(owesRow.standing, { key: 'balance_due', label: 'Balance due £15' });
+    assert.equal(owesRow.balance_due, 15);
+    assert.equal(owesRow.paid, true, 'money owing on a running package is still paid');
+
+    // The day's counts: every member once, split paid / unpaid.
+    const members = new Set((await Attendance.find({ shiftDate: T.dateKey(), personType: 'member' }).select('personId').lean()).map((r) => String(r.personId)));
+    assert.equal(counts.members, members.size);
+    assert.equal(counts.paid + counts.unpaid, counts.members);
+    assert.ok(counts.balance_due >= 1);
+    assert.ok(counts.in_now >= 3);
+
+    // Filters narrow the rows, not the counts or the numbers.
+    const found = await h.call(admin.live, { query: { q: '900456' }, user: asOperator() });
+    assert.deepEqual(found.body.records.map((r) => r.person_id), [String(lapsedLive._id)], 'found by phone number');
+    assert.equal(found.body.records[0].number, lapsedRow.number);
+    assert.deepEqual(found.body.counts, counts);
+    const staffOnly = await h.call(admin.live, { query: { personType: 'staff' }, user: asOperator() });
+    assert.ok(staffOnly.body.records.length > 0);
+    assert.ok(staffOnly.body.records.every((r) => r.person_type === 'staff' && r.standing.key === 'staff' && r.package_name === ''));
+
+    // The desk's board carries the expiry too.
+    const board = await h.call(desktop.recent, { body: { limit: 200 } });
+    const boardRow = board.body.entries.find((e) => e.name === 'Livepaid Fixture');
+    assert.equal(boardRow.end_date_label, paidRow.end_date_label);
+    assert.ok(board.body.entries.filter((e) => e.person_type === 'staff').every((e) => e.end_date_label === null));
+  });
+});
