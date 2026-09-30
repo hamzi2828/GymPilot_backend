@@ -1350,7 +1350,17 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   const end = new Date(order.subscription.endDate);
   const totalDays = Math.max(1, (end - start) / DAY_MS);
   const remainingDays = Math.max(0, (end - now) / DAY_MS);
-  const credit = round2((order.payment.amount || 0) * (remainingDays / totalDays));
+  // Only the membership is used up by the day. The admission fee and the
+  // trainer's fee inside the total were charged once and are not handed
+  // back as unused days -- crediting them made a same-day change nearly
+  // free. What was received is allocated as every payment is (fees first,
+  // orderMoney.allocate), so a total cut below the fees credits only the
+  // part that paid for the membership.
+  const membershipPaid = allocate(paidSoFar(order.payment), {
+    joiningFee: order.payment.joiningFee,
+    trainerFee: order.payment.trainerFee
+  }).membership;
+  const credit = round2(membershipPaid * (remainingDays / totalDays));
 
   if (order.payment.stripeSubscriptionId) {
     const stripe = await getStripe();

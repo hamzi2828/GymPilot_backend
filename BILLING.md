@@ -124,8 +124,10 @@ issues the invoice number, redeems the coupon and activates the order.
   order moved on while it was being saved.
 * **Change package** — `POST /package-orders/:id/change-package {packageId}`
   (staff): the unused days of the old package are credited pro rata against
-  the new price; on a Stripe subscription the subscription item is switched
-  and Stripe prorates.
+  the new price -- the membership money received only: the admission fee and
+  the trainer's fee inside the total were charged once and are not credited
+  back. On a Stripe subscription the subscription item is switched and
+  Stripe prorates.
 * **Session packs** — `POST /package-orders/:id/use-session` (staff). The desk
   receipt shows sessions left; an exhausted pack reads as expired.
 * **Billing portal** — `POST /package-orders/:id/billing-portal` returns a
