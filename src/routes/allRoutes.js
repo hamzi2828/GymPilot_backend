@@ -18,6 +18,7 @@ const { uploadSingle, uploadArray, uploadFields, heroUploadFields, videoUploadSi
 
 const {
   loginLimiter,
+  twoFactorLimiter,
   passwordResetLimiter,
   passwordResetConfirmLimiter,
   signupLimiter,
@@ -51,7 +52,7 @@ router.put('/user/change-password', auth, userController.changePassword);
 // ---------------------------------------------------------------------------
 const securityController = require('../controller/securityController');
 // Second sign-in step: the emailed code, exchanged for the token.
-router.post('/user/login/2fa', loginLimiter, securityController.verifyTwoFactor);
+router.post('/user/login/2fa', twoFactorLimiter, securityController.verifyTwoFactor);
 router.put('/user/two-factor', auth, securityController.setMyTwoFactor);
 router.post('/user/logout-all', auth, securityController.logoutAll);
 router.put('/user/consents', auth, securityController.setMyConsent);

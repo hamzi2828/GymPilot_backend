@@ -242,5 +242,9 @@ images 20 MB, member documents 10 MB, CSV imports 5 MB, videos 100 MB
 Sign-in, password reset, sign-up, the desk app's sign-in and the 2FA code
 endpoint are all rate-limited (`src/middleware/rateLimit.js`). Failed
 sign-ins and reset requests are counted per address **and** account (the
-email, username or 2FA challenge typed in), with a looser ceiling per
-address, so members sharing a gym's Wi-Fi do not lock each other out.
+email, username or 2FA challenge typed in, read from the same field, in
+the same order, as the handler behind the route reads it -- so a decoy in
+another field buys no fresh count), with a looser ceiling per address, so
+members sharing a gym's Wi-Fi do not lock each other out. The desk app
+counts its failures per account, whether it was named by email or by
+username. A sign-in name of spaces alone is refused (400), never looked up.

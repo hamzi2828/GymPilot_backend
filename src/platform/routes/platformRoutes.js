@@ -8,7 +8,7 @@ const express = require('express');
 const router = express.Router();
 
 const { platformAuth } = require('../middleware/platformAuth');
-const { loginLimiter, passwordResetLimiter, passwordResetConfirmLimiter, demoRequestLimiter, paymentLimiter } = require('../../middleware/rateLimit');
+const { platformLoginLimiter, twoFactorLimiter, passwordResetLimiter, passwordResetConfirmLimiter, demoRequestLimiter, paymentLimiter } = require('../../middleware/rateLimit');
 const { warmPlatformModels } = require('../models');
 const { platformDatabaseName, tenantDatabasePrefix } = require('../dbNames');
 
@@ -26,8 +26,8 @@ router.use((req, res, next) => {
 });
 
 // Auth
-router.post('/auth/login', loginLimiter, authController.login);
-router.post('/auth/login/2fa', loginLimiter, authController.verifyTwoFactor);
+router.post('/auth/login', platformLoginLimiter, authController.login);
+router.post('/auth/login/2fa', twoFactorLimiter, authController.verifyTwoFactor);
 router.post('/auth/forgot-password', passwordResetLimiter, authController.forgotPassword);
 router.post('/auth/reset-password', passwordResetConfirmLimiter, authController.resetPassword);
 router.get('/auth/me', platformAuth, authController.me);

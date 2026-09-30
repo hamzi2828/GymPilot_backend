@@ -91,6 +91,48 @@ test('wrong details get the same answer whichever way they were typed', async ()
   assert.match(empty.body.message, /Email or username/);
 });
 
+test('a blank sign-in name is refused, never matched to the first account on file', async () => {
+  // Spaces used to pass the "is anything there" check and become an empty
+  // filter, and findOne({}) is the gym's first account -- its owner. Every
+  // account here shares PASSWORD, so a match would sign straight in.
+  for (const body of [{ email: '   ', password: PASSWORD }, { login: ' \t ', password: PASSWORD }, { username: ' ', password: PASSWORD }]) {
+    const res = await login(body);
+    assert.equal(res.statusCode, 400, `${JSON.stringify(body)}: ${JSON.stringify(res.body)}`);
+    assert.equal(res.body.token, undefined);
+  }
+  const desktop = h.src('attendance/controller/desktopAppController');
+  const desk = await h.inGym(gym, () => h.call(desktop.login, { body: { email: '   ', password: PASSWORD } }));
+  assert.equal(desk.statusCode, 400, JSON.stringify(desk.body));
+});
+
+test('the desk counts failed sign-ins per account, however the name is typed', async () => {
+  const desktop = h.src('attendance/controller/desktopAppController');
+  const DesktopToken = h.src('attendance/models/desktopTokenModel');
+  const deskLogin = (body) => h.inGym(gym, () => h.call(desktop.login, { body }));
+  const dee = await h.inGym(gym, async () => {
+    await h.ensureIndexes(DesktopToken);
+    return User.create({ firstName: 'Dee', lastName: 'Desk', email: 'dee@username.test', role: 'receptionist', password: await bcrypt.hash(PASSWORD, 4), allowAttendanceApp: true, employment: { isStaff: true } });
+  });
+
+  // Eight wrong guesses, spread over every way of writing the account...
+  const spellings = ['dee@username.test', ' DEE@username.test ', dee.username, ` ${dee.username.toUpperCase()}`];
+  for (let i = 0; i < 8; i += 1) {
+    const res = await deskLogin({ email: spellings[i % spellings.length], password: `wrong-guess-${i}` });
+    assert.equal(res.statusCode, 401, JSON.stringify(res.body));
+  }
+  // ...and the account is throttled whichever spelling comes next.
+  const next = await deskLogin({ email: dee.username, password: PASSWORD });
+  assert.equal(next.statusCode, 429, JSON.stringify(next.body));
+
+  // Somebody else at the same desk is not.
+  await h.inGym(gym, () => User.updateOne({ _id: manager._id }, { $set: { allowAttendanceApp: true } }));
+  try {
+    assert.equal((await deskLogin({ email: 'max@username.test', password: PASSWORD })).statusCode, 200);
+  } finally {
+    await h.inGym(gym, () => User.updateOne({ _id: manager._id }, { $set: { allowAttendanceApp: false } }));
+  }
+});
+
 test('two-factor still applies when signing in with a username', async () => {
   // The harness stands in for every notification export, the email
   // branding included; the code email needs the gym's name from it.

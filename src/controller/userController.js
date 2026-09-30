@@ -731,14 +731,20 @@ const userController = {
     loginUser: async (req, res) => {
         try {
             const { password } = req.body;
+            // The same fields, in the same order, as the sign-in limiter
+            // counts (middleware/rateLimit.js FIELDS.website).
             const login = req.body.login || req.body.email || req.body.username;
             const remember = wantsRemember(req.body);
-            if (!login || !password) {
+            // Spaces alone make no filter at all, and findOne(null) is the
+            // gym's first account -- its owner -- so they are refused here
+            // rather than looked up.
+            const { loginFilter } = require('../services/username');
+            const filter = loginFilter(login);
+            if (!filter || !password) {
                 return res.status(400).json({ message: 'Email or username and password are required' });
             }
 
-            const { loginFilter } = require('../services/username');
-            const user = await User.findOne(loginFilter(login));
+            const user = await User.findOne(filter);
             if (!user) {
                 return res.status(401).json({ message: 'Invalid credentials' });
             }
