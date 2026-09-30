@@ -171,3 +171,87 @@ test('the accounts overview counts the money received, part payments included', 
     assert.equal(res.body.income.base_amount, 100);
   });
 });
+
+test('daily sales count a desk renewal and a package change as renewals; the ledger rows say which order each renewed', async () => {
+  await h.inGym(gym, async () => {
+    const { dailySales } = h.src('services/dailySales');
+    const T = h.src('attendance/services/timeUtils');
+    const today = L.readRange({ from: T.dateKey(), to: T.dateKey() });
+    const gold = await Package.create({ name: 'Gold', price: '60', currency: 'GBP', period: 'month', features: ['Everything'] });
+    const before = (await dailySales(today)).totals;
+
+    // One member joins and renews at the desk; another joins and moves to Gold.
+    const renewer = await User.create({ firstName: 'Ren', lastName: 'Fees', email: 'ren@fees.test', role: 'user' });
+    const joined = await service.createManualOrder({ user: renewer, pkg: monthly });
+    const renewal = await service.renew(joined, {});
+    const mover = await User.create({ firstName: 'Mo', lastName: 'Fees', email: 'mo@fees.test', role: 'user' });
+    const started = await service.createManualOrder({ user: mover, pkg: monthly });
+    const { order: moved } = await service.changePackage(started, { packageId: gold._id });
+
+    const after = (await dailySales(today)).totals;
+    const change = (column) => Math.round((after[column] - before[column]) * 100) / 100;
+    assert.equal(change('new_signups'), 80, 'the two first memberships');
+    assert.equal(change('admission'), 50);
+    assert.equal(change('renewals'), Math.round((40 + moved.payment.amount) * 100) / 100, 'the renewal and the package change');
+    assert.equal(change('total'), Math.round((65 + 40 + 65 + moved.payment.amount) * 100) / 100);
+
+    const rows = await PackageOrder.aggregate(
+      L.membershipPaymentStages(today, { orderNumber: { $in: [joined.orderNumber, renewal.orderNumber, moved.orderNumber] } })
+    );
+    const renewedFrom = Object.fromEntries(rows.map((r) => [r.orderNumber, r.renewedFrom ? String(r.renewedFrom) : null]));
+    assert.deepEqual(renewedFrom, {
+      [joined.orderNumber]: null,
+      [renewal.orderNumber]: String(joined._id),
+      [moved.orderNumber]: String(started._id)
+    });
+    assert.ok(rows.every((r) => r.kind === 'initial'), 'the kind each payment already had is unchanged');
+  });
+});
+
+test('the fee backfill finds old orders a later save wrote a 0 into, and nothing written since the split', async () => {
+  const { planOrderFees, applyOrderFees } = require('../../scripts/lib/orderFees');
+  await h.inGym(gym, async () => {
+    const Trainer = h.src('gymfolio/models/trainerModel');
+    const old = { createdAt: at('2026-06-10T09:00:00Z') };
+    // Legacy orders: the subtotal is price + fee, the fee never recorded.
+    const untouched = await seed({ amount: 65, payment: { subtotal: 65 }, ...old });
+    const frozen = await seed({ amount: 65, payment: { subtotal: 65 }, ...old });
+    const noFee = await seed({ amount: 40, payment: { subtotal: 40 }, ...old }); // subtotal is the price: not charged
+
+    // Freezing it saves the whole order, and the schema's default goes in
+    // with it: the order now says it carried no admission fee.
+    await service.freeze(await PackageOrder.findById(frozen._id), { days: 7, reason: 'travel' });
+    const saved = await PackageOrder.collection.findOne({ _id: frozen._id });
+    assert.equal(saved.payment.joiningFee, 0, 'a save writes the default');
+
+    // Written since the split: the fee waived, a trainer's fee of the same
+    // 25 on top -- 40 + 25 is the same subtotal, but no fee was charged.
+    const coach = await Trainer.create({ name: 'Coach Backfill', role: 'Coach', isActive: true });
+    const member = await User.create({ firstName: 'Wai', lastName: 'Fees', email: 'wai@fees.test', role: 'user' });
+    const waived = await service.createManualOrder({
+      user: member,
+      pkg: monthly,
+      chargeJoiningFee: false,
+      trainer: { trainerId: coach._id, fee: 25, commissionType: 'percent', commissionValue: 10 }
+    });
+    assert.deepEqual([waived.payment.subtotal, waived.payment.joiningFee, waived.payment.trainerFee], [65, 0, 25]);
+
+    const mine = [untouched, frozen, noFee, waived].map((o) => o.orderNumber);
+    const planned = (plan) => plan.updates.filter((u) => mine.includes(u.order.orderNumber)).map((u) => [u.order.orderNumber, u.fee]).sort();
+    const plan = await planOrderFees();
+    assert.deepEqual(planned(plan), [[untouched.orderNumber, 25], [frozen.orderNumber, 25]].sort());
+
+    assert.ok((await applyOrderFees(plan.updates)) >= 2);
+    for (const o of [untouched, frozen]) {
+      assert.equal((await PackageOrder.collection.findOne({ _id: o._id })).payment.joiningFee, 25, o.orderNumber);
+    }
+    assert.equal((await PackageOrder.collection.findOne({ _id: waived._id })).payment.joiningFee, 0);
+    assert.deepEqual(planned(await planOrderFees()), [], 'run again, nothing left to do');
+
+    // --before narrows the re-saved ones to orders made before that day.
+    const later = await seed({ amount: 65, payment: { subtotal: 65, joiningFee: 0, trainerFee: 0 }, createdAt: at('2026-06-20T09:00:00Z') });
+    const narrowed = await planOrderFees({ before: at('2026-06-15T00:00:00Z') });
+    assert.ok(!narrowed.updates.some((u) => u.order.orderNumber === later.orderNumber));
+    assert.ok((await planOrderFees()).updates.some((u) => u.order.orderNumber === later.orderNumber));
+  });
+});

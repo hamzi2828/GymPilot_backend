@@ -88,3 +88,41 @@ test('order number, name and email still work, and a term matching nobody finds 
     assert.deepEqual(await found('nobody-at-all'), []);
   });
 });
+
+test('the payment-method filter goes by how each payment was made, as the totals do', async () => {
+  await h.inGym(gym, async () => {
+    // Sold for cash, and the rest paid later by JazzCash.
+    const split = order(9, { fullName: 'Split Payer', email: 'split@search.test' });
+    const at = (iso) => new Date(iso);
+    split.createdAt = at('2026-10-05T10:00:00Z');
+    split.payment = {
+      ...split.payment,
+      paidAt: at('2026-10-05T10:00:00Z'),
+      amountPaid: 50,
+      balanceDue: 0,
+      installments: [
+        { amount: 30, joiningFee: 0, trainerFee: 0, method: 'cash', at: at('2026-10-05T10:00:00Z') },
+        { amount: 20, joiningFee: 0, trainerFee: 0, method: 'jazzcash', at: at('2026-10-06T10:00:00Z') }
+      ]
+    };
+    await PackageOrder.collection.insertOne(split);
+
+    const list = async (method) => {
+      const res = await h.call(accounts.sales, { query: { from: '2026-10-01', to: '2026-10-31', ...(method ? { method } : {}) } });
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      const { sales, summary } = res.body;
+      return {
+        rows: sales.map((row) => [row.method, row.amount]),
+        total: summary.base_amount,
+        methods: summary.by_method.map((entry) => [entry.method, entry.totals.base_amount])
+      };
+    };
+
+    const all = await list();
+    assert.deepEqual(all.rows.sort(), [['cash', 30], ['jazzcash', 20]]);
+    assert.equal(all.total, 50);
+
+    assert.deepEqual(await list('jazzcash'), { rows: [['jazzcash', 20]], total: 20, methods: [['jazzcash', 20]] });
+    assert.deepEqual(await list('cash'), { rows: [['cash', 30]], total: 30, methods: [['cash', 30]] });
+  });
+});

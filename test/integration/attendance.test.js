@@ -835,6 +835,37 @@ test('a balance owing: checked in all the same, told "Balance due" in the order\
   });
 });
 
+test('renewed early and paid the renewal in full: still told what is owed on the term before, as the Dues list says', async () => {
+  await h.inGym(gym, async () => {
+    const now = new Date();
+    const early = await memberWithOrder('Earlyrenew', 41, { endIn: 5, payment: { amount: 5000, amountPaid: 3000, balanceDue: 2000 } });
+    await PackageOrder.create({
+      orderNumber: 'ATT-F42',
+      userId: early._id,
+      packageId: new h.state.mongoose.Types.ObjectId(),
+      packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month' },
+      customerInfo: { fullName: 'Earlyrenew Fixture', email: early.email },
+      payment: { method: 'cash', amount: 40, currency: 'GBP', status: 'paid', paidAt: now, amountPaid: 40, balanceDue: 0 },
+      subscription: { startDate: new Date(now.getTime() + 5 * 86400000), endDate: new Date(now.getTime() + 35 * 86400000), isActive: true },
+      status: 'active'
+    });
+
+    // The desk describes the renewal (it runs latest) -- and the money is
+    // owed on the term still running.
+    const inside = await scan('member', early);
+    assert.equal(inside.action, 'check_in', inside.message);
+    assert.equal(inside.detail.status, 'membership_active');
+    assert.equal(inside.detail.balance_due, 2000);
+    assert.equal(inside.record.membership.balanceDue, 2000);
+    assert.equal(inside.record.membership.currency, 'GBP');
+
+    // The office's page of members is answered the same way (membershipsFor).
+    const { membershipsFor } = h.src('attendance/services/peopleDirectory');
+    const index = await membershipsFor([await User.findById(early._id).lean()]);
+    assert.equal(index.get(String(early._id)).balanceDue, 2000);
+  });
+});
+
 test("the office's live view of today: arrival numbers, contacts, package, expiry, paid or not, and the day's counts", async () => {
   await h.inGym(gym, async () => {
     const paidUp = await memberWithOrder('Livepaid', 21, { endIn: 40 });

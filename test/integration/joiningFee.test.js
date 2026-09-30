@@ -106,6 +106,43 @@ test('renewing at the desk and changing package never charge it again', async ()
   });
 });
 
+test('changing package credits the unused membership only, never the fees sold with it', async () => {
+  await h.inGym(gym, async () => {
+    const Trainer = h.src('gymfolio/models/trainerModel');
+    const coach = await Trainer.create({ name: 'Coach Switch', role: 'Coach', isActive: true });
+    const trainer = { trainerId: coach._id, fee: 50, commissionType: 'percent', commissionValue: 10 };
+    const round2 = (n) => Math.round(n * 100) / 100;
+
+    // 40 membership + 25 admission + 50 trainer, changed the same day: the
+    // unused days are nearly all of the 40, and none of the 75 in fees.
+    const first = await service.createManualOrder({ user: await newMember('Switcher'), pkg: monthly, trainer });
+    assert.equal(first.payment.amount, 115);
+    const { order: changed, credit } = await service.changePackage(first, { packageId: gold._id });
+    assert.ok(credit > 39.9 && credit <= 40, `credit ${credit} is for the membership's 40 only`);
+    assert.equal(changed.payment.amount, round2(60 - credit));
+
+    // Charged 90 instead of 115: the fees are settled first, so 15 of it
+    // paid for the membership -- and that is all there is to credit.
+    const cut = await service.createManualOrder({ user: await newMember('Cutprice'), pkg: monthly, trainer, amountOverride: 90 });
+    assert.deepEqual([cut.payment.joiningFee, cut.payment.trainerFee], [25, 50]);
+    const moved = await service.changePackage(cut, { packageId: gold._id });
+    assert.ok(moved.credit > 14.9 && moved.credit <= 15, `credit ${moved.credit} is for the 15 paid towards the membership`);
+  });
+});
+
+test('changing a renewal that has not started credits what it cost, never more', async () => {
+  await h.inGym(gym, async () => {
+    const first = await service.createManualOrder({ user: await newMember('Queued'), pkg: monthly });
+    // Renewed early: the 40 renewal starts when the running term ends.
+    const renewal = await service.renew(first, {});
+    assert.ok(new Date(renewal.subscription.startDate) > new Date());
+    const { order: changed, credit } = await service.changePackage(renewal, { packageId: gold._id });
+    // Every day of it is unused -- which is all of the 40, not twice it.
+    assert.equal(credit, 40);
+    assert.equal(changed.payment.amount, 20);
+  });
+});
+
 test('a bank transfer from a member who has joined leaves the fee off', async () => {
   await h.inGym(gym, async () => {
     const newcomer = await newMember('Transfer');

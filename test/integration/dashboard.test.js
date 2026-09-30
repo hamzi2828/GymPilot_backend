@@ -1,5 +1,6 @@
 // The dashboard's "today" figures against a real MongoDB: revenue today
-// (memberships, admission fees and the shop, net of refunds given today),
+// (memberships, admission fees, trainer fees and the shop, net of refunds
+// given today),
 // paid expenses today and this month by the accounts rule, members who
 // joined this month, today's member visits split paid / unpaid from the
 // attendance rows' membership snapshot, and the fees due in the next 7 days.
@@ -7,14 +8,15 @@
 // The gym sits in a zone where it is midday now, so "today" never straddles
 // midnight whenever the suite is run. Seeded:
 //
-//   D-1  paid 30 min ago 120 (admission 20), ends in 3 days   -> today, fees due
+//   D-1  paid 30 min ago 120 (admission 20, trainer 10), ends in 3 days -> today, fees due
 //   D-3  paid 40 days ago 50, refunded in full 10 min ago       -> -50 today
 //   D-4  paid 40 days ago 80, ends in 10 days                  -> outside 7 days
 //   D-5  paid 40 days ago 60, ends in 2 days                   -> fees due
 //   sales: 30 paid today, 15 refunded today, 99 paid 40 days ago
 //   expenses: 25 paid today, 100 pending today, 70 cancelled today, 10 paid 40 days ago
 //
-//   revenue today = 120 - 50 + 30 = 100  (memberships 50, admission 20, shop 30)
+//   revenue today = 120 - 50 + 30 = 100  (memberships 40, admission 20,
+//                                         trainer fees 10, shop 30)
 
 const assert = require('node:assert/strict');
 const h = require('./helpers/harness');
@@ -56,17 +58,18 @@ async function setup() {
   const Attendance = h.src('attendance/models/attendanceModel');
   const User = h.src('models/user');
 
-  // The ledger's payment rows carry `admission` once the membership work
-  // splits the joining fee out of a payment. Stand in for that here -- D-1's
-  // payment included a 20 admission fee -- whatever the stored shape ends up
-  // being, and leave every other row as the ledger reports it. (This file is
-  // its own process, so the stand-in goes no further.)
+  // The ledger's payment rows carry `admission` and `trainerFee`, split
+  // out of a payment. Stand in for that here -- D-1's payment included a 20
+  // admission fee and a 10 trainer's fee -- whatever the stored shape, and
+  // leave every other row as the ledger reports it. (This file is its own
+  // process, so the stand-in goes no further.)
   const originalPaymentStages = L.membershipPaymentStages;
   L.membershipPaymentStages = (...args) => [
     ...originalPaymentStages(...args),
     {
       $addFields: {
-        admission: { $cond: [{ $eq: ['$orderNumber', 'D-1'] }, 20, { $ifNull: ['$admission', 0] }] }
+        admission: { $cond: [{ $eq: ['$orderNumber', 'D-1'] }, 20, { $ifNull: ['$admission', 0] }] },
+        trainerFee: { $cond: [{ $eq: ['$orderNumber', 'D-1'] }, 10, { $ifNull: ['$trainerFee', 0] }] }
       }
     }
   ];
@@ -117,7 +120,9 @@ async function setup() {
     // between two visits (paid), one whose membership ran out between two
     // (unpaid), frozen and cancelled-with-days-left (paid), expired, pending,
     // none and suspended (unpaid), one paid up but still owing 25 and still
-    // inside (paid, and balance due), and one staff punch.
+    // inside (paid, and balance due), one lapsed and owing 30 on an old
+    // order (unpaid, never counted as owing beside the paid), and one staff
+    // punch.
     const today = T.dateKey(now);
     const visit = (personType, personId, status, minutes, { balanceDue, open = false } = {}) => ({
       personType,
@@ -143,7 +148,7 @@ async function setup() {
       visit('member', ranOut, 'expired', 90),
       visit('member', new Types.ObjectId(), 'frozen', 180),
       visit('member', new Types.ObjectId(), 'cancelled', 175),
-      visit('member', new Types.ObjectId(), 'expired', 170),
+      visit('member', new Types.ObjectId(), 'expired', 170, { balanceDue: 30 }),
       visit('member', new Types.ObjectId(), 'pending', 160),
       visit('member', new Types.ObjectId(), 'none', 150),
       visit('member', new Types.ObjectId(), 'suspended', 140),
@@ -153,15 +158,16 @@ async function setup() {
   });
 }
 
-test('dashboard: revenue today is memberships, admission and the shop, net of refunds given today', async () => {
+test('dashboard: revenue today is memberships, admission, trainer fees and the shop, net of refunds given today', async () => {
   await h.inGym(gym, async () => {
     const res = await h.call(dashboard.overview);
     assert.equal(res.statusCode, 200, JSON.stringify(res.body));
     const r = res.body.revenue_today;
     assert.equal(r.base_currency, 'GBP');
     assert.equal(r.base_amount, 100, '120 paid - 50 refunded + 30 shop');
-    assert.equal(r.memberships, 50, 'the payment less its admission fee, less the refund');
+    assert.equal(r.memberships, 40, 'the payment less its admission and trainer fees, less the refund');
     assert.equal(r.admission, 20);
+    assert.equal(r.trainer_fees, 10, 'apart, as Daily sales and the P&L show them');
     assert.equal(r.shop, 30, 'a refunded sale is not takings');
     assert.equal(r.payments, 1);
     assert.equal(r.sales, 1);
@@ -195,7 +201,7 @@ test('dashboard: members in today are split paid and unpaid by their latest visi
     assert.equal(a.member, 9, 'people, not visits');
     assert.equal(a.paid, 4, 'renewed since their first visit, frozen, cancelled with days left, and the one owing money');
     assert.equal(a.unpaid, 5, 'ran out since their first visit, expired, pending, none, suspended');
-    assert.equal(a.balance_due, 1, 'paid, and counted again as owing');
+    assert.equal(a.balance_due, 1, 'paid, and counted again as owing -- the lapsed member owing 30 is unpaid, not "owing" beside the paid');
     assert.equal(a.staff, 1);
     assert.equal(a.still_in, 1);
   });

@@ -115,3 +115,19 @@ test('export columns: the headings, then one per payment method that took money'
   assert.equal(cash.value(report.days[3]), 0);
   assert.equal(columns[0].value(report.totals), 'Total');
 });
+
+test('a desk renewal or a package change is a renewal, though its first payment is the order\'s own', () => {
+  // Renewing at the desk and changing package each make a new order
+  // (renewedFrom set), whose own first payment the ledger calls 'initial';
+  // only Stripe's renewals of one order are 'renewal'.
+  const rows = [
+    { day: D1, kind: 'initial', renewed: true, method: 'cash', currency: 'GBP', amount: 40, admission: 0, trainerFee: 0, membership: 40, n: 1 },
+    { day: D1, kind: 'initial', renewed: false, method: 'cash', currency: 'GBP', amount: 65, admission: 25, trainerFee: 0, membership: 40, n: 1 },
+    // A later part-payment on a renewal is dues, as on any order.
+    { day: D2, kind: 'installment', renewed: true, method: 'cash', currency: 'GBP', amount: 10, admission: 0, trainerFee: 0, membership: 10, n: 1 }
+  ];
+  const sheet = buildDailySales({ from: D1, to: D2, base: 'GBP', payments: rows });
+  assert.deepEqual(pick(sheet.days[0]), { new_signups: 40, renewals: 40, admission: 25, trainer_fees: 0, dues: 0, refunds: 0, pos: 0, total: 105 });
+  assert.equal(sheet.days[1].dues, 10);
+  assert.equal(sheet.days[1].renewals, 0);
+});

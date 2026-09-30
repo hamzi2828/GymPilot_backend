@@ -266,6 +266,32 @@ test('refunding an order paid in part gives back what came in, and clears the ba
   });
 });
 
+test('no payment is taken while the order is being refunded: it would be neither refunded nor owed', async () => {
+  await h.inGym(gym, async () => {
+    const o = (await assign(await member(), { amountPaid: 2000 })).body.data;
+    // A refund under way holds its claim on the order (membershipService.refund).
+    await PackageOrder.collection.updateOne({ _id: new h.state.mongoose.Types.ObjectId(String(o._id)) }, { $set: { 'refund.claimedAt': new Date() } });
+    const res = await pay(o, { amount: 1000 });
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'REFUND_IN_PROGRESS');
+    const fresh = await PackageOrder.findById(o._id).lean();
+    assert.equal(fresh.payment.amountPaid, 2000);
+    assert.equal(fresh.payment.balanceDue, 5000);
+
+    // Claimed after the desk loaded the order: the write itself refuses.
+    const loaded = await PackageOrder.findById(o._id);
+    loaded.refund = undefined;
+    await assert.rejects(service.recordPayment(loaded, { amount: 1000 }), (error) => error.code === 'REFUND_IN_PROGRESS' && error.status === 409);
+
+    // A claim left by a refund that died long ago holds nothing up.
+    await PackageOrder.collection.updateOne(
+      { _id: new h.state.mongoose.Types.ObjectId(String(o._id)) },
+      { $set: { 'refund.claimedAt': new Date(Date.now() - 60 * 60 * 1000) } }
+    );
+    assert.equal((await pay(o, { amount: 1000 })).statusCode, 200);
+  });
+});
+
 test('a package cannot be changed while money is owed on it', async () => {
   await h.inGym(gym, async () => {
     const o = (await assign(await member(), { amountPaid: 2000 })).body.data;

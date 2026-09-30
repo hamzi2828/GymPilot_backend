@@ -124,8 +124,10 @@ issues the invoice number, redeems the coupon and activates the order.
   order moved on while it was being saved.
 * **Change package** — `POST /package-orders/:id/change-package {packageId}`
   (staff): the unused days of the old package are credited pro rata against
-  the new price; on a Stripe subscription the subscription item is switched
-  and Stripe prorates.
+  the new price -- the membership money received only: the admission fee and
+  the trainer's fee inside the total were charged once and are not credited
+  back. On a Stripe subscription the subscription item is switched and
+  Stripe prorates.
 * **Session packs** — `POST /package-orders/:id/use-session` (staff). The desk
   receipt shows sessions left; an exhausted pack reads as expired.
 * **Billing portal** — `POST /package-orders/:id/billing-portal` returns a
@@ -174,6 +176,10 @@ the platform's gym stats all read membership money through — gives every
 payment row `admission`, `trainerFee` and `membership` beside `amount`,
 the payment's own `method`, and `kind` (`initial`, `installment` for later
 parts of an order paid in parts, `renewal` — which carries neither fee).
+`kind: 'renewal'` is Stripe charging one order again; a desk renewal or a
+package change is a new order whose first payment is `initial`, and the row's
+`renewedFrom` (the order it renewed or replaced; `null` for none) is what
+tells it apart — Daily sales files those under renewals.
 
 ### Paying in parts
 
@@ -193,7 +199,7 @@ fee, then membership. An order paid in full at once keeps none.
 
 | Route | Permission | Answer |
 |---|---|---|
-| `POST /package-orders/:id/payments { amount, method?, note? }` | package-orders · manage | `{ success, message, data: order }` — money received against the balance, recorded as an installment (the fees still owed first; `method` defaults to the order's). An order paid in part at once gets that first payment as its opening installment. Refused: `400 INVALID_PAYMENT` (not above 0), `400 OVERPAYMENT` (more than the balance), `422 PAYMENT_METHOD_INVALID`, `409 STRIPE_BILLED` (the order goes through Stripe), `409 NOT_PAID` (pending or refunded), `409 NO_BALANCE`, `409 BALANCE_CHANGED` (somebody recorded a payment at the same moment: one conditional write on the balance it started from). |
+| `POST /package-orders/:id/payments { amount, method?, note? }` | package-orders · manage | `{ success, message, data: order }` — money received against the balance, recorded as an installment (the fees still owed first; `method` defaults to the order's). An order paid in part at once gets that first payment as its opening installment. Refused: `400 INVALID_PAYMENT` (not above 0), `400 OVERPAYMENT` (more than the balance), `422 PAYMENT_METHOD_INVALID`, `409 STRIPE_BILLED` (the order goes through Stripe), `409 NOT_PAID` (pending or refunded), `409 NO_BALANCE`, `409 REFUND_IN_PROGRESS` (a refund of the order is under way: it gives back what had come in when it started and clears the balance, so a payment taken meanwhile would be neither refunded nor owed), `409 BALANCE_CHANGED` (somebody recorded a payment at the same moment: one conditional write on the balance it started from). |
 | `GET /package-orders/dues?search=&page=&limit=` | package-orders · view | `{ success, data: [{ memberId, name, phone, email, gender, memberCode, currency, balanceDue, orders: [{ orderId, orderNumber, packageName, status, amount, amountPaid, balanceDue, startDate, endDate, lastPaidAt }] }], totals: [{ currency, balanceDue, members, orders }], pagination: { page, limit, total, pages } }` — one row per member and currency with money still owed on a granted order, largest balance first; `limit` at most 200 (default 50). Member fields come from the member's record, else the order's own copy (a guest). |
 | `GET /package-orders?hasDues=1` | package-orders · view | the orders list, only those with a balance due |
 
@@ -209,6 +215,13 @@ did include the fee (subtotal = price + fee), fill it in per gym:
 
     node scripts/backfillOrderFees.js --gym <slug>           # report only
     node scripts/backfillOrderFees.js --gym <slug> --apply   # write it
+
+An old order saved since (frozen, cancelled, updated by a Stripe webhook)
+has the schema's default `0` in the field rather than no field, and is found
+too: one with no trainer's fee and no trainer (trainers were first sold
+after the split, and every order written since records the fee it charged).
+`--before YYYY-MM-DD` — the day the server started recording the fee —
+limits those to orders created before it (`scripts/lib/orderFees.js`).
 
 ## Member lists for the desk — `src/gymfolio/services/membershipLists.js`
 

@@ -103,3 +103,16 @@ test('a membership that had not started yet: counted unpaid, but called "Not sta
   assert.deepEqual(standingOf(visit('pending', 'membership_pending')), { key: 'unpaid', label: 'Unpaid' }, 'a transfer awaited');
   assert.equal(tally([early], () => false).unpaid, 1);
 });
+
+test('balance due is counted among the paid: an unpaid member owing on an old order is unpaid, not "owing"', () => {
+  // The owing count sits beside the paid one ("0 paid (1 owing)" made no
+  // sense), and the status column already ranks a problem above money owed.
+  const rows = [
+    visit('expired', 'membership_expired', { balanceDue: 30 }),
+    visit('none', 'membership_none', { balanceDue: 10 }),
+    visit('frozen', 'membership_frozen', { balanceDue: 25 })
+  ];
+  const counts = tally(rows, () => false);
+  assert.deepEqual([counts.paid, counts.unpaid, counts.balance_due], [1, 2, 1]);
+  assert.equal(tally(rows.slice(0, 2), () => false).balance_due, 0);
+});
