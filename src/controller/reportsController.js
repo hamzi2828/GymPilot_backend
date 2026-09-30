@@ -23,6 +23,7 @@ const { sendCsv } = require('../services/csv');
 const { sendXlsx } = require('../services/xlsx');
 const { countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 const { dailySales, exportColumns: dailySalesColumns } = require('../services/dailySales');
+const { saleLineStages } = require('../services/saleMoney');
 
 const EXPIRING_WINDOW_DAYS = 14;
 const EXPORT_LIMIT = 20000;
@@ -155,10 +156,12 @@ module.exports = {
           { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...isBaseCurrency } },
           { $group: { _id: dateBucketExpr('$paidAt', grain, tz), total: { $sum: '$total' }, n: { $sum: 1 } } }
         ]),
+        // Each product's margin is the till's profit on it (services/saleMoney.js):
+        // its lines' takings less the tax in them and any discount, less cost.
         Sale.aggregate([
           { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...isBaseCurrency } },
-          { $unwind: '$items' },
-          { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, total: { $sum: '$items.total' }, cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unitCost', 0] }] } } } },
+          ...saleLineStages(),
+          { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, total: { $sum: '$items.total' }, profit: { $sum: '$lineProfit' } } },
           { $sort: { total: -1 } },
           { $limit: 8 }
         ]),
@@ -268,7 +271,7 @@ module.exports = {
           lead_conversion_rate: leadTotal ? Math.round((leads.won / leadTotal) * 100) : null
         },
         series: { revenue: revenue.map((b, i) => ({ ...b, value: Math.round((b.value + shop[i].value) * 100) / 100 })), membership_revenue: revenue, shop_revenue: shop, expenses, orders, new_members: members, visits, peak_hours: hours },
-        top_products: topProducts.map((r) => ({ name: r._id || '—', quantity: r.quantity, total: Math.round(r.total * 100) / 100, margin: Math.round((r.total - r.cost) * 100) / 100 })),
+        top_products: topProducts.map((r) => ({ name: r._id || '—', quantity: r.quantity, total: Math.round(r.total * 100) / 100, margin: Math.round(r.profit * 100) / 100 })),
         revenue_by_package: revenueByPackage.map((r) => ({ name: r._id || '—', total: Math.round(r.total * 100) / 100, orders: r.n })),
         other_currencies: otherCurrencies.map((r) => ({ currency: String(r._id || '').toUpperCase(), total: Math.round(r.total * 100) / 100, orders: r.n })),
         // Everything the base-currency totals above had to leave out.

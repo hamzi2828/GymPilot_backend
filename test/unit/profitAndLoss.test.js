@@ -115,6 +115,26 @@ test('the dated items add up to the lines, in the base currency only', () => {
   assert.ok(!r.items.revenue.some((item) => item.amount === 5000), 'the PKR payment is not in the base-currency trend');
 });
 
+test('commission a refund took back comes off trainer commission, dated on the refund', () => {
+  const r = pnl.build({
+    base: 'GBP',
+    extra: {
+      ...extra,
+      membershipCommissionReversals: [
+        { at: at('2026-09-21T10:00:00Z'), amount: 15, currency: 'GBP' },
+        { at: at('2026-09-22T10:00:00Z'), amount: 300, currency: 'PKR' }
+      ]
+    }
+  });
+  const commission = line(r.outflow, 'trainer_commission');
+  assert.equal(commission.memberships.base_amount, 0, '15 accrued, 15 taken back');
+  assert.deepEqual(commission.memberships.by_currency, [{ currency: 'PKR', amount: -300 }]);
+  assert.equal(commission.base_amount, 100, 'the PT commission is untouched');
+  assert.ok(r.items.outflow.some((item) => item.at.getTime() === at('2026-09-21T10:00:00Z').getTime() && item.amount === -15));
+  const sum = (items) => Math.round(items.reduce((total, item) => total + item.amount, 0) * 100) / 100;
+  assert.equal(sum(r.items.outflow), r.total_outflow);
+});
+
 test('nothing recorded is a zero, not a gap', () => {
   const r = pnl.build({ base: 'GBP', extra: {} });
   assert.equal(r.total_revenue, 0);

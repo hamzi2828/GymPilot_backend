@@ -27,6 +27,7 @@ const h = require('./helpers/harness');
 
 let gym;
 let accrualGym;
+let refundGym;
 let PackageOrder;
 let PtSession;
 let Payslip;
@@ -162,6 +163,50 @@ const test = h.suite(async () => {
       order(12, { paidAt: null, amount: 60, status: 'pending', trainerAssignment: assignment(9) })
     ]);
   });
+
+  // Commission given back by refunds, each in the refund's own period:
+  //
+  //   O20  paid 10 Sep 100, commission 20, refunded in full 5 Oct
+  //   O21  paid 12 Sep 100, commission 10, 40 of it refunded 20 Sep
+  //   O22  paid in instalments (60 on 1 Sep, 40 on 15 Sep), commission 30,
+  //        50 of the 100 refunded 2 Oct
+  //
+  //   September  20 + (10 - 4) + 30 = 56;  October  -20 - 15 = -35
+  refundGym = await h.createGym('pnl-refund-gym', { timezone: 'UTC', currency: 'GBP' });
+  await h.inGym(refundGym, async () => {
+    await h.ensureIndexes(PackageOrder);
+    const refunded = (amount, iso) => ({ amount, reason: '', at: at(iso), byUserId: null, stripeRefundId: null });
+    await PackageOrder.collection.insertMany([
+      order(20, {
+        paidAt: at('2026-09-10T10:00:00Z'),
+        amount: 100,
+        status: 'refunded',
+        payment: { amountPaid: 100, balanceDue: 0 },
+        refund: refunded(100, '2026-10-05T10:00:00Z'),
+        trainerAssignment: assignment(20)
+      }),
+      order(21, {
+        paidAt: at('2026-09-12T10:00:00Z'),
+        amount: 100,
+        status: 'refunded',
+        payment: { amountPaid: 100, balanceDue: 0 },
+        refund: refunded(40, '2026-09-20T10:00:00Z'),
+        trainerAssignment: assignment(10)
+      }),
+      order(22, {
+        paidAt: at('2026-09-01T10:00:00Z'),
+        amount: 100,
+        status: 'refunded',
+        payment: { amountPaid: 100, balanceDue: 0 },
+        installments: [
+          { amount: 60, joiningFee: 0, trainerFee: 30, method: 'cash', at: at('2026-09-01T10:00:00Z'), by: null, note: '' },
+          { amount: 40, joiningFee: 0, trainerFee: 0, method: 'cash', at: at('2026-09-15T10:00:00Z'), by: null, note: '' }
+        ],
+        refund: refunded(50, '2026-10-02T10:00:00Z'),
+        trainerAssignment: assignment(30)
+      })
+    ]);
+  });
 });
 
 const september = { from: '2026-09-01', to: '2026-09-30' };
@@ -235,6 +280,27 @@ test('membership commission accrues on the first payment: the first instalment w
     assert.equal(line(aug.body.profit_and_loss.outflow, 'trainer_commission').memberships.base_amount, 12);
     const sep = await h.call(accounts.overview, { query: september });
     assert.equal(line(sep.body.profit_and_loss.outflow, 'trainer_commission').memberships.base_amount, 7, 'not the instalment order again, not the unpaid one');
+  });
+});
+
+test('a refund takes the commission back in its own period, the share of the money it returned', async () => {
+  await h.inGym(refundGym, async () => {
+    const commissionOf = (res) => {
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      return line(res.body.profit_and_loss.outflow, 'trainer_commission').memberships.base_amount;
+    };
+
+    const sep = await h.call(accounts.overview, { query: september });
+    assert.equal(commissionOf(sep), 56, "O20's October refund leaves September as it was; O21's 40 of 100 takes back 4");
+
+    const oct = await h.call(accounts.overview, { query: { from: '2026-10-01', to: '2026-10-31' } });
+    assert.equal(commissionOf(oct), -35, "all of O20's 20, and half of O22's 30 for half the money back");
+    const day = (key) => oct.body.trend.points.find((point) => point.key === key);
+    assert.equal(day('2026-10-05').expense, -20, 'on the day of the refund');
+    assert.equal(day('2026-10-02').expense, -15);
+
+    const both = await h.call(accounts.overview, { query: { from: '2026-09-01', to: '2026-10-31' } });
+    assert.equal(commissionOf(both), 21, 'O20 nets to nothing over the two months; O21 keeps 6 and O22 15');
   });
 });
 

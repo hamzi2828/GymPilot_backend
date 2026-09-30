@@ -17,6 +17,9 @@ const T = require('../attendance/services/timeUtils');
 const { branding } = require('../services/branding');
 const { sendCsv } = require('../services/csv');
 const { can, ADMIN_SLUG } = require('../services/roleService');
+// What a sale cost the gym and what it made -- the rule the reports' top
+// products follow too.
+const { saleMoney } = require('../services/saleMoney');
 
 const isId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const actorId = (req) => req.user && (req.user.id || req.user._id);
@@ -69,20 +72,6 @@ function productView(p) {
     is_active: p.isActive !== false,
     order: p.order || 0
   };
-}
-
-// What a sale cost the gym and what it made. Each line's margin is its
-// price against its cost, as rung up; the sale's profit is what was taken
-// less the tax in it (prices include tax, and the tax is not the gym's) and
-// less the cost, so a basket discount comes off it too. The cost is the
-// product's cost when it was sold (unitCost is snapshotted on the line).
-function saleMoney(s) {
-  const lines = (s.items || []).map((i) => {
-    const cost = round((i.unitCost || 0) * i.quantity);
-    return { unit_cost: i.unitCost || 0, cost, margin: round(i.total - cost) };
-  });
-  const cost = round(lines.reduce((sum, l) => sum + l.cost, 0));
-  return { lines, cost, profit: round((s.total || 0) - (s.taxAmount || 0) - cost) };
 }
 
 // Cost and profit are for the people who run the till (pos at manage): a

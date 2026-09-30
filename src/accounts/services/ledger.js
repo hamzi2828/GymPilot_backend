@@ -484,9 +484,11 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
  * refunded order, dated when the money went back.
  *
  * Output: { _id (order), orderNumber, packageName, method, at, amount,
- * currency (upper case) }
+ * currency (upper case) }, plus any `fields` the caller projects from the
+ * order (the profit and loss reads the trainer's commission this way, so a
+ * refund's commission is dated by exactly this rule).
  */
-function membershipRefundStages(range, match = {}) {
+function membershipRefundStages(range, match = {}, { fields = {} } = {}) {
   const inRange = inRangeOf(range);
   // A refund recorded before refund.at existed is filed on the day of the
   // payment it returned, which is where the old screens showed it.
@@ -516,7 +518,8 @@ function membershipRefundStages(range, match = {}) {
         at: refundAt,
         // A partial refund returned only part of the payment.
         amount: { $ifNull: ['$refund.amount', { $ifNull: ['$payment.amount', 0] }] },
-        currency: { $toUpper: { $ifNull: ['$payment.currency', ''] } }
+        currency: { $toUpper: { $ifNull: ['$payment.currency', ''] } },
+        ...fields
       }
     },
     { $match: { at: inRange } }

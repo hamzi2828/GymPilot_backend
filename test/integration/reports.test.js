@@ -349,3 +349,49 @@ test('daily sales export: CSV with a totals row; a workbook with the days and a 
     assert.deepEqual(sheetObjects(files, 2), [{ 'Payment method': 'Cash', 'Amount (GBP)': 142 }, { 'Payment method': 'Total', 'Amount (GBP)': 142 }]);
   });
 });
+
+test("top products: a product's margin is the till's profit on it -- its takings less the tax in them and any discount, less its cost", async () => {
+  const pos = h.src('controller/posController');
+  const Sale = h.src('models/saleModel');
+  const Settings = h.src('models/settings');
+  const MAY = { from: '2026-05-01', to: '2026-05-31' };
+  const till = (req) => ({ user: { id: null }, roleSlug: 'admin', ...req });
+
+  await h.inGym(gym, async () => {
+    const make = async (body) => {
+      const res = await h.call(pos.createProduct, till({ body }));
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      return res.body.data;
+    };
+    const tub = await make({ name: 'Protein tub', price: 30, cost: 18, stock: 20 });
+    const shaker = await make({ name: 'Shaker', price: 10, cost: 4, stock: 20 });
+
+    // 70 in the basket, 5 off: 65 paid, 13 of it the 25% tax, goods 40 --
+    // the till's profit 12. Then a shaker with no tax: profit 6.
+    await Settings.updateOne({ isActive: true }, { $set: { taxRate: 25 } });
+    let big;
+    try {
+      big = await h.call(pos.createSale, till({ body: { items: [{ productId: tub.id, quantity: 2 }, { productId: shaker.id, quantity: 1 }], discount: 5, paymentMethod: 'card' } }));
+    } finally {
+      await Settings.updateOne({ isActive: true }, { $set: { taxRate: 0 } });
+    }
+    const small = await h.call(pos.createSale, till({ body: { items: [{ productId: shaker.id, quantity: 1 }], paymentMethod: 'cash' } }));
+    for (const [res, day] of [[big, '2026-05-10'], [small, '2026-05-11']]) {
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      await Sale.updateOne({ _id: res.body.data.id }, { $set: { paidAt: at(`${day}T10:00:00Z`) } });
+    }
+
+    const [report, sales] = await Promise.all([h.call(reports.overview, { query: MAY }), h.call(pos.listSales, till({ query: MAY }))]);
+    assert.equal(report.statusCode, 200, JSON.stringify(report.body));
+    assert.equal(sales.body.summary.gross_profit.GBP, 18);
+
+    // The big sale's 65 - 13 = 52 is shared by its lines' totals: the tubs
+    // 60/70 of it, less their 36; the shaker 10/70, less 4. The small sale's
+    // shaker made 6.
+    const product = (name) => report.body.top_products.find((row) => row.name === name);
+    assert.deepEqual(product('Protein tub'), { name: 'Protein tub', quantity: 2, total: 60, margin: 8.57 });
+    assert.deepEqual(product('Shaker'), { name: 'Shaker', quantity: 2, total: 20, margin: 9.43 });
+    const margins = report.body.top_products.reduce((sum, row) => sum + row.margin, 0);
+    assert.equal(Math.round(margins * 100) / 100, sales.body.summary.gross_profit.GBP, 'the products add up to the till');
+  });
+});
