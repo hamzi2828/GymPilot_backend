@@ -250,5 +250,6 @@ router.post('/package-orders/:id/change-package', auth, requirePermission('packa
 router.post('/package-orders/:id/use-session', auth, requirePermission('package-orders', 'manage'), membershipController.useSession);
 router.post('/package-orders/:id/refund', auth, requirePermission('package-orders', 'manage'), membershipController.refund);
 router.post('/package-orders/:id/payments', auth, requirePermission('package-orders', 'manage'), membershipController.recordPayment);
+router.patch('/package-orders/:id/terms', auth, requirePermission('package-orders', 'manage'), membershipController.editTerms);
 
 module.exports = router;

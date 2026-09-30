@@ -244,6 +244,24 @@ const packageOrderSchema = new mongoose.Schema(
       immediate: { type: Boolean, default: false },
       resumedAt: { type: Date, default: null }
     },
+    // Every change staff made to the terms after the sale -- dates moved, the
+    // discount changed (membershipService.editTerms) -- with what they were
+    // before and after, who did it and why. Appended, never rewritten.
+    termsHistory: {
+      type: [
+        new mongoose.Schema(
+          {
+            at: { type: Date, required: true },
+            by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+            from: { type: mongoose.Schema.Types.Mixed, default: {} },
+            to: { type: mongoose.Schema.Types.Mixed, default: {} },
+            note: { type: String, default: '' }
+          },
+          { _id: false }
+        )
+      ],
+      default: []
+    },
     // Money given back, and by whom. Set once, when payment.status becomes
     // 'refunded'; stripeRefundId is null for cash, bank and terminal refunds,
     // which move by hand and are only recorded here.

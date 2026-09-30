@@ -329,6 +329,29 @@ module.exports = {
     }
   },
 
+  // PATCH /api/gymfolio/package-orders/:id/terms  (staff)
+  //   { startDate?, endDate?, discountAmount?, discountNote?, note? }
+  //
+  // Moves a membership's dates or changes its discount after the sale, with
+  // the change kept in termsHistory (membershipService.editTerms).
+  editTerms: async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await PackageOrder.findById(req.params.id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const updated = await service.editTerms(order, req.body || {}, { by: userId(req) });
+      const due = Number(updated.payment.balanceDue || 0);
+      const currency = String(updated.payment.currency || '').toUpperCase();
+      return res.json({
+        success: true,
+        message: `Terms updated.${due > 0 ? ` ${currency} ${due.toFixed(2)} is due.` : ''}`,
+        data: updated
+      });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
   // POST /api/gymfolio/package-orders/:id/refund  (staff)  { amount?, reason }
   //
   // Card payments are refunded at Stripe (the whole charge unless an amount

@@ -101,6 +101,23 @@ issues the invoice number, redeems the coupon and activates the order.
   discountNote?, amountOverride? }`: a fresh term of the same package,
   starting when the current one ends (or on `startDate`), priced like a
   sale. Never a joining fee; no trainer (400).
+* **Edit terms** — `PATCH /package-orders/:id/terms { startDate?, endDate?,
+  discountAmount?, discountNote?, note? }` (package-orders · manage) → `{
+  success, message, data: order }`. Moves the dates (a bare date is the
+  start / the whole of that day at the gym; the end must follow the start;
+  a lapsed membership extended into the future is live again, a live one
+  ended in the past is expired) or sets the order's whole discount, off the
+  package price only: the total moves by the difference, never below the
+  fees it carries (400). Money received stays as it was — `amountPaid` is
+  written down — and the balance follows; a discount that would take the
+  total below what was paid is `409 REFUND_NEEDED`. The invoice keeps its
+  number and takes the new total. Each change is appended to
+  `termsHistory[] { at, by, from, to, note }` (`from` / `to`: `startDate,
+  endDate, discountAmount, discountNote, amount, balanceDue`). Refused on a
+  card subscription (`409 STRIPE_BILLED`: Stripe's billing sets its dates and
+  price), on the price of any card payment, and on a closed order (`409
+  ORDER_CLOSED`: refunded, failed or cancelled); `409 TERMS_CHANGED` when the
+  order moved on while it was being saved.
 * **Change package** — `POST /package-orders/:id/change-package {packageId}`
   (staff): the unused days of the old package are credited pro rata against
   the new price; on a Stripe subscription the subscription item is switched

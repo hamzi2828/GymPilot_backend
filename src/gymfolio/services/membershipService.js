@@ -324,16 +324,30 @@ function money(value, field) {
 }
 
 /**
- * A start date the desk sent. A bare 'YYYY-MM-DD' (a date input) is the
- * start of that day at the gym; anything else must read as an instant.
+ * A date the desk sent. A bare 'YYYY-MM-DD' (a date input) names a whole
+ * day at the gym: its first moment for a start, its last for an end (a
+ * membership "until 30 Sep" still works at 23:59 that day). Anything else
+ * must read as an instant.
+ */
+function readDeskDate(value, edge, field) {
+  let at = null;
+  if (T.isDateOnly(value)) {
+    const key = String(value).trim();
+    at = edge === 'end' ? T.lastMomentOfLocalDay(key) : T.startOfLocalDay(key);
+  } else if (typeof value === 'string' || value instanceof Date) {
+    at = new Date(value);
+  }
+  if (!at || Number.isNaN(at.getTime())) throw new MembershipError(`${field} is not a date`, 400, 'INVALID_TERMS');
+  return at;
+}
+
+/**
+ * A start date the desk sent (readDeskDate, from the start of a bare day).
  * Starting more than a year ahead is refused as the typo it almost
  * certainly is.
  */
 function readStartDate(value, now = new Date()) {
-  let at = null;
-  if (T.isDateOnly(value)) at = T.startOfLocalDay(String(value).trim());
-  else if (typeof value === 'string' || value instanceof Date) at = new Date(value);
-  if (!at || Number.isNaN(at.getTime())) throw new MembershipError('startDate is not a date', 400, 'INVALID_TERMS');
+  const at = readDeskDate(value, 'start', 'startDate');
   if (at.getTime() > now.getTime() + MAX_START_AHEAD_DAYS * DAY_MS) {
     throw new MembershipError(`A membership can start at most ${MAX_START_AHEAD_DAYS} days ahead`, 400, 'INVALID_TERMS');
   }
@@ -678,6 +692,159 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
   );
   if (!updated) {
     throw new MembershipError('The balance changed while this payment was being recorded. Reload the order and try again.', 409, 'BALANCE_CHANGED');
+  }
+  return updated;
+}
+
+/* ------------------------------ edit terms ----------------------------- */
+
+// The terms a change is recorded against, before and after.
+function termsOf(order) {
+  const p = order.payment || {};
+  const s = order.subscription || {};
+  return {
+    startDate: s.startDate || null,
+    endDate: s.endDate || null,
+    discountAmount: round2(p.discountAmount || 0),
+    discountNote: p.discountNote || '',
+    amount: round2(p.amount),
+    balanceDue: round2(p.balanceDue || 0)
+  };
+}
+
+/**
+ * Changes a membership's dates or discount after the sale.
+ *
+ * `startDate` / `endDate` (a bare date is the start / the end of that day
+ * at the gym) move the term; the end must come after the start. Moving the
+ * end of a lapsed membership into the future makes it live again, and
+ * moving a live one's into the past ends it.
+ *
+ * `discountAmount` is the order's whole discount from now on; it comes off
+ * the package price only, so the total moves by the difference and can
+ * never go below the fees it carries. On an order already paid, money
+ * received stays exactly what it was -- amountPaid is written down as
+ * received -- and the balance due follows: a smaller discount leaves more
+ * to pay, a larger one may not take the total below what was paid (that
+ * is a refund). The invoice keeps its number and takes the new total.
+ *
+ * Each change is appended to termsHistory with what the terms were before
+ * and after, who made it and `note`. Written with one conditional update
+ * on the money it started from, like recordPayment.
+ *
+ * @throws {MembershipError} 409 STRIPE_BILLED (a card subscription's dates
+ *   and price are Stripe's; a card payment's price is what was charged),
+ *   409 ORDER_CLOSED, 409 REFUND_NEEDED, 409 TERMS_CHANGED; 400
+ *   INVALID_TERMS naming the field, or when nothing would change
+ */
+async function editTerms(order, body = {}, { by = null, now = new Date() } = {}) {
+  const p = order.payment || {};
+  if (p.stripeSubscriptionId) {
+    throw new MembershipError("This membership is a card subscription: its dates and price follow Stripe's billing and are changed there.", 409, 'STRIPE_BILLED');
+  }
+  if (['refunded', 'failed', 'cancelled'].includes(p.status) || order.status === 'cancelled') {
+    throw new MembershipError('This order is closed; its terms can no longer be changed.', 409, 'ORDER_CLOSED');
+  }
+  if (stripeBilled(order) && p.status !== 'paid') {
+    // Its dates are set when Stripe confirms the payment.
+    throw new MembershipError('This card payment has not gone through yet; its terms are set once it does.', 409, 'STRIPE_BILLED');
+  }
+
+  const before = termsOf(order);
+  const after = { ...before };
+  if (present(body.startDate)) after.startDate = readDeskDate(body.startDate, 'start', 'startDate');
+  if (present(body.endDate)) after.endDate = readDeskDate(body.endDate, 'end', 'endDate');
+  if ((present(body.startDate) || present(body.endDate)) && after.startDate && after.endDate && new Date(after.endDate) <= new Date(after.startDate)) {
+    throw new MembershipError('The end date must come after the start date', 400, 'INVALID_TERMS');
+  }
+  if (body.discountNote !== undefined && body.discountNote !== null) after.discountNote = String(body.discountNote).trim().slice(0, 200);
+
+  const discount = money(body.discountAmount, 'discountAmount');
+  if (discount !== undefined && discount !== before.discountAmount) {
+    if (stripeBilled(order)) {
+      throw new MembershipError('This order was paid by card through Stripe: its price is what was charged. Refund part of it instead.', 409, 'STRIPE_BILLED');
+    }
+    const listPrice = parseAmount(order.packageDetails && order.packageDetails.price);
+    if (listPrice !== null && discount > listPrice) {
+      throw new MembershipError(`The discount comes off the package price (${listPrice}) and cannot be more than it`, 400, 'INVALID_TERMS');
+    }
+    const amount = round2(before.amount + before.discountAmount - discount);
+    const fees = round2((p.joiningFee || 0) + (p.trainerFee || 0));
+    if (amount < fees) {
+      throw new MembershipError(`That would take the total below the ${fees} of fees it carries; the discount comes off the package price only`, 400, 'INVALID_TERMS');
+    }
+    after.discountAmount = discount;
+    after.amount = amount;
+    if (p.status === 'paid') {
+      const received = paidSoFar(p);
+      if (amount < received) {
+        throw new MembershipError(`${received} has already been paid, more than the new total of ${amount}. Refund the difference instead.`, 409, 'REFUND_NEEDED');
+      }
+      after.balanceDue = round2(amount - received);
+    }
+  }
+
+  const changed = ['startDate', 'endDate', 'discountAmount', 'discountNote', 'amount'].filter((key) => {
+    const a = before[key] instanceof Date ? before[key].getTime() : before[key];
+    const b = after[key] instanceof Date ? after[key].getTime() : after[key];
+    return a !== b;
+  });
+  if (!changed.length) throw new MembershipError('Nothing to change: send startDate, endDate, discountAmount or discountNote', 400, 'INVALID_TERMS');
+
+  const set = {
+    'subscription.startDate': after.startDate,
+    'subscription.endDate': after.endDate,
+    'subscription.renewalDate': after.endDate,
+    'payment.discountAmount': after.discountAmount,
+    'payment.discountNote': after.discountNote
+  };
+  if (after.amount !== before.amount) {
+    set['payment.amount'] = after.amount;
+    if (p.status === 'paid') {
+      // Money received does not move with the price.
+      set['payment.amountPaid'] = paidSoFar(p);
+      set['payment.balanceDue'] = after.balanceDue;
+    }
+    if (order.invoice && order.invoice.number) {
+      const rate = Number(order.invoice.taxRate) || 0;
+      const tax = rate > 0 ? round2(after.amount - after.amount / (1 + rate / 100)) : 0;
+      set['invoice.total'] = after.amount;
+      set['invoice.taxAmount'] = tax;
+      set['invoice.subtotal'] = round2(after.amount - tax);
+    }
+  }
+  // Live again, or over, as the new end date says.
+  if (after.endDate && p.status === 'paid') {
+    const ends = new Date(after.endDate);
+    if (ends > now && order.status === 'expired') {
+      set.status = 'active';
+      set['subscription.isActive'] = true;
+    } else if (ends <= now && order.status === 'active') {
+      set.status = 'expired';
+      set['subscription.isActive'] = false;
+    }
+  }
+
+  // An order from before balances has none stored: nothing owed.
+  const balanceWas = round2(p.balanceDue || 0) > 0 ? p.balanceDue : { $in: [0, null] };
+  const updated = await PackageOrder.findOneAndUpdate(
+    { _id: order._id, 'payment.amount': p.amount, 'payment.balanceDue': balanceWas, 'payment.status': p.status },
+    {
+      $set: set,
+      $push: {
+        termsHistory: {
+          at: now,
+          by: by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null,
+          from: before,
+          to: after,
+          note: present(body.note) ? String(body.note).trim().slice(0, 500) : ''
+        }
+      }
+    },
+    { new: true }
+  );
+  if (!updated) {
+    throw new MembershipError('The order changed while this was being saved. Reload it and try again.', 409, 'TERMS_CHANGED');
   }
   return updated;
 }
@@ -1582,6 +1749,7 @@ module.exports = {
   createManualOrder,
   stripeBilled,
   recordPayment,
+  editTerms,
   createBankTransferOrder,
   submitTransferProof,
   approveTransfer,
