@@ -26,6 +26,7 @@ const T = require('../services/timeUtils');
 const { verifyQrToken } = require('../services/qrToken');
 const { findByCode } = require('../services/peopleDirectory');
 const { tenantKey } = require('../../platform/tenantContext');
+const { loginFilter } = require('../../services/username');
 
 // The 1:N false-accept target the desktop matcher scales by candidate count.
 // 1-in-100,000 is the DigitalPersona default and what the reference reader
@@ -105,8 +106,8 @@ module.exports = {
 
   // POST /api/desktop/login
   //
-  // Same email and password staff already use on the website -- there is no
-  // separate credential store. What differs is the grant: an account without
+  // Same email (or username) and password staff already use on the website
+  // -- there is no separate credential store. What differs is the grant: an account without
   // allowAttendanceApp is refused with 403 even when the password is right,
   // so the desk is told to ask an admin rather than retyping it.
   login: async (req, res) => {
@@ -115,7 +116,7 @@ module.exports = {
 
     try {
       if (!email || !password) {
-        return res.status(400).json({ success: false, message: 'Enter your email and password.' });
+        return res.status(400).json({ success: false, message: 'Enter your email or username and password.' });
       }
 
       const key = attemptKey(email, device.ip);
@@ -126,7 +127,9 @@ module.exports = {
         });
       }
 
-      const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+      // An email or a username, as the website's sign-in takes them.
+      const filter = loginFilter(email);
+      const user = filter ? await User.findOne(filter) : null;
 
       if (!user || !user.password || !user.isActive) {
         noteFailure(key);

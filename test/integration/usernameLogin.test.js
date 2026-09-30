@@ -52,6 +52,25 @@ test('the sign-in box takes a username or an email, in any case', async () => {
   assert.equal((await login({ login: member.username, password: PASSWORD })).statusCode, 200);
 });
 
+test('the desk app signs staff in by username too', async () => {
+  const desktop = h.src('attendance/controller/desktopAppController');
+  const DesktopToken = h.src('attendance/models/desktopTokenModel');
+  const deskLogin = (body) => h.inGym(gym, () => h.call(desktop.login, { body }));
+  await h.inGym(gym, async () => {
+    await h.ensureIndexes(DesktopToken);
+    await User.updateOne({ _id: manager._id }, { $set: { allowAttendanceApp: true } });
+  });
+  try {
+    const byUsername = await deskLogin({ email: manager.username.toUpperCase(), password: PASSWORD });
+    assert.equal(byUsername.statusCode, 200, JSON.stringify(byUsername.body));
+    assert.ok(byUsername.body.token);
+    assert.equal((await deskLogin({ email: 'max@username.test', password: PASSWORD })).statusCode, 200, 'email still works');
+    assert.equal((await deskLogin({ email: manager.username, password: 'wrong-password-1' })).statusCode, 401);
+  } finally {
+    await h.inGym(gym, () => User.updateOne({ _id: manager._id }, { $set: { allowAttendanceApp: false } }));
+  }
+});
+
 test('a member with no email signs in with their username', async () => {
   const res = await login({ email: phoneOnly.username, password: PASSWORD });
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
