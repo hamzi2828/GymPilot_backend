@@ -14,6 +14,7 @@ const Settings = require('../../models/settings');
 const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
+const { readDeskMethod } = require('../../services/paymentMethods');
 const T = require('../../attendance/services/timeUtils');
 
 const DAY_MS = 86400000;
@@ -322,6 +323,9 @@ async function createManualOrder({
       422
     );
   }
+  // An unknown method is refused rather than recorded as cash.
+  const { method, problem } = readDeskMethod(paymentMethod);
+  if (problem) throw new MembershipError(problem, 422, 'PAYMENT_METHOD_INVALID');
   const currency = resolveCurrency(pkg.currency, settings && settings.currency);
   const snapshot = packageSnapshot(pkg);
   const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: user.email }) : !!chargeJoiningFee;
@@ -368,7 +372,7 @@ async function createManualOrder({
       country: (address && address.country) || ''
     },
     payment: {
-      method: ['stripe', 'card', 'bank_transfer', 'cash'].includes(paymentMethod) ? paymentMethod : 'cash',
+      method,
       amount,
       subtotal: round2(listPrice + joiningFee),
       discountAmount: discount,

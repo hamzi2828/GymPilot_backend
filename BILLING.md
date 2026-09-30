@@ -42,8 +42,17 @@ screen offers that on the refusal.
   (`POST /package-orders/:id/proof`, multipart `proof` + `reference`, `note`);
   staff **Confirm payment received** or **Reject** on Package Orders. The
   member is emailed at each step.
-* **At the desk** — **Assign Package** on Package Orders: cash, bank or a card
-  terminal, with an optional coupon, amount override and start date.
+* **At the desk** — **Assign Package** on Package Orders: cash, bank, a card
+  terminal or a mobile wallet (JazzCash, Easypaisa, other), with an optional
+  coupon, amount override and start date.
+
+`payment.method` is one of `src/services/paymentMethods.js`: `stripe` (Card
+(Stripe)), `card` (Card — the desk terminal), `bank_transfer`, `cash`,
+`jazzcash`, `easypaisa`, `wallet` (Other mobile wallet); invoices and the
+admin screens show those labels. Staff may record any of them but `stripe`,
+which is only ever paid through checkout. A method outside the list — or
+`stripe` at the desk — is refused with `422 PAYMENT_METHOD_INVALID`, never
+recorded as cash.
 
 ## Coupons
 

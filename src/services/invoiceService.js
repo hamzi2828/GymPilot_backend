@@ -15,6 +15,7 @@ const PDFDocument = require('pdfkit');
 const Counter = require('../gymfolio/models/counterModel');
 const Settings = require('../models/settings');
 const { currentTenant } = require('../platform/tenantContext');
+const { methodLabel } = require('./paymentMethods');
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -126,7 +127,7 @@ async function renderInvoicePdf(order, options = {}) {
 
   doc.fillColor(muted).fontSize(8).font('Helvetica-Bold').text('PAYMENT', 350, y, { width: 195, align: 'right' });
   doc.fillColor(dark).fontSize(10).font('Helvetica').text(
-    `${(payment.method || '').replace('_', ' ')} · ${payment.status || ''}`.trim(),
+    `${methodLabel(payment.method)} · ${payment.status || ''}`.trim(),
     350,
     y + 12,
     { width: 195, align: 'right' }

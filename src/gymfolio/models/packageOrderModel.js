@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { PAYMENT_METHODS } = require('../../services/paymentMethods');
 
 const packageOrderSchema = new mongoose.Schema(
   {
@@ -63,9 +64,10 @@ const packageOrderSchema = new mongoose.Schema(
       zipCode: String
     },
     payment: {
+      // services/paymentMethods.js: the list, and what each is called.
       method: {
         type: String,
-        enum: ['stripe', 'card', 'bank_transfer', 'cash'],
+        enum: PAYMENT_METHODS,
         default: 'stripe'
       },
       stripeSessionId: String,
