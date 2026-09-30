@@ -3,7 +3,9 @@
 // Rows to a CSV Excel opens cleanly: a UTF-8 byte-order mark so accented
 // names survive, CRLF line ends, every field quoted when it needs to be,
 // and formula characters neutralised so a member called "=HYPERLINK(...)"
-// cannot run anything in someone's spreadsheet.
+// cannot run anything in someone's spreadsheet. A plain negative number is
+// left as it is: -40 is a refund, not a formula, and "'-40" would reach the
+// sheet as text with the apostrophe showing.
 
 function cell(value) {
   if (value === null || value === undefined) return '';
@@ -11,7 +13,7 @@ function cell(value) {
   if (value instanceof Date) text = Number.isNaN(value.getTime()) ? '' : value.toISOString();
   else if (typeof value === 'object') text = JSON.stringify(value);
   else text = String(value);
-  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  if (/^[=+\-@\t\r]/.test(text) && !/^-\d+(\.\d+)?$/.test(text)) text = `'${text}`;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 

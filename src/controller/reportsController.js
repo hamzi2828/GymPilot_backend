@@ -3,7 +3,8 @@
 // The numbers behind the business over a chosen range, drawn from the same
 // collections the operational screens use: revenue and new members over
 // time, attendance and its busiest hours, classes by demand, memberships
-// won and lost, leads, personal training -- and every list as a CSV.
+// won and lost, leads, personal training -- and every list as a CSV or an
+// Excel workbook.
 
 const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const ClassBooking = require('../gymfolio/models/classBookingModel');
@@ -17,7 +18,9 @@ const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
 const { sendCsv } = require('../services/csv');
+const { sendXlsx } = require('../services/xlsx');
 const { countLiveMembers } = require('../gymfolio/services/membershipExpiry');
+const { dailySales, exportColumns: dailySalesColumns } = require('../services/dailySales');
 
 const EXPIRING_WINDOW_DAYS = 14;
 const EXPORT_LIMIT = 20000;
@@ -39,8 +42,37 @@ function fill(buckets, rows, keyOf, valueOf) {
   return buckets.map((b) => ({ key: b.key, label: b.label, value: Math.round(map.get(b.key) * 100) / 100 }));
 }
 
+// CSV unless the caller asks for Excel (?format=xlsx, or an export name
+// ending .xlsx): the same columns and rows either way. In the workbook the
+// columns marked `type: 'date'` are real dates and amounts are numbers.
+function exportFormat(req) {
+  const format = String((req.query && req.query.format) || '').toLowerCase();
+  return format === 'xlsx' || /\.xlsx$/i.test(String((req.params && req.params.kind) || '')) ? 'xlsx' : 'csv';
+}
+
+function sendExport(req, res, name, sheet, columns, rows) {
+  if (exportFormat(req) === 'xlsx') return sendXlsx(res, `${name}.xlsx`, columns, rows, { sheet });
+  return sendCsv(res, `${name}.csv`, columns, rows);
+}
+
 function dateBucketExpr(field, grain, timezone) {
   return { $dateToString: { format: grain === 'day' ? '%Y-%m-%d' : '%Y-%m', date: field, timezone } };
+}
+
+// Which expense and till rows are in the gym's own currency. The accounts
+// screen reads a row with no currency as the base one (`currency || base`),
+// so this report does too -- otherwise the two nets part company over a
+// blank field.
+function currencyPattern(base) {
+  return new RegExp(`^${String(base).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+}
+
+function inBaseCurrency(base) {
+  return { $or: [{ currency: currencyPattern(base) }, { currency: { $in: [null, ''] } }] };
+}
+
+function notInBaseCurrency(base) {
+  return { currency: { $nin: [null, ''], $not: currencyPattern(base) } };
 }
 
 module.exports = {
@@ -57,7 +89,8 @@ module.exports = {
       // Rows in a currency other than the gym's cannot be added to the base
       // totals (there is no exchange rate here), but they must not vanish
       // either: they are counted so the report can say what it left out.
-      const notBase = { $not: new RegExp(`^${base}$`, 'i') };
+      const notBase = notInBaseCurrency(base);
+      const isBaseCurrency = inBaseCurrency(base);
 
       // Membership money by the accounts rule (ledger.js): every payment in
       // the period, renewals included, and the refunds given in it -- each
@@ -73,9 +106,12 @@ module.exports = {
       const [paymentRows, refundRows, newMembers, attendanceRows, hourRows, classRows, ptRows, leadRows, memberships, renewals, lapsedInRange, expenseRows, shopRows, topProducts, otherExpenses, otherSales] = await Promise.all([
         PackageOrder.aggregate([...L.membershipPaymentStages(range), byCurrencyBucketPackage('$at')]),
         PackageOrder.aggregate([...L.membershipRefundStages(range), byCurrencyBucketPackage('$at')]),
+        // Per local day whatever the chart's grain: the registrations table
+        // lists days, and the chart adds them up into its months.
         User.aggregate([
           { $match: { role: 'user', createdAt: { $gte: range.start, $lt: range.end } } },
-          { $group: { _id: dateBucketExpr('$createdAt', grain, tz), n: { $sum: 1 } } }
+          { $group: { _id: dateBucketExpr('$createdAt', 'day', tz), n: { $sum: 1 } } },
+          { $sort: { _id: 1 } }
         ]),
         Attendance.aggregate([
           { $match: { personType: 'member', shiftDate: { $gte: range.from, $lte: range.to } } },
@@ -105,27 +141,31 @@ module.exports = {
         ]),
         PackageOrder.countDocuments({ 'payment.status': 'paid', renewedFrom: { $ne: null }, $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } }),
         PackageOrder.countDocuments({ 'payment.status': 'paid', status: 'expired', 'subscription.endDate': { $gte: range.start, $lt: range.end } }),
+        // Expenses by the accounts rule, so the net here is the net there:
+        // PAID expenses, filed under the day they belong to (incurredOn),
+        // whenever the money actually left. Pending ones are totalled on
+        // their own below and never taken off.
         Expense.aggregate([
-          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, currency: new RegExp(`^${base}$`, 'i') } },
-          { $group: { _id: dateBucketExpr('$incurredOn', grain, tz), total: { $sum: '$amount' } } }
+          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, ...isBaseCurrency } },
+          { $group: { _id: { bucket: dateBucketExpr('$incurredOn', grain, tz), paid: { $eq: ['$status', 'paid'] } }, total: { $sum: '$amount' } } }
         ]),
         Sale.aggregate([
-          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: new RegExp(`^${base}$`, 'i') } },
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...isBaseCurrency } },
           { $group: { _id: dateBucketExpr('$paidAt', grain, tz), total: { $sum: '$total' }, n: { $sum: 1 } } }
         ]),
         Sale.aggregate([
-          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: new RegExp(`^${base}$`, 'i') } },
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...isBaseCurrency } },
           { $unwind: '$items' },
           { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, total: { $sum: '$items.total' }, cost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unitCost', 0] }] } } } },
           { $sort: { total: -1 } },
           { $limit: 8 }
         ]),
         Expense.aggregate([
-          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, currency: notBase } },
+          { $match: { incurredOn: { $gte: range.start, $lt: range.end }, status: { $ne: 'cancelled' }, ...notBase } },
           { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
         ]),
         Sale.aggregate([
-          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, currency: notBase } },
+          { $match: { status: 'paid', paidAt: { $gte: range.start, $lt: range.end }, ...notBase } },
           { $group: { _id: { $toUpper: { $ifNull: ['$currency', ''] } }, n: { $sum: 1 } } }
         ])
       ]);
@@ -170,9 +210,10 @@ module.exports = {
 
       const revenue = fill(buckets, revenueRows, (r) => r._id, (r) => r.total);
       const orders = fill(buckets, revenueRows, (r) => r._id, (r) => r.n);
-      const members = fill(buckets, newMembers, (r) => r._id, (r) => r.n);
+      const members = fill(buckets, newMembers, (r) => (grain === 'day' ? r._id : r._id.slice(0, 7)), (r) => r.n);
       const visits = fill(buckets, attendanceRows, (r) => r._id, (r) => r.n);
-      const expenses = fill(buckets, expenseRows, (r) => r._id, (r) => r.total);
+      const expenses = fill(buckets, expenseRows.filter((r) => r._id.paid), (r) => r._id.bucket, (r) => r.total);
+      const pendingExpenses = expenseRows.filter((r) => !r._id.paid).reduce((s, r) => s + r.total, 0);
       const shop = fill(buckets, shopRows, (r) => r._id, (r) => r.total);
       const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${String(h).padStart(2, '0')}:00`, value: 0 }));
       for (const row of hourRows) if (row._id >= 0 && row._id < 24) hours[row._id].value = row.n;
@@ -204,7 +245,9 @@ module.exports = {
           membership_revenue: Math.round((revenueTotal - shopTotal) * 100) / 100,
           shop_revenue: Math.round(shopTotal * 100) / 100,
           shop_sales: shopRows.reduce((s, r) => s + r.n, 0),
+          // Paid expenses; the net is the accounts screen's for the range.
           expenses: Math.round(expenseTotal * 100) / 100,
+          expenses_pending: Math.round(pendingExpenses * 100) / 100,
           net: Math.round((revenueTotal - expenseTotal) * 100) / 100,
           paid_orders: orders.reduce((s, b) => s + b.value, 0),
           new_members: members.reduce((s, b) => s + b.value, 0),
@@ -230,6 +273,13 @@ module.exports = {
           expenses: otherExpenseCount,
           shop_sales: otherSaleCount
         },
+        // New registrations per day, for the table beside the chart: the
+        // days on which somebody joined, oldest first. The Members export
+        // lists the same people.
+        registrations: {
+          total: newMembers.reduce((s, r) => s + r.n, 0),
+          days: newMembers.map((r) => ({ date: r._id, label: T.dateLabelForKey(r._id), count: r.n }))
+        },
         classes: classRows.map((r) => ({ name: r._id || '—', booked: r.booked, attended: r.attended, no_show: r.no_show, waitlisted: r.waitlisted, attendance_rate: r.booked ? Math.round((r.attended / r.booked) * 100) : null })),
         pt,
         leads: { ...leads, total: leadTotal }
@@ -240,36 +290,81 @@ module.exports = {
     }
   },
 
-  // GET /admin/reports/export/:kind?from=&to=
+  // GET /admin/reports/daily-sales?from=&to=
+  //
+  // Every day in the range: new sign-ups, renewals, admission and trainer
+  // fees, dues collected, refunds and the till, and the totals by payment
+  // method -- see services/dailySales.js for what goes in which column.
+  dailySales: async (req, res) => {
+    try {
+      const report = await dailySales(L.readRange(req.query));
+      return res.json({ success: true, ...report });
+    } catch (error) {
+      console.error('[reports] daily sales failed:', error);
+      return fail(res, 500, 'Could not build the daily sales report');
+    }
+  },
+
+  // GET /admin/reports/export/:kind?from=&to=[&format=xlsx]
   export: async (req, res) => {
     try {
       const range = L.readRange(req.query);
-      const kind = String(req.params.kind || '').replace(/\.csv$/, '');
+      const kind = String(req.params.kind || '').replace(/\.(csv|xlsx)$/i, '');
       const stamp = `${range.from}_${range.to}`;
       const inRange = { $gte: range.start, $lt: range.end };
       const keyRange = { $gte: range.from, $lte: range.to };
 
       if (kind === 'members') {
-        const rows = await User.find({ role: 'user' }).select('firstName lastName email phone memberCode gender dateOfBirth tags source createdAt lastLogin isActive').sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `members_${T.dateKey()}.csv`, [
+        // The members who joined in the range, like every other export and
+        // the registrations table; ?all=1 for the whole list.
+        const everyone = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
+        const filter = everyone ? { role: 'user' } : { role: 'user', createdAt: inRange };
+        const rows = await User.find(filter).select('firstName lastName email phone memberCode gender dateOfBirth tags source createdAt lastLogin isActive').sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
+        return sendExport(req, res, everyone ? `members_${T.dateKey()}` : `members_joined_${stamp}`, 'Members', [
           { key: 'memberCode', label: 'Member code' },
           { key: 'firstName', label: 'First name' },
           { key: 'lastName', label: 'Last name' },
           { key: 'email', label: 'Email' },
           { key: 'phone', label: 'Phone' },
           { key: 'gender', label: 'Gender' },
-          { key: 'dateOfBirth', label: 'Date of birth', value: (r) => (r.dateOfBirth ? T.dateKey(r.dateOfBirth) : '') },
+          { key: 'dateOfBirth', label: 'Date of birth', type: 'date', value: (r) => (r.dateOfBirth ? T.dateKey(r.dateOfBirth) : '') },
           { key: 'tags', label: 'Tags', value: (r) => (r.tags || []).join(' ') },
           { key: 'source', label: 'Source' },
           { key: 'isActive', label: 'Active', value: (r) => (r.isActive === false ? 'no' : 'yes') },
-          { key: 'createdAt', label: 'Joined', value: (r) => T.dateKey(r.createdAt) },
-          { key: 'lastLogin', label: 'Last login', value: (r) => (r.lastLogin ? T.dateKey(r.lastLogin) : '') }
+          { key: 'createdAt', label: 'Joined', type: 'date', value: (r) => T.dateKey(r.createdAt) },
+          { key: 'lastLogin', label: 'Last login', type: 'date', value: (r) => (r.lastLogin ? T.dateKey(r.lastLogin) : '') }
         ], rows);
+      }
+
+      if (kind === 'daily-sales') {
+        const report = await dailySales(range);
+        const columns = dailySalesColumns(report);
+        const name = `daily_sales_${stamp}`;
+        // The CSV is one table with the totals as its last row; the workbook
+        // has the same table (totals in bold) and the payment methods on a
+        // sheet of their own.
+        if (exportFormat(req) === 'xlsx') {
+          return sendXlsx(res, `${name}.xlsx`, columns, report.days, {
+            sheets: [
+              { name: 'Daily sales', columns, rows: report.days, footer: report.totals },
+              {
+                name: 'By payment method',
+                columns: [
+                  { key: 'label', label: 'Payment method' },
+                  { key: 'amount', label: `Amount (${report.base_currency})` }
+                ],
+                rows: report.by_method,
+                footer: { label: 'Total', amount: report.totals.total }
+              }
+            ]
+          });
+        }
+        return sendCsv(res, `${name}.csv`, columns, [...report.days, report.totals]);
       }
 
       if (kind === 'orders') {
         const rows = await PackageOrder.find({ $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } }).sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `orders_${stamp}.csv`, [
+        return sendExport(req, res, `orders_${stamp}`, 'Orders', [
           { key: 'orderNumber', label: 'Order' },
           { key: 'name', label: 'Member', value: (r) => (r.customerInfo && r.customerInfo.fullName) || '' },
           { key: 'email', label: 'Email', value: (r) => (r.customerInfo && r.customerInfo.email) || '' },
@@ -279,17 +374,17 @@ module.exports = {
           { key: 'method', label: 'Method', value: (r) => (r.payment && r.payment.method) || '' },
           { key: 'paymentStatus', label: 'Payment', value: (r) => (r.payment && r.payment.status) || '' },
           { key: 'status', label: 'Membership status' },
-          { key: 'paidAt', label: 'Paid on', value: (r) => (r.payment && r.payment.paidAt ? T.dateKey(r.payment.paidAt) : T.dateKey(r.createdAt)) },
-          { key: 'start', label: 'Starts', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
-          { key: 'end', label: 'Ends', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
+          { key: 'paidAt', label: 'Paid on', type: 'date', value: (r) => (r.payment && r.payment.paidAt ? T.dateKey(r.payment.paidAt) : T.dateKey(r.createdAt)) },
+          { key: 'start', label: 'Starts', type: 'date', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
+          { key: 'end', label: 'Ends', type: 'date', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
           { key: 'invoice', label: 'Invoice', value: (r) => (r.invoice && r.invoice.number) || '' }
         ], rows);
       }
 
       if (kind === 'attendance') {
         const rows = await Attendance.find({ shiftDate: keyRange }).sort({ checkInAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `attendance_${stamp}.csv`, [
-          { key: 'shiftDate', label: 'Date' },
+        return sendExport(req, res, `attendance_${stamp}`, 'Attendance', [
+          { key: 'shiftDate', label: 'Date', type: 'date' },
           { key: 'personType', label: 'Type' },
           { key: 'personName', label: 'Name' },
           { key: 'personCode', label: 'Code' },
@@ -304,8 +399,8 @@ module.exports = {
 
       if (kind === 'bookings') {
         const rows = await ClassBooking.find({ sessionDate: keyRange }).sort({ sessionDate: -1, sessionStart: 1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `bookings_${stamp}.csv`, [
-          { key: 'sessionDate', label: 'Date' },
+        return sendExport(req, res, `bookings_${stamp}`, 'Bookings', [
+          { key: 'sessionDate', label: 'Date', type: 'date' },
           { key: 'sessionStart', label: 'Start' },
           { key: 'className', label: 'Class' },
           { key: 'instructorName', label: 'Instructor' },
@@ -315,13 +410,13 @@ module.exports = {
           { key: 'membershipStatus', label: 'Membership' },
           { key: 'bookedBy', label: 'Booked by' },
           { key: 'creditUsed', label: 'Credit used', value: (r) => (r.creditUsed ? 'yes' : 'no') },
-          { key: 'createdAt', label: 'Booked on', value: (r) => T.dateKey(r.createdAt) }
+          { key: 'createdAt', label: 'Booked on', type: 'date', value: (r) => T.dateKey(r.createdAt) }
         ], rows);
       }
 
       if (kind === 'leads') {
         const rows = await Lead.find({ createdAt: inRange }).sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `leads_${stamp}.csv`, [
+        return sendExport(req, res, `leads_${stamp}`, 'Leads', [
           { key: 'firstName', label: 'First name' },
           { key: 'lastName', label: 'Last name' },
           { key: 'email', label: 'Email' },
@@ -329,16 +424,16 @@ module.exports = {
           { key: 'source', label: 'Source' },
           { key: 'status', label: 'Status' },
           { key: 'interest', label: 'Interest' },
-          { key: 'nextFollowUpAt', label: 'Follow up', value: (r) => (r.nextFollowUpAt ? T.dateKey(r.nextFollowUpAt) : '') },
+          { key: 'nextFollowUpAt', label: 'Follow up', type: 'date', value: (r) => (r.nextFollowUpAt ? T.dateKey(r.nextFollowUpAt) : '') },
           { key: 'lostReason', label: 'Lost reason' },
-          { key: 'createdAt', label: 'Created', value: (r) => T.dateKey(r.createdAt) }
+          { key: 'createdAt', label: 'Created', type: 'date', value: (r) => T.dateKey(r.createdAt) }
         ], rows);
       }
 
       if (kind === 'pt-sessions') {
         const rows = await PtSession.find({ date: keyRange }).sort({ date: -1, startTime: 1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `pt_sessions_${stamp}.csv`, [
-          { key: 'date', label: 'Date' },
+        return sendExport(req, res, `pt_sessions_${stamp}`, 'PT sessions', [
+          { key: 'date', label: 'Date', type: 'date' },
           { key: 'startTime', label: 'Start' },
           { key: 'trainerName', label: 'Trainer' },
           { key: 'memberName', label: 'Member' },
@@ -352,9 +447,9 @@ module.exports = {
 
       if (kind === 'expenses') {
         const rows = await Expense.find({ incurredOn: inRange }).sort({ incurredOn: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `expenses_${stamp}.csv`, [
+        return sendExport(req, res, `expenses_${stamp}`, 'Expenses', [
           { key: 'reference', label: 'Reference' },
-          { key: 'incurredOn', label: 'Date', value: (r) => T.dateKey(r.incurredOn) },
+          { key: 'incurredOn', label: 'Date', type: 'date', value: (r) => T.dateKey(r.incurredOn) },
           { key: 'title', label: 'Title' },
           { key: 'category', label: 'Category' },
           { key: 'vendor', label: 'Vendor' },
@@ -362,13 +457,13 @@ module.exports = {
           { key: 'currency', label: 'Currency' },
           { key: 'status', label: 'Status' },
           { key: 'paymentMethod', label: 'Method' },
-          { key: 'paidOn', label: 'Paid on', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
+          { key: 'paidOn', label: 'Paid on', type: 'date', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
         ], rows);
       }
 
       if (kind === 'payslips') {
         const rows = await Payslip.find({ 'period.from': { $gte: range.from }, 'period.to': { $lte: range.to } }).sort({ 'period.from': -1 }).limit(EXPORT_LIMIT).lean();
-        return sendCsv(res, `payslips_${stamp}.csv`, [
+        return sendExport(req, res, `payslips_${stamp}`, 'Payslips', [
           { key: 'number', label: 'Payslip' },
           { key: 'staffName', label: 'Staff' },
           { key: 'period', label: 'Period', value: (r) => `${r.period.from} to ${r.period.to}` },
@@ -380,11 +475,11 @@ module.exports = {
           { key: 'net', label: 'Net' },
           { key: 'currency', label: 'Currency' },
           { key: 'status', label: 'Status' },
-          { key: 'paidOn', label: 'Paid on', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
+          { key: 'paidOn', label: 'Paid on', type: 'date', value: (r) => (r.paidOn ? T.dateKey(r.paidOn) : '') }
         ], rows);
       }
 
-      return fail(res, 404, 'Unknown export. Try members, orders, attendance, bookings, leads, pt-sessions, expenses or payslips.');
+      return fail(res, 404, 'Unknown export. Try members, orders, daily-sales, attendance, bookings, leads, pt-sessions, expenses or payslips.');
     } catch (error) {
       console.error('[reports] export failed:', error);
       return fail(res, 500, 'Could not build the export');

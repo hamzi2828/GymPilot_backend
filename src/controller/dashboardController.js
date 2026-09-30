@@ -24,16 +24,83 @@ const PackageRegistration = require('../gymfolio/models/packageRegistrationModel
 const Attendance = require('../attendance/models/attendanceModel');
 const Contact = require('../models/contactModel');
 const Sale = require('../models/saleModel');
+const Expense = require('../accounts/models/expenseModel');
 const User = require('../models/user');
 const L = require('../accounts/services/ledger');
 const T = require('../attendance/services/timeUtils');
-const { openVisitExpr } = require('../attendance/services/staleVisits');
+const { isOpenVisit } = require('../attendance/services/staleVisits');
 const sessions = require('../gymfolio/services/classSessions');
 const { sweepIfDue, liveFilter, countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 
-// A membership inside this window is "expiring" -- close enough that somebody
-// should be chasing it, far enough out that chasing is still useful.
-const EXPIRING_WINDOW_DAYS = 14;
+// A membership inside this window is "expiring" -- its fee is due. A week is
+// what the front desk chases, and the same window the notification bell
+// counts (adminNotificationsController), so the two never disagree.
+const EXPIRING_WINDOW_DAYS = 7;
+
+// The most rows the fees-due list shows; "View all" opens the full list.
+const FEES_DUE_ROWS = 8;
+
+// Today's visits read per row; far more than any gym's day.
+const ATTENDANCE_ROWS = 5000;
+
+// ---------------------------------------------------------------------------
+// Who came in today, paid or not
+//
+// The same rules as the attendance screen's live board
+// (attendance/services/liveBoard.js: isPaidVisit, balanceOwed, tally), so the
+// two never disagree -- and `tally` below takes and returns what that one
+// does, so it can be swapped for it. Read from each visit's own membership
+// snapshot, taken at check-in: a renewal at noon does not turn a morning
+// visit on an expired package into a paid one.
+//
+// PAID: the member walked in on a paid membership still running -- active
+// (expiring soon included: the desk records that as active), frozen, or
+// cancelled but still inside what was paid for (a cancelled one that has run
+// out is recorded as expired). UNPAID: expired, none, past_due, pending,
+// suspended. Money still owed on a running membership (membership.balanceDue)
+// is paid, and counted again as "balance due". Each member counts once, by
+// their latest visit today.
+// ---------------------------------------------------------------------------
+
+const PAID_MEMBERSHIP = new Set(['active', 'frozen', 'cancelled']);
+
+function isPaidVisit(row) {
+  return row.personType === 'member' && PAID_MEMBERSHIP.has((row.membership && row.membership.status) || 'none');
+}
+
+function balanceOwed(row) {
+  const due = Number((row.membership && row.membership.balanceDue) ?? 0);
+  return Number.isFinite(due) && due > 0 ? due : 0;
+}
+
+/** Today's counts over the day's rows; `isOpen(row)` answers "still inside". */
+function tally(rows, isOpen) {
+  const latest = new Map();
+  let inNow = 0;
+  const staff = new Set();
+
+  for (const row of rows) {
+    if (isOpen(row)) inNow++;
+    const key = String(row.personId);
+    if (row.personType !== 'member') {
+      staff.add(key);
+      continue;
+    }
+    const seen = latest.get(key);
+    if (!seen || new Date(row.checkInAt || 0) >= new Date(seen.checkInAt || 0)) latest.set(key, row);
+  }
+
+  let paid = 0;
+  let unpaid = 0;
+  let balanceDue = 0;
+  for (const row of latest.values()) {
+    if (isPaidVisit(row)) paid++;
+    else unpaid++;
+    if (balanceOwed(row) > 0) balanceDue++;
+  }
+
+  return { visits: rows.length, members: latest.size, staff: staff.size, in_now: inNow, paid, unpaid, balance_due: balanceDue };
+}
 
 function startOfLocalDay(dateKey) {
   const [y, m, d] = dateKey.split('-').map(Number);
@@ -82,6 +149,25 @@ async function membershipCounts(now) {
   return { active, expiring, lapsed, never_bought: neverBought };
 }
 
+// Expenses by the accounts rule: paid ones, filed under the day they belong
+// to (incurredOn), per currency -- the figure the accounts screen nets.
+function paidExpenseRows(range) {
+  return Expense.aggregate([
+    { $match: { status: 'paid', incurredOn: { $gte: range.start, $lt: range.end } } },
+    { $group: { _id: '$currency', total: { $sum: '$amount' }, n: { $sum: 1 } } }
+  ]);
+}
+
+function totalsOf(rows, base) {
+  const totals = {};
+  let n = 0;
+  for (const row of rows) {
+    L.addTo(totals, String(row._id || base).toUpperCase(), row.total || 0);
+    n += row.n || 0;
+  }
+  return { totals, n };
+}
+
 module.exports = {
   // GET /admin/dashboard
   overview: async (req, res) => {
@@ -96,6 +182,7 @@ module.exports = {
 
       const monthStart = `${today.slice(0, 7)}-01`;
       const range = L.readRange({ from: monthStart, to: today });
+      const todayRange = L.readRange({ from: today, to: today });
       const dayStart = startOfLocalDay(today);
 
       const [
@@ -109,7 +196,13 @@ module.exports = {
         catalogue,
         todaysSessions,
         recentJoins,
-        expiringSoon
+        expiringSoon,
+        todayPaymentRows,
+        todayRefundRows,
+        todayShopRows,
+        expenseTodayRows,
+        expenseMonthRows,
+        newThisMonth
       ] = await Promise.all([
         // Money in this month, per currency -- never summed across them. Every
         // payment received (renewals included), less the refunds given this
@@ -132,18 +225,12 @@ module.exports = {
 
         membershipCounts(now),
 
-        // Distinct people, not rows: somebody who came in twice today is one
-        // person in the building, and is "still in" if any visit is open.
-        Attendance.aggregate([
-          { $match: { shiftDate: today } },
-          {
-            $group: {
-              _id: { type: '$personType', person: '$personId' },
-              open: { $max: { $cond: [openVisitExpr(now), 1, 0] } }
-            }
-          },
-          { $group: { _id: '$_id.type', n: { $sum: 1 }, open: { $sum: '$open' } } }
-        ]),
+        // Today's visits, counted by tally() above: people, not rows.
+        Attendance.find({ shiftDate: today })
+          .select('personType personId checkInAt checkOutAt autoClosed voided openUntil membership.status membership.balanceDue')
+          .sort({ checkInAt: 1, _id: 1 })
+          .limit(ATTENDANCE_ROWS)
+          .lean(),
 
         Contact.countDocuments({ status: { $in: ['new', 'pending', 'open'] } }).catch(() => 0),
         PackageRegistration.countDocuments({ status: 'pending' }).catch(() => 0),
@@ -169,9 +256,40 @@ module.exports = {
           'subscription.endDate': { $gte: now, $lt: new Date(now.getTime() + EXPIRING_WINDOW_DAYS * 86400000) }
         })
           .sort({ 'subscription.endDate': 1 })
-          .limit(8)
+          .limit(FEES_DUE_ROWS)
           .select('orderNumber customerInfo packageDetails subscription userId')
-          .lean()
+          .lean(),
+
+        // Today's money by the same rules as the month's above. The admission
+        // (joining) fee is part of a payment's amount; it is summed on its own
+        // too so the tile can show it, and reads as 0 on payments recorded
+        // before the ledger split it out.
+        PackageOrder.aggregate([
+          ...L.membershipPaymentStages(todayRange),
+          {
+            $group: {
+              _id: '$currency',
+              total: { $sum: '$amount' },
+              admission: { $sum: { $ifNull: ['$admission', 0] } },
+              n: { $sum: 1 }
+            }
+          }
+        ]),
+        PackageOrder.aggregate([
+          ...L.membershipRefundStages(todayRange),
+          { $group: { _id: '$currency', total: { $sum: '$amount' } } }
+        ]),
+        Sale.aggregate([
+          { $match: { status: 'paid', paidAt: { $gte: todayRange.start, $lt: todayRange.end } } },
+          { $group: { _id: '$currency', total: { $sum: '$total' }, n: { $sum: 1 } } }
+        ]).catch(() => []),
+
+        paidExpenseRows(todayRange),
+        paidExpenseRows(range),
+
+        // Joined this month: the same count the reports' "new members" gives
+        // for the month.
+        User.countDocuments({ role: 'user', createdAt: { $gte: range.start, $lt: range.end } })
       ]);
 
       // Three totals, each per currency: memberships, the shop, and the two
@@ -200,12 +318,48 @@ module.exports = {
         shopSales += row.n;
       }
 
-      const attendance = { member: 0, staff: 0, still_in: 0 };
-      for (const row of todayAttendance) {
-        if (row._id === 'staff') attendance.staff = row.n;
-        else attendance.member = row.n;
-        attendance.still_in += row.open;
+      // Today: memberships (net of refunds given today), admission fees and
+      // shop takings -- the whole in one per-currency total, and the three
+      // parts in the base currency for the tile's breakdown.
+      const todayRevenue = {};
+      let todayMembership = 0;
+      let todayAdmission = 0;
+      let todayShop = 0;
+      let todayPayments = 0;
+      let todaySales = 0;
+      for (const row of todayPaymentRows) {
+        const code = String(row._id || base).toUpperCase();
+        L.addTo(todayRevenue, code, row.total || 0);
+        todayPayments += row.n;
+        if (code === base) {
+          todayAdmission += row.admission || 0;
+          todayMembership += (row.total || 0) - (row.admission || 0);
+        }
       }
+      for (const row of todayRefundRows) {
+        const code = String(row._id || base).toUpperCase();
+        L.addTo(todayRevenue, code, -(row.total || 0));
+        if (code === base) todayMembership -= row.total || 0;
+      }
+      for (const row of todayShopRows) {
+        const code = String(row._id || base).toUpperCase();
+        L.addTo(todayRevenue, code, row.total || 0);
+        todaySales += row.n;
+        if (code === base) todayShop += row.total || 0;
+      }
+
+      const spentToday = totalsOf(expenseTodayRows, base);
+      const spentMonth = totalsOf(expenseMonthRows, base);
+
+      const counts = tally(todayAttendance, (row) => isOpenVisit(row, now));
+      const attendance = {
+        member: counts.members,
+        staff: counts.staff,
+        still_in: counts.in_now,
+        paid: counts.paid,
+        unpaid: counts.unpaid,
+        balance_due: counts.balance_due
+      };
 
       const [classCount, trainerCount, packageCount, memberCount] = catalogue;
 
@@ -244,9 +398,32 @@ module.exports = {
           period: range.label
         },
 
+        revenue_today: {
+          ...L.presentTotals(todayRevenue, base),
+          memberships: L.round(todayMembership),
+          admission: L.round(todayAdmission),
+          shop: L.round(todayShop),
+          payments: todayPayments,
+          sales: todaySales,
+          period: todayRange.label
+        },
+
+        // Paid expenses only, as the accounts screen nets them.
+        expenses_today: {
+          ...L.presentTotals(spentToday.totals, base),
+          entries: spentToday.n,
+          period: todayRange.label
+        },
+        expenses: {
+          ...L.presentTotals(spentMonth.totals, base),
+          entries: spentMonth.n,
+          period: range.label
+        },
+
         members: {
           total: memberCount,
           ...memberships,
+          new_this_month: newThisMonth,
           expiring_window_days: EXPIRING_WINDOW_DAYS
         },
 
