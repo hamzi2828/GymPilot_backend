@@ -151,10 +151,10 @@ module.exports = {
   cancel: async (req, res) => {
     try {
       if (!isId(req.params.id)) return fail(res, 400, 'Invalid session id');
-      const session = await PtSession.findById(req.params.id);
-      if (!session) return fail(res, 404, 'Session not found');
-      if (!req.isStaffBooking && String(session.memberId) !== String(actorId(req))) return fail(res, 403, 'You can only cancel your own sessions');
-      await pt.cancel(session, { by: actorId(req), reason: (req.body || {}).reason, byStaff: !!req.isStaffBooking });
+      const found = await PtSession.findById(req.params.id);
+      if (!found) return fail(res, 404, 'Session not found');
+      if (!req.isStaffBooking && String(found.memberId) !== String(actorId(req))) return fail(res, 403, 'You can only cancel your own sessions');
+      const session = await pt.cancel(found, { by: actorId(req), reason: (req.body || {}).reason, byStaff: !!req.isStaffBooking });
       return res.json({
         success: true,
         message: session.lateCancel ? 'Cancelled. This was a late cancellation, so the session credit was not returned.' : `Cancelled.${session.creditUsed ? ' The session credit is back on the pack.' : ''}`,

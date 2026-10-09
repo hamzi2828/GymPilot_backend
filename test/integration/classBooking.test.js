@@ -351,6 +351,46 @@ test('a membership sold to start later books the classes from its first day, and
   });
 });
 
+// The gym calls a session off (a timetable change) while a member is
+// cancelling their own place on it. The member's cancel is held back until
+// the gym's has read the bookings and is working through them, which is the
+// order that used to cancel that booking twice.
+test('the gym cancelling a session as a member cancels their place: the credit comes back once', async () => {
+  await h.inGym(gym, async () => {
+    const exceptions = h.src('gymfolio/controller/classExceptionController');
+    const date = T.shiftDateKey(tomorrow, 14);
+    const slot = [{ day: weekday, startTime: '18:00', endTime: '19:00', instructorName: 'Coach' }];
+    const circuits = await GymClass.create({ name: 'Circuits', description: 'Circuits class', capacity: 10, schedule: slot });
+
+    const people = [];
+    for (let n = 150; n < 156; n++) people.push(await member(n));
+    const held = [];
+    for (const m of people) {
+      // Several used already, so a credit handed back twice shows.
+      await PackageOrder.updateOne({ _id: m.order._id }, { $set: { 'sessions.used': 5 } });
+      const res = await book(m, circuits, date);
+      assert.equal(res.body.data.status, 'booked', JSON.stringify(res.body));
+      held.push(res.body.data.id);
+    }
+    const last = people.length - 1;
+
+    const calledOff = h.call(exceptions.create, { user: { id: String(people[0].user._id) }, body: { classId: String(circuits._id), date, startTime: '18:00', kind: 'cancelled', note: 'Coach is ill' } });
+    const underWay = await settle(async () => (await ClassBooking.findById(held[0]).select('status').lean()).status === 'cancelled', { tries: 2000, every: 0 });
+    assert.ok(underWay, 'the gym got as far as the first booking');
+    const own = await cancel(people[last], held[last]);
+    const res = await calledOff;
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+
+    // Whichever of the two reached the last booking first cancelled it.
+    assert.ok([200, 409].includes(own.statusCode), JSON.stringify(own.body));
+    assert.equal(res.body.cancelled_bookings + (own.statusCode === 200 ? 1 : 0), people.length);
+    for (const [i, m] of people.entries()) {
+      assert.equal((await ClassBooking.findById(held[i]).lean()).status, 'cancelled');
+      assert.equal(await creditsUsed(m), 5, `member ${i}: one credit taken to book, one given back`);
+    }
+  });
+});
+
 // A class that started at 09:00 today (the gym's clock reads midday). The
 // controller will not book into it, so the rows are written as they would
 // have been when it was booked: one place held on a pack credit, one waiting.
