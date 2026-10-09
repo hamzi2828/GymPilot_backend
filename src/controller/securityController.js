@@ -21,6 +21,7 @@ const { currentTenantId, currentTenantSlug, frontendOrigin } = require('../platf
 const { forgetSession } = require('../middleware/auth');
 const { publicUserView } = require('../services/userView');
 const guards = require('../services/roleGuards');
+const { currentPasswordRefusal } = require('../services/passwordCheck');
 const { actorAccess, permissionsFor } = require('../services/roleService');
 
 const BIOMETRIC_CONSENT_VERSION = '2026-09';
@@ -95,12 +96,22 @@ module.exports = {
     }
   },
 
-  // PUT /user/two-factor   { enabled }  -- for one's own account
+  // PUT /user/two-factor   { enabled, currentPassword? }  -- for one's own account
+  //
+  // Switching it OFF needs `currentPassword`: otherwise a stolen session
+  // could remove the one step that stands between it and the next sign-in.
+  // Without it: 400 with `code` PASSWORD_REQUIRED, PASSWORD_INCORRECT or
+  // PASSWORD_NOT_SET (services/passwordCheck.js). Switching it on needs
+  // nothing more than being signed in.
   setMyTwoFactor: async (req, res) => {
     try {
       const user = await User.findById(req.user.id);
       if (!user) return res.status(404).json({ message: 'Account not found' });
       const enabled = !!(req.body && (req.body.enabled === true || req.body.enabled === 'true'));
+      if (!enabled && user.twoFactor && user.twoFactor.enabled) {
+        const refusal = await currentPasswordRefusal(user, req.body && req.body.currentPassword, { toDo: 'turn off two-factor sign-in' });
+        if (refusal) return res.status(400).json(refusal);
+      }
       // The code arrives by email; switching this on with no address, or
       // with mail broken, would lock the account out at its next sign-in.
       if (enabled && !user.email) {

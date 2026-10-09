@@ -34,6 +34,7 @@ const { sendEmail } = require('./emailService');
 const { gymSiteName } = require('./gymName');
 const { shell, paragraph, button, escapeHtml } = require('../templates/gymEmails');
 const { currentTenantSlug } = require('../platform/tenantContext');
+const { maskEmail } = require('./twoFactorService');
 
 // Long enough to be opened at the weekend; the link does one thing, and
 // only for the account that asked for it.
@@ -105,6 +106,43 @@ function confirmationEmail({ firstName, siteName, url }) {
     )
   ].join('');
   return { subject: `Confirm your email for ${siteName}`, html: shell(siteName, 'Confirm your email address', body) };
+}
+
+// What the address that was on an account is told when it is changed or
+// removed: the one message that reaches the owner if it was not them.
+function addressChangedEmail({ firstName, siteName, newEmail, username }) {
+  const body = [
+    paragraph(
+      newEmail
+        ? `Hi ${escapeHtml(firstName || 'there')}, the email address on your ${escapeHtml(siteName)} account was changed to ${escapeHtml(maskEmail(newEmail))}.`
+        : `Hi ${escapeHtml(firstName || 'there')}, the email address was removed from your ${escapeHtml(siteName)} account.`
+    ),
+    paragraph('If you did this, there is nothing more to do. Emails about the account no longer come to this address.'),
+    paragraph(
+      `If you did not, tell ${escapeHtml(siteName)} straight away. They can set a new password for you${username ? `, and you can sign in with your username, <strong>${escapeHtml(username)}</strong>` : ''}.`
+    )
+  ].join('');
+  const what = newEmail ? 'changed' : 'removed';
+  return { subject: `Your ${siteName} email address was ${what}`, html: shell(siteName, `Your email address was ${what}`, body) };
+}
+
+/** Tells `to` -- the address the account had -- that it has been replaced. Never throws. */
+async function sendChangeNotice(to, account, { removed = false } = {}) {
+  try {
+    if (!to) return { sent: false };
+    const built = addressChangedEmail({
+      firstName: account.firstName,
+      siteName: await gymSiteName(),
+      newEmail: removed ? '' : account.email,
+      username: account.username
+    });
+    const result = await sendEmail(to, built.subject, built.html);
+    if (!result.success) console.error('[auth] email-change notice failed for', to, '-', result.error);
+    return { sent: !!result.success };
+  } catch (error) {
+    console.error('[auth] could not send an email-change notice:', error.message);
+    return { sent: false };
+  }
 }
 
 /**
@@ -243,6 +281,8 @@ module.exports = {
   confirm,
   markVerified,
   confirmationEmail,
+  addressChangedEmail,
+  sendChangeNotice,
   confirmPage,
   invalidPage
 };

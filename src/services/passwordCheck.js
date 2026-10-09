@@ -25,4 +25,41 @@ async function passwordMatches(password, hash) {
   return false;
 }
 
-module.exports = { passwordMatches };
+/**
+ * "Type your current password to do this": the check before a signed-in
+ * account changes something that decides who can get back into it -- its
+ * email address, its two-factor step. A session can be stolen (a shared
+ * computer, a copied token) without the password being known, and without
+ * this such a session could make the account its own for good.
+ *
+ * `toDo` finishes the sentence: "change your email address". Resolves to
+ * null when the password is right, or to the body of the 400 to send:
+ *
+ *   PASSWORD_REQUIRED   none was sent
+ *   PASSWORD_INCORRECT  it does not match
+ *   PASSWORD_NOT_SET    the account has none (it only ever used Google) --
+ *                       "Forgot password" emails its address a link to set
+ *                       one, which is the proof this check stands for
+ *
+ * @param {{ password?: string|null }} account  loaded with its password hash
+ */
+async function currentPasswordRefusal(account, typed, { toDo = 'do this' } = {}) {
+  if (!account || !account.password) {
+    return {
+      code: 'PASSWORD_NOT_SET',
+      message: `This account signs in with Google and has no password yet. Set one with "Forgot password" on the sign-in page, then ${toDo}.`
+    };
+  }
+  if (!typed || typeof typed !== 'string') {
+    return {
+      code: 'PASSWORD_REQUIRED',
+      message: `Enter your current password to ${toDo}. It stops anyone else who gets into your account from taking it over.`
+    };
+  }
+  if (!(await passwordMatches(typed, account.password))) {
+    return { code: 'PASSWORD_INCORRECT', message: 'That password is not right, so nothing was changed.' };
+  }
+  return null;
+}
+
+module.exports = { passwordMatches, currentPasswordRefusal };

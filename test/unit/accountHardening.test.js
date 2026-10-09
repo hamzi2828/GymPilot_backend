@@ -156,3 +156,39 @@ test('the link points at the address the API was reached on, or the one it is pi
   }
   assert.equal(verification.apiOrigin(null), '');
 });
+
+// ---- "type your current password to do this" (services/passwordCheck.js) ---
+
+const bcrypt = require('bcryptjs');
+const { currentPasswordRefusal } = require('../../src/services/passwordCheck');
+
+test('the current-password check answers with one of three codes, or lets the change through', async () => {
+  const account = { password: await bcrypt.hash('correct-horse-1', 4) };
+  const check = (acc, typed) => currentPasswordRefusal(acc, typed, { toDo: 'change your email address' });
+
+  assert.equal(await check(account, 'correct-horse-1'), null);
+  assert.equal((await check(account, 'wrong')).code, 'PASSWORD_INCORRECT');
+  for (const missing of [undefined, null, '', 0, false, {}, ['correct-horse-1']]) {
+    const refusal = await check(account, missing);
+    assert.equal(refusal.code, 'PASSWORD_REQUIRED', JSON.stringify(missing));
+    assert.match(refusal.message, /Enter your current password to change your email address/);
+  }
+  // Nothing to compare against: said so, whatever was typed.
+  for (const none of [{ password: null }, { password: '' }, {}, null]) {
+    const refusal = await check(none, 'anything');
+    assert.equal(refusal.code, 'PASSWORD_NOT_SET');
+    assert.match(refusal.message, /Forgot password/);
+  }
+});
+
+test('the notice to the old address masks the new one and shows names as text', () => {
+  const changed = verification.addressChangedEmail({ firstName: '<b>Ann</b>', siteName: 'Iron Works', newEmail: 'thief@evil.test', username: 'ann<i>123' });
+  assert.equal(changed.subject, 'Your Iron Works email address was changed');
+  assert.ok(changed.html.includes('th***@evil.test'));
+  assert.equal(changed.html.includes('thief@evil.test'), false);
+  assert.equal(changed.html.includes('<b>'), false);
+  assert.equal(changed.html.includes('<i>'), false);
+  assert.match(changed.html, /tell Iron Works straight away/);
+  const removed = verification.addressChangedEmail({ firstName: 'Ann', siteName: 'Iron Works', newEmail: '', username: '' });
+  assert.match(removed.html, /was removed from your Iron Works account/);
+});

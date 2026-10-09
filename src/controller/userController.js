@@ -17,7 +17,7 @@ const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
-const { passwordMatches } = require('../services/passwordCheck');
+const { passwordMatches, currentPasswordRefusal } = require('../services/passwordCheck');
 const { escapeHtml } = require('../templates/gymEmails');
 const verification = require('../services/emailVerification');
 
@@ -1150,7 +1150,17 @@ const userController = {
         }
     },
 
-    // PUT /user - Update an existing user
+    // PUT /update/user - a member edits their own profile
+    //
+    // { firstName?, lastName?, email?, phone?, dateOfBirth?, gender?,
+    //   avatarUrl?, goals?, currentPassword? }
+    //
+    // `currentPassword` is needed when, and only when, the request changes
+    // or removes the email address: that address is where a password reset
+    // goes, so whoever can change it owns the account. Without it the
+    // answer is a 400 with `code` PASSWORD_REQUIRED, PASSWORD_INCORRECT or
+    // PASSWORD_NOT_SET (services/passwordCheck.js) and nothing is saved.
+    // The old address is told, and the new one is sent a link to confirm it.
     updateUser: async (req, res) => {
         try {
             const token = req.headers.authorization;
@@ -1181,6 +1191,7 @@ const userController = {
             // go without one (emailRemovalProblem).
             let removedEmail = false;
             let changedEmail = false;
+            let previousEmail = null;
             if (safeUpdates.email !== undefined) {
                 const me = await User.findById(currentUser.id).select('email role employment.isStaff twoFactor.enabled provider googleId password').lean();
                 if (!me) return res.status(404).json({ message: 'User not found' });
@@ -1197,6 +1208,14 @@ const userController = {
                         return res.status(400).json({ message: 'Please provide a valid email address' });
                     }
                     changedEmail = true;
+                }
+
+                if (changedEmail || removedEmail) {
+                    const refusal = await currentPasswordRefusal(me, userData.currentPassword, {
+                        toDo: removedEmail ? 'remove your email address' : 'change your email address'
+                    });
+                    if (refusal) return res.status(400).json(refusal);
+                    previousEmail = me.email || null;
                 }
             }
             if (!Object.keys(safeUpdates).length && !removedEmail) {
@@ -1233,6 +1252,11 @@ const userController = {
 
             if (changedEmail) {
                 afterResponse(() => verification.sendLink(updatedUser, { origin: verification.apiOrigin(req) }), 'confirmation email');
+            }
+            // The address it was is told: if this was not its owner, that
+            // message is how they find out.
+            if (previousEmail) {
+                afterResponse(() => verification.sendChangeNotice(previousEmail, updatedUser, { removed: removedEmail }), 'email change notice');
             }
 
             // Remove sensitive data from response
