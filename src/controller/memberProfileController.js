@@ -12,6 +12,8 @@ const { toPublicPath } = require('../helper/upload');
 const { membershipFor } = require('../attendance/services/peopleDirectory');
 const Attendance = require('../attendance/models/attendanceModel');
 const { primaryAddress, oneLine } = require('../services/memberFields');
+const guards = require('../services/roleGuards');
+const { actorAccess, permissionsFor } = require('../services/roleService');
 
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 const blobUpload = require('../helper/blobUpload');
@@ -37,6 +39,22 @@ function fail(res, code, message) {
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+}
+
+// Who may change whose record. `users: manage` opens these screens, but it
+// is the line the Users tab already holds on deleting an account or setting
+// its password (services/roleGuards.js) that decides which accounts: an
+// administrator's only by an administrator, and nobody's whose role reaches
+// further than the actor's own. Your own record is yours to edit.
+// Resolves to the sentence to refuse with, or null.
+async function reachRefusal(req, target) {
+  const actor = await actorAccess(req);
+  if (actor.actorId && String(actor.actorId) === String(target._id)) return null;
+  if (guards.isAdmin(actor.actorRole)) return null;
+  if (guards.isAdmin(target.role)) return "Only an administrator can change an administrator's profile.";
+  const wider = guards.widerTab(actor.actorPermissions, await permissionsFor(target.role));
+  if (wider) return `This account has more access than yours (${wider}), so ask an administrator to change its profile.`;
+  return null;
 }
 
 async function waiverSettings() {
@@ -268,6 +286,8 @@ module.exports = {
       // Health details are merged field by field, so they must be loaded.
       const user = await User.findById(req.params.id).select('+medical +staffNotes');
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const body = req.body || {};
 
       for (const key of ['firstName', 'lastName']) {
@@ -314,6 +334,8 @@ module.exports = {
       if (!req.file) return fail(res, 400, 'Choose an image');
       const user = await User.findById(req.params.id);
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const url = await setPhoto(user, req.file);
       return res.json({ success: true, message: 'Photo updated.', data: { avatarUrl: url } });
     } catch (error) {
@@ -330,6 +352,8 @@ module.exports = {
       // The list is appended to, so it has to be loaded (`select: false`).
       const user = await User.findById(req.params.id).select('+documents');
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       if ((user.documents || []).length >= 50) return fail(res, 409, 'This member already has 50 documents');
       const url = await storeUpload(req.file, 'member-documents');
       user.documents = user.documents || [];
@@ -356,6 +380,8 @@ module.exports = {
       if (!isId(req.params.id) || !isId(req.params.docId)) return fail(res, 404, 'Document not found');
       const user = await User.findById(req.params.id).select('+documents');
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const doc = (user.documents || []).find((d) => String(d._id) === String(req.params.docId));
       if (!doc) return fail(res, 404, 'Document not found');
       const url = doc.url;
@@ -375,6 +401,8 @@ module.exports = {
       if (!isId(req.params.id)) return fail(res, 404, 'Member not found');
       const user = await User.findById(req.params.id);
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const config = await waiverSettings();
       const name = text((req.body || {}).signature, 120) || [user.firstName, user.lastName].filter(Boolean).join(' ');
       user.waiver = { signedAt: new Date(), version: config.version, signature: name, source: 'desk', ip: clientIp(req), recordedBy: actorId(req) };
