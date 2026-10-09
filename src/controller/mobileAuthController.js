@@ -32,8 +32,12 @@ const signInLock = require('../services/signInLock');
 const REJECTED = `That username and password do not match. ${signInLock.PAUSE_NOTE}`;
 const EXPIRED_SIGN_IN = 'This sign-in has expired. Please sign in again.';
 const TURNED_OFF = 'This account has been turned off. Please speak to your gym.';
-// Same idea for the reset link: one answer whether or not the username exists.
-const FORGOT_MESSAGE = 'If that username exists, we emailed a reset link.';
+// Same idea for the reset link: one answer whether or not the username
+// exists -- and whether or not its account has an email address, since a
+// member the desk added by phone number has none and is emailed nothing. So
+// it says what is true of both, and what to do when no email comes.
+const FORGOT_MESSAGE =
+  'If that username has an account with an email address, a link to choose a new password is on its way. If no email arrives, ask the front desk to set a new password for you.';
 const NOT_INCLUDED = { success: false, code: 'MEMBER_APP_NOT_INCLUDED', message: 'Your gym has not enabled the member app yet.' };
 
 // A phone is not a shared computer.
@@ -283,8 +287,8 @@ module.exports = {
   //
   // Emails the same reset link the website's forgot-password form does; the
   // member finishes on the gym's website, where the link points. The answer
-  // is the same whether or not the username exists, for the reason given
-  // above REJECTED.
+  // is the same whether or not the username exists or has an email address
+  // (FORGOT_MESSAGE), for the reason given above REJECTED.
   forgot: async (req, res) => {
     const generic = { success: true, message: FORGOT_MESSAGE };
     try {

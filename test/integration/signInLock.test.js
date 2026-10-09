@@ -239,6 +239,31 @@ test('the desk app sign-in uses the same ten tries, and respects the pause', asy
   assert.deepEqual((await deskLogin(off.email, PASSWORD)).body, unknown.body);
 });
 
+test("the phone app's forgot-password answer is one sentence, true with or without an email on the account", async () => {
+  const forgot = (username) => h.call(mobile.forgot, { protocol: 'https', headers: { host: 'api.gympilot.test' }, body: { username } });
+  const withEmail = await account();
+  const noEmail = await account({ email: undefined, phone: '0300 5556667' });
+  const before = h.calls.emails.length;
+
+  const answers = [await forgot(withEmail.username), await forgot(noEmail.username), await forgot('nobodyatall999')];
+  for (const res of answers) {
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body, answers[0].body, 'one answer, whoever asked');
+  }
+  // It promises an email only to an account that has an address, and says
+  // what to do otherwise.
+  assert.match(answers[0].body.message, /If that username has an account with an email address, a link to choose a new password is on its way/);
+  assert.match(answers[0].body.message, /If no email arrives, ask the front desk to set a new password for you/);
+
+  // The link goes to the one account that can be emailed.
+  let sent = [];
+  for (let i = 0; i < 60 && !sent.length; i++) {
+    sent = h.calls.emails.slice(before).filter((m) => /Reset your/.test(m.subject));
+    if (!sent.length) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.deepEqual(sent.map((m) => m.to), [withEmail.email]);
+});
+
 // ---- the emailed sign-in code ---------------------------------------------
 
 async function challengeFor(lena) {
