@@ -231,13 +231,22 @@ module.exports = {
   },
 
   // POST /admin/users/:id/logout-all  (staff)
+  //
+  // Held to the line every other action on an account is: an
+  // administrator's only by an administrator, and nothing on an account that
+  // reaches further than the caller's own (services/roleGuards.js).
   forceLogout: async (req, res) => {
     try {
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'User not found' });
-      const user = await User.findByIdAndUpdate(req.params.id, { $inc: { tokenVersion: 1 } }, { new: true }).select('email');
+      const target = await User.findById(req.params.id).select(`email ${REACH_FIELDS}`).lean();
+      if (!target) return res.status(404).json({ message: 'User not found' });
+      const refusal = await reachRefusal(req, target, 'sign out');
+      if (refusal) return res.status(403).json({ message: refusal });
+
+      const user = await User.findByIdAndUpdate(target._id, { $inc: { tokenVersion: 1 } }, { new: true }).select('_id');
       if (!user) return res.status(404).json({ message: 'User not found' });
       forgetSession(user._id);
-      return res.json({ success: true, message: `${user.email} has been signed out of every device.` });
+      return res.json({ success: true, message: `${target.email} has been signed out of every device.` });
     } catch (error) {
       console.error('[security] force logout failed:', error);
       return res.status(500).json({ message: 'Could not sign the user out' });
@@ -276,11 +285,16 @@ module.exports = {
   },
 
   // PUT /admin/users/:id/consent   { biometric: true|false }  -- staff, after a signed form
+  //
+  // Withdrawing it deletes the person's fingerprints, so it is held to the
+  // same line as signing them out (services/roleGuards.js).
   recordConsent: async (req, res) => {
     try {
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'User not found' });
       const user = await User.findById(req.params.id);
       if (!user) return res.status(404).json({ message: 'User not found' });
+      const refusal = await reachRefusal(req, user, 'record consent for');
+      if (refusal) return res.status(403).json({ message: refusal });
       const body = req.body || {};
       if (body.biometric === undefined) return res.status(400).json({ message: 'Nothing to update' });
 
