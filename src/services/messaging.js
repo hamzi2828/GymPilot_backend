@@ -171,10 +171,11 @@ async function sendText(channel, rawTo, body, meta = {}) {
         : provider.name === 'meta'
         ? await metaSend(provider, to, body)
         : await httpSend(provider, channel, to, body);
-    MessageLog.record({ ...entry, status: 'sent', providerId });
+    // Awaited: a campaign reads this row to know not to send again.
+    await MessageLog.record({ ...entry, status: 'sent', providerId });
     return { success: true, providerId };
   } catch (error) {
-    MessageLog.record({ ...entry, status: 'failed', error: error.message });
+    await MessageLog.record({ ...entry, status: 'failed', error: error.message });
     console.error(`[messages] ${channel} -> ${to} failed:`, error.message);
     return { success: false, error: error.message };
   }
@@ -266,6 +267,23 @@ async function expoTokensFor(userId) {
 }
 
 /**
+ * The members push can reach right now, as a Set of user ids: everyone with
+ * the app registered, plus -- when the gym has web push set up -- everyone
+ * with a browser subscribed. The rule sendPush applies to one member, for a
+ * whole audience at once: a campaign uses it to leave out the members who
+ * have no device instead of asking about each of them on every batch.
+ */
+async function usersWithDevices() {
+  const cfg = await messagingConfig();
+  const [browsers, phones] = await Promise.all([
+    pushConfig(cfg) ? PushSubscription.distinct('userId') : [],
+    MobilePushToken.find({}).select('userId token').lean()
+  ]);
+  const ids = [...browsers, ...phones.filter((row) => isExpoPushToken(row.token)).map((row) => row.userId)];
+  return new Set(ids.filter(Boolean).map(String));
+}
+
+/**
  * Pushes to every device a member has registered: browsers through web
  * push, and phones running the member app through Expo. Subscriptions a
  * browser has revoked and tokens Expo reports as gone are dropped as they
@@ -324,7 +342,7 @@ async function sendPush(userId, payload, meta = {}) {
     if (expo.dead.length) await MobilePushToken.deleteMany({ token: { $in: expo.dead } }).catch(() => {});
   }
 
-  MessageLog.record({
+  await MessageLog.record({
     channel: 'push',
     to: String(userId),
     userId,
@@ -374,6 +392,7 @@ module.exports = {
   sendWhatsApp,
   sendText,
   sendPush,
+  usersWithDevices,
   generateVapidKeys,
   channels,
   // Expo push, exported for the app's register route and for the tests.
