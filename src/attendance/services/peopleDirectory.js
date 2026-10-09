@@ -251,15 +251,50 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // as live however far off its end date is.
 const NOT_LIVE = new Set(['cancelled', 'suspended']);
 
+// A card subscription renews on Stripe's clock, not ours: the next term is
+// charged around the moment this one ends, and the invoice.paid that moves
+// the end date on can land hours later -- days, while Stripe retries a card.
+// The expiry sweep gives such an order STRIPE_SETTLE_DAYS before calling it
+// lapsed (gymfolio/services/membershipExpiry.js), and the desk gives it the
+// same: without that, every card member who walked in during the gap was
+// told their fee had expired. "Still renewing" is reminderJobs.willAutoRenew,
+// so one told to stop ends on its end date like any other. Both are read
+// where they are defined, and when first needed: those files load the
+// notification stack, which this one must not pull in on load.
+function inRenewalGrace(order, end, now) {
+  const { STRIPE_SETTLE_DAYS } = require('../../gymfolio/services/membershipExpiry');
+  if (end.getTime() + STRIPE_SETTLE_DAYS * DAY_MS < now.getTime()) return false;
+  const { willAutoRenew } = require('../../services/reminderJobs');
+  return willAutoRenew(order);
+}
+
 function isLiveOrder(order, now) {
-  return (
-    !NOT_LIVE.has(order.status) &&
-    order.subscription &&
-    order.subscription.endDate &&
-    new Date(order.subscription.endDate) >= now &&
-    // A pack with nothing left on it is not a live membership.
-    !(order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total)
-  );
+  if (NOT_LIVE.has(order.status) || !order.subscription || !order.subscription.endDate) return false;
+  // A pack with nothing left on it is not a live membership.
+  if (order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total) return false;
+  const end = new Date(order.subscription.endDate);
+  return end >= now || inRenewalGrace(order, end, now);
+}
+
+// Whether the order is frozen right now. A freeze has an end
+// (freeze.resumeAt), and the stored status only catches up when the daily
+// job resumes it -- until then a member back from their freeze was still
+// told "frozen" at the door. The end date was already moved on by the
+// frozen days when the freeze began, so past resumeAt the term simply runs.
+function isFrozenNow(order, now) {
+  if (order.status !== 'frozen') return false;
+  const resumeAt = order.freeze && order.freeze.resumeAt;
+  return !resumeAt || new Date(resumeAt) > now;
+}
+
+// A personal-training pack pays for PT sessions. It says nothing about the
+// membership, so it does not speak for the member at the door while they
+// hold anything else: led by the newest end date alone, a PT pack bought
+// last week read "Active" over a membership that had expired or was frozen.
+// Somebody whose only orders are PT packs is still answered from those.
+function ordersForTheDoor(orders) {
+  const others = orders.filter((order) => !(order.packageDetails && order.packageDetails.kind === 'pt_pack'));
+  return others.length ? others : orders;
 }
 
 // Whether the term has begun. The desk can sell a membership that starts in
@@ -413,7 +448,7 @@ function membershipFromOrders(paidOrders, unpaid, now = new Date(), { owing = pa
 }
 
 function verdictFromOrders(paidOrders, unpaid, now) {
-  const recent = (paidOrders || []).slice(0, RECENT_PAID_ORDERS);
+  const recent = ordersForTheDoor(paidOrders || []).slice(0, RECENT_PAID_ORDERS);
 
   // A paid membership that is in date wins over everything else: a renewal
   // sitting in the bank-transfer queue must not hide the term that is
@@ -428,7 +463,7 @@ function verdictFromOrders(paidOrders, unpaid, now) {
   const liveOrders = recent.filter((order) => isLiveOrder(order, now));
   if (liveOrders.some((order) => hasStarted(order, now))) {
     const live = liveOrders[0];
-    const status = live.status === 'frozen' ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
+    const status = isFrozenNow(live, now) ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
     return describeOrder(live, status, now);
   }
 
@@ -547,8 +582,8 @@ async function membershipsFor(users, now) {
 
   // Only what membershipFromOrders reads, plus the two owner fields.
   const fields =
-    'userId customerInfo.email packageDetails.name subscription sessions status createdAt ' +
-    'payment.status payment.balanceDue payment.currency';
+    'userId customerInfo.email packageDetails.name packageDetails.kind subscription sessions status createdAt ' +
+    'payment.status payment.balanceDue payment.currency payment.stripeSubscriptionId freeze.resumeAt';
   const [paidOrders, unpaidOrders] = await Promise.all([
     PackageOrder.find({ ...owners, ...PAID_ORDER }).select(fields).lean(),
     PackageOrder.find({ ...owners, ...AWAITING_PAYMENT }).select(fields).lean()
