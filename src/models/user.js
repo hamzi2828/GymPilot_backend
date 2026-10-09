@@ -384,6 +384,15 @@ const userSchema = new mongoose.Schema({
     emailVerifyTokenHash: { type: String, select: false },
     emailVerifyExpiresAt: { type: Date, select: false },
 
+    // ---- Add member, sent twice ---------------------------------------------
+    //
+    // The desk's id for the "Add member" request that made this account,
+    // when it sent one (memberRegistrationController): the same id arriving
+    // again is that request sent again after a lost reply, and is answered
+    // with this member rather than by adding a second. No default, so only
+    // accounts made that way carry it; never in a query that does not ask.
+    registrationRequestId: { type: String, select: false },
+
 }, { timestamps: true });
 
 userSchema.index(
@@ -410,6 +419,13 @@ userSchema.index(
 userSchema.index(
     { email: 1 },
     { unique: true, name: 'email_1', partialFilterExpression: { email: { $type: 'string' } } }
+);
+
+// One account per "Add member" request id, among the accounts that have one:
+// two copies of a request arriving together cannot both make a member.
+userSchema.index(
+    { registrationRequestId: 1 },
+    { unique: true, partialFilterExpression: { registrationRequestId: { $type: 'string' } } }
 );
 
 // Sparse: accounts created before usernames existed have no field at all and

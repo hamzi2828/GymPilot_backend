@@ -340,6 +340,7 @@ function duplicateMessage(error) {
     }
     if ('memberCode' in key) return 'That member ID is already in use';
     if ('username' in key) return 'That username is already in use';
+    if ('registrationRequestId' in key) return 'This member is already being added. Wait a moment, then look for them on Users.';
     return 'Email already in use';
 }
 
@@ -369,7 +370,7 @@ function duplicateMessage(error) {
 // the password away: it comes back in `password`, shown once, so a gym whose
 // mail is down can still hand it over.
 // ---------------------------------------------------------------------------
-async function createMemberAccount(req, body = (req && req.body) || {}) {
+async function createMemberAccount(req, body = (req && req.body) || {}, { registrationRequestId } = {}) {
     const fail = (status, message, extra = {}) => ({ status, body: { message, ...extra } });
     try {
         const { firstName, lastName, email, role, phone } = body;
@@ -451,6 +452,9 @@ async function createMemberAccount(req, body = (req && req.body) || {}) {
             // staff, or they would be invisible on the Staff tab that
             // manages their payroll and roster.
             employment: { isStaff: !!(requestedRole && requestedRole.isStaff) },
+            // "Add member" only: its request id, kept with the account it
+            // made (see the model). Never read from the body.
+            ...(registrationRequestId ? { registrationRequestId } : {}),
         });
         // A member's ID from the start, for the card and the Users list.
         await assignMemberCode(user);

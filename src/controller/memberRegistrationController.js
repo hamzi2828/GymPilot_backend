@@ -9,6 +9,7 @@
 //
 //   { firstName, lastName, email?, phone?, gender?, dateOfBirth?, address?,
 //     staffNotes?, credentials?: 'email' | 'show' | 'set', password?,
+//     requestId?,
 //     membership?: { packageId, paymentMethod?, markPaid?, couponCode?,
 //       durationMonths?, startDate? | startAfterDays?, discountAmount?,
 //       discountNote?, amountOverride?, waiveJoiningFee? | joiningFeeOverride?,
@@ -23,6 +24,17 @@
 //
 //   → 201 { success, message, member, order (null without a membership),
 //           credentials, emailed, emailError, password? }
+//
+// `requestId` (or membership.requestId, which the website sends): the desk's
+// own id for this attempt -- 8 to 100 letters, digits, hyphens or
+// underscores, a UUID will do -- sent again unchanged when the answer never
+// arrived. It is kept on the account the request makes. Sent again, nothing
+// is created: the answer is that member and their order, `repeated: true`,
+// and a message saying so. The password is not in it -- it was shown, or
+// emailed, once, and only its hash is kept -- so the message says where to
+// set one. Without it a member with no email, who cannot be told apart by
+// their address, was added and charged twice. Left out, every request is
+// new, as before.
 //
 // The account is made exactly as POST /admin/users makes it
 // (userController.createMemberAccount: its rules, member ID, password
@@ -47,6 +59,7 @@ const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const Trainer = require('../gymfolio/models/trainerModel');
 const membership = require('../gymfolio/services/membershipService');
 const { createMemberAccount, releaseAccount } = require('./userController');
+const { publicUserView } = require('../services/userView');
 const { can } = require('../services/roleService');
 const { readDeskMethod } = require('../services/paymentMethods');
 const { parseAmount } = require('../helper/money');
@@ -154,6 +167,32 @@ async function readSale(block, { email }) {
   return { pkg, terms, markPaid, durationMonths: block.durationMonths, couponCode };
 }
 
+// Said when the request is one already carried out. The password cannot be
+// given again, so the message says what to do about that.
+const ALREADY_ADDED = 'This member was already added a moment ago, so nothing was added again. If you did not see their password, open their profile to set one.';
+
+/**
+ * The answer to an "Add member" request whose id an account already
+ * carries: that member and the order the first request sold them, with
+ * nothing created. Null when no account has the id -- the request is new.
+ */
+async function repeatOf(requestId) {
+  if (!requestId) return null;
+  const member = await User.findOne({ registrationRequestId: requestId });
+  if (!member) return null;
+  const order = await PackageOrder.findOne({ userId: member._id, 'metadata.requestId': requestId });
+  return {
+    success: true,
+    repeated: true,
+    message: ALREADY_ADDED,
+    member: publicUserView(member),
+    order: order || null,
+    credentials: null,
+    emailed: false,
+    emailError: null
+  };
+}
+
 /**
  * Undoes an account this request made a moment ago: its orders (a sale that
  * failed part-way may have saved one), the account, and what saving it
@@ -180,6 +219,7 @@ const memberRegistrationController = {
 
     const selling = present(body.membership);
     let sale = null;
+    let requestId;
     try {
       if (selling) {
         // Selling is a package-orders write, as on Package Orders.
@@ -187,8 +227,17 @@ const memberRegistrationController = {
         if (!(await can(role, 'package-orders', 'manage'))) {
           return refuse(res, 403, 'Your role does not have manage access to package-orders.');
         }
-        sale = await readSale(body.membership, { email: String(body.email || '').toLowerCase().trim() });
       }
+      // This attempt's id, wherever the desk put it. Asked before the sale
+      // is read: a repeat must not be refused over something the first
+      // request itself used up (a coupon's last redemption, the plan's last
+      // free place).
+      const block = selling && typeof body.membership === 'object' ? body.membership : {};
+      requestId = membership.readRequestId(present(body.requestId) ? body.requestId : block.requestId);
+      const repeat = await repeatOf(requestId);
+      if (repeat) return res.status(201).json(repeat);
+
+      if (selling) sale = await readSale(body.membership, { email: String(body.email || '').toLowerCase().trim() });
     } catch (error) {
       if (error instanceof MembershipError) return refuse(res, error.status || 400, error.message, error.code);
       console.error('[register] could not read the membership:', error);
@@ -198,8 +247,15 @@ const memberRegistrationController = {
     const memberBody = { role: 'user' };
     for (const field of MEMBER_FIELDS) if (body[field] !== undefined) memberBody[field] = body[field];
 
-    const account = await createMemberAccount(req, memberBody);
-    if (!account.user) return res.status(account.status).json({ success: false, ...account.body });
+    const account = await createMemberAccount(req, memberBody, { registrationRequestId: requestId });
+    if (!account.user) {
+      // The same request arriving twice at once: the other copy made the
+      // member between the lookup above and here (the index on the id
+      // refused this one). Answered as the repeat it is.
+      const repeat = await repeatOf(requestId).catch(() => null);
+      if (repeat) return res.status(201).json(repeat);
+      return res.status(account.status).json({ success: false, ...account.body });
+    }
     const { user } = account;
 
     let order = null;
@@ -212,6 +268,8 @@ const memberRegistrationController = {
           markPaid: sale.markPaid,
           durationMonths: sale.durationMonths,
           couponCode: sale.couponCode,
+          // On the order too, so a repeat finds the sale with the member.
+          requestId,
           paidBy: req.user ? req.user._id || req.user.id : null,
           by: req.user && req.user.email
         });

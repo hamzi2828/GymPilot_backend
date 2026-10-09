@@ -311,3 +311,97 @@ test('permissions: users · manage at the gate, and package-orders · manage to 
   assert.equal(staffRole.statusCode, 400);
   assert.equal(staffRole.body.code, 'INVALID_ROLE');
 });
+
+test('Add member sent again with the same request id adds nobody and sells nothing twice, with or without an email', async () => {
+  const count = (filter) => inGym(() => User.countDocuments(filter));
+  const requestId = 'register-0001-a1b2c3d4';
+  // A member with no email: nothing about them says a second request is the same person.
+  const body = {
+    firstName: 'Nadia',
+    lastName: 'Noemail',
+    phone: '0300 8800001',
+    credentials: 'show',
+    membership: { packageId: String(monthly._id), paymentMethod: 'cash', requestId }
+  };
+
+  const first = await post(receptionist, body);
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  assert.equal(first.body.repeated, undefined);
+  assert.ok(first.body.password, 'shown once');
+  assert.equal('registrationRequestId' in first.body.member, false, 'the id is bookkeeping, not part of the member');
+
+  // The reply was lost; the desk sends the very same request.
+  const again = await post(receptionist, body);
+  assert.equal(again.statusCode, 201, JSON.stringify(again.body));
+  assert.equal(again.body.success, true);
+  assert.equal(again.body.repeated, true);
+  assert.equal(String(again.body.member._id), String(first.body.member._id));
+  assert.equal(again.body.member.memberCode, first.body.member.memberCode);
+  assert.equal(String(again.body.order._id), String(first.body.order._id));
+  assert.equal(again.body.order.payment.amount, 7000);
+  // The password was shown once and only its hash is kept: the repeat says what to do.
+  assert.equal(again.body.password, undefined);
+  assert.equal(again.body.message, 'This member was already added a moment ago, so nothing was added again. If you did not see their password, open their profile to set one.');
+  assert.equal('password' in again.body.member, false);
+
+  assert.equal(await count({ phone: '0300 8800001' }), 1, 'one member');
+  assert.equal(await inGym(() => PackageOrder.countDocuments({ userId: first.body.member._id })), 1, 'one order');
+  assert.equal(await inGym(() => MemberDirectory.countDocuments({ userId: first.body.member._id })), 1);
+
+  // The id at the top level works the same, and without a membership.
+  const alone = { firstName: 'Tara', lastName: 'Toplevel', phone: '0300 8800002', credentials: 'show', requestId: 'register-0002-a1b2c3d4' };
+  const made = await post(receptionist, alone);
+  assert.equal(made.statusCode, 201, JSON.stringify(made.body));
+  const madeAgain = await post(receptionist, alone);
+  assert.equal(madeAgain.body.repeated, true);
+  assert.equal(madeAgain.body.order, null);
+  assert.equal(String(madeAgain.body.member._id), String(made.body.member._id));
+  assert.equal(await count({ phone: '0300 8800002' }), 1);
+
+  // With an email the repeat is answered the same way, not as "Email already in use".
+  const withEmail = { firstName: 'Emma', lastName: 'Email', email: 'emma@register.test', membership: { packageId: String(monthly._id), requestId: 'register-0003-a1b2c3d4' } };
+  assert.equal((await post(receptionist, withEmail)).statusCode, 201);
+  const emailAgain = await post(receptionist, withEmail);
+  assert.equal(emailAgain.statusCode, 201, JSON.stringify(emailAgain.body));
+  assert.equal(emailAgain.body.repeated, true);
+  assert.equal(await count({ email: 'emma@register.test' }), 1);
+
+  // A new id is a new member, even with the same name and phone; so is no id.
+  const next = await post(receptionist, { ...body, membership: { ...body.membership, requestId: 'register-0004-a1b2c3d4' } });
+  assert.equal(next.statusCode, 201, JSON.stringify(next.body));
+  assert.equal(next.body.repeated, undefined);
+  assert.equal(await count({ phone: '0300 8800001' }), 2);
+  const { requestId: _dropped, ...noId } = body.membership;
+  assert.equal((await post(receptionist, { ...body, membership: noId })).body.repeated, undefined);
+  assert.equal(await count({ phone: '0300 8800001' }), 3);
+
+  // Something that is not an id is refused before anybody is made.
+  const bad = await post(receptionist, { ...body, phone: '0300 8800009', requestId: 'no' });
+  assert.equal(bad.statusCode, 400, JSON.stringify(bad.body));
+  assert.equal(bad.body.code, 'INVALID_TERMS');
+  assert.equal(await count({ phone: '0300 8800009' }), 0);
+
+  // Two copies arriving at the very same moment still make one member.
+  const twin = { firstName: 'Tina', lastName: 'Twice', phone: '0300 8800003', credentials: 'show', membership: { packageId: String(monthly._id), requestId: 'register-0005-a1b2c3d4' } };
+  const both = await Promise.all([post(receptionist, twin), post(receptionist, twin)]);
+  assert.equal(await count({ phone: '0300 8800003' }), 1, JSON.stringify(both.map((res) => [res.statusCode, res.body.message])));
+  const tina = await inGym(() => User.findOne({ phone: '0300 8800003' }).lean());
+  assert.equal(await inGym(() => PackageOrder.countDocuments({ userId: tina._id })), 1);
+
+  // A sale that fails takes its member back out, so the same id can be used
+  // for the corrected attempt.
+  const original = membership.createManualOrder;
+  membership.createManualOrder = async () => {
+    throw new membership.MembershipError('Not today', 409, 'TEST_REFUSAL');
+  };
+  const failing = { firstName: 'Fay', lastName: 'Failed', phone: '0300 8800004', credentials: 'show', membership: { packageId: String(monthly._id), requestId: 'register-0006-a1b2c3d4' } };
+  try {
+    assert.equal((await post(receptionist, failing)).statusCode, 409);
+  } finally {
+    membership.createManualOrder = original;
+  }
+  assert.equal(await count({ phone: '0300 8800004' }), 0);
+  const retried = await post(receptionist, failing);
+  assert.equal(retried.statusCode, 201, JSON.stringify(retried.body));
+  assert.equal(retried.body.repeated, undefined);
+});

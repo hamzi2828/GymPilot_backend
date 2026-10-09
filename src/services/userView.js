@@ -14,7 +14,9 @@
 //                                                through /user/health)
 //   documents, employment.payroll, waiver.ip  -- staff screens read these
 //                                                through their own endpoints
-//   automation                                -- bookkeeping for the nudges
+//   automation, registrationRequestId         -- bookkeeping: the nudges,
+//                                                and the desk's id for the
+//                                                request that made the account
 //
 // Everything the website and the phone app read stays: firstName, lastName,
 // email, username, role, phone, avatarUrl, twoFactor.enabled, consents,
@@ -33,6 +35,7 @@ function publicUserView(user) {
     medical: _medical,
     documents: _documents,
     automation: _automation,
+    registrationRequestId: _registrationRequestId,
     twoFactor,
     ...safe
   } = raw;
