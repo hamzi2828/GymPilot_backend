@@ -1,6 +1,37 @@
 const GymClass = require('../models/gymClassModel');
 const { currencyOr } = require('../../services/currency');
 const { checkLimit } = require('../../platform/planLimits');
+const { cancelBookings } = require('./classExceptionController');
+const T = require('../../attendance/services/timeUtils');
+
+/**
+ * The bookings on a class's sessions still to come: later days, and later
+ * today. A session that has already started is left alone -- those members
+ * came, or are there now.
+ */
+function upcomingBookings(classId, now = new Date()) {
+  const today = T.dateKey(now);
+  const { hour, minute } = T.localParts(now);
+  const clock = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  return { classId, $or: [{ sessionDate: { $gt: today } }, { sessionDate: today, sessionStart: { $gt: clock } }] };
+}
+
+/**
+ * A class that stops running -- deleted, or switched off -- takes its coming
+ * bookings with it: each is cancelled, its credit goes back on the pack and
+ * the member is told, exactly as when the gym calls one session off. Left
+ * booked, members kept a place (and a spent credit) on a class nobody could
+ * see any more, and were still reminded to come. Returns how many.
+ */
+function cancelUpcoming(gymClass, req) {
+  const by = req.user && (req.user.id || req.user._id);
+  return cancelBookings(upcomingBookings(gymClass._id), { by, reason: `${gymClass.name} is no longer running` });
+}
+
+// What the answer adds when bookings went with the class.
+function cancelledNote(count) {
+  return count ? `. ${count} upcoming booking(s) were cancelled and the members told.` : '';
+}
 
 // A list field as it arrives from either kind of client: a real array from a
 // JSON body, a JSON string ('["a","b"]') from a multipart form, or a plain
@@ -449,10 +480,14 @@ const updateClass = async (req, res) => {
       runValidators: true
     }).populate('schedule.instructor', 'name role image');
 
+    // Switched off from the edit form: its coming bookings go with it.
+    const cancelledBookings = gymClass.isActive && !updateData.isActive ? await cancelUpcoming(gymClass, req) : 0;
+
     res.status(200).json({
       success: true,
-      message: 'Class updated successfully',
-      data: updatedClass
+      message: `Class updated successfully${cancelledNote(cancelledBookings)}`,
+      data: updatedClass,
+      cancelled_bookings: cancelledBookings
     });
   } catch (error) {
     console.error('Error updating class:', error);
@@ -482,7 +517,7 @@ const toggleClassStatus = async (req, res) => {
     const { id } = req.params;
     const wanted = readBoolean((req.body || {}).isActive);
 
-    const current = await GymClass.findById(id).select('isActive');
+    const current = await GymClass.findById(id).select('isActive name');
     if (!current) {
       return res.status(404).json({
         success: false,
@@ -497,10 +532,13 @@ const toggleClassStatus = async (req, res) => {
       { new: true, runValidators: true }
     ).populate('schedule.instructor', 'name role image');
 
+    const cancelledBookings = current.isActive && !isActive ? await cancelUpcoming(current, req) : 0;
+
     res.status(200).json({
       success: true,
-      message: `Class ${isActive ? 'activated' : 'deactivated'} successfully`,
-      data: gymClass
+      message: `Class ${isActive ? 'activated' : 'deactivated'} successfully${cancelledNote(cancelledBookings)}`,
+      data: gymClass,
+      cancelled_bookings: cancelledBookings
     });
   } catch (error) {
     console.error('Error updating class status:', error);
@@ -561,11 +599,15 @@ const deleteClass = async (req, res) => {
       });
     }
 
+    // Bookings first: if that fails part-way the class is still there, and
+    // deleting it again finishes the job.
+    const cancelledBookings = await cancelUpcoming(gymClass, req);
     await GymClass.findByIdAndDelete(id);
 
     res.status(200).json({
       success: true,
-      message: 'Class deleted successfully'
+      message: `Class deleted successfully${cancelledNote(cancelledBookings)}`,
+      cancelled_bookings: cancelledBookings
     });
   } catch (error) {
     console.error('Error deleting class:', error);
@@ -579,6 +621,7 @@ const deleteClass = async (req, res) => {
 
 module.exports = {
   parseList,
+  upcomingBookings,
   getActiveClasses,
   getFeaturedClasses,
   getClassesByCategory,

@@ -60,3 +60,19 @@ test('a place on the waiting list can be given up at any time and promotes nobod
     assert.deepEqual(cancelOutcome(waiting, { cancelHours: 0 }, at('2026-01-13T10:00:00Z')), { refused: false, late: false, promote: false });
     assert.equal(cancelOutcome(waiting, { cancelHours: 0 }, at('2026-01-13T19:30:00Z')).refused, false);
   }));
+
+// A class deleted or switched off cancels its bookings still to come
+// (gymClassController.upcomingBookings is which ones those are).
+test('the bookings a stopped class takes with it are on later days and later today, not on sessions already started', () =>
+  inLondon(() => {
+    const { upcomingBookings } = require('../../src/gymfolio/controller/gymClassController');
+    assert.deepEqual(upcomingBookings('class-1', new Date('2026-01-13T18:30:00Z')), {
+      classId: 'class-1',
+      $or: [{ sessionDate: { $gt: '2026-01-13' } }, { sessionDate: '2026-01-13', sessionStart: { $gt: '18:30' } }]
+    });
+    // In July London is an hour ahead of UTC: 23:30Z is already the next day there.
+    assert.deepEqual(upcomingBookings('class-1', new Date('2026-07-13T23:30:00Z')).$or, [
+      { sessionDate: { $gt: '2026-07-14' } },
+      { sessionDate: '2026-07-14', sessionStart: { $gt: '00:30' } }
+    ]);
+  }));

@@ -391,6 +391,62 @@ test('the gym cancelling a session as a member cancels their place: the credit c
   });
 });
 
+// A class that stops running takes its coming bookings with it: switched off
+// from the list, switched off from the edit form, or deleted.
+test('deactivating or deleting a class cancels its upcoming bookings, returns the credits and tells the members', async () => {
+  await h.inGym(gym, async () => {
+    const classesController = h.src('gymfolio/controller/gymClassController');
+    const today = T.dateKey();
+    const staff = { id: String(members[0].user._id) };
+    const slot = [{ day: weekday, startTime: '18:00', endTime: '19:00', instructorName: 'Coach' }];
+    const stop = {
+      toggle: (c) => h.call(classesController.toggleClassStatus, { user: staff, params: { id: String(c._id) }, body: {} }),
+      edit: (c) => h.call(classesController.updateClass, { user: staff, params: { id: String(c._id) }, body: { isActive: 'false' } }),
+      remove: (c) => h.call(classesController.deleteClass, { user: staff, params: { id: String(c._id) } })
+    };
+
+    let n = 160;
+    for (const [how, run] of Object.entries(stop)) {
+      const gymClass = await GymClass.create({ name: `Zumba ${how}`, description: 'Zumba class', capacity: 2, schedule: slot });
+      const [a, b, c, earlier] = [await member(n++), await member(n++), await member(n++), await member(n++)];
+      const held = [await book(a, gymClass, tomorrow), await book(b, gymClass, tomorrow)];
+      const queued = await book(c, gymClass, tomorrow);
+      assert.deepEqual([...held, queued].map((r) => r.body.data.status), ['booked', 'booked', 'waitlisted'], how);
+      // This morning's session, which has been and gone: not touched.
+      await PackageOrder.updateOne({ _id: earlier.order._id }, { $set: { 'sessions.used': 1 } });
+      const past = await ClassBooking.create({ classId: gymClass._id, className: gymClass.name, userId: earlier.user._id, sessionDate: today, sessionStart: '09:00', status: 'booked', seat: 1, creditUsed: true, orderId: earlier.order._id });
+
+      const told = h.calls.notifications.filter((x) => x.name === 'bookingCancelled').length;
+      const res = await run(gymClass);
+      assert.equal(res.statusCode, 200, `${how}: ${JSON.stringify(res.body)}`);
+      assert.equal(res.body.cancelled_bookings, 3, how);
+      assert.match(res.body.message, /3 upcoming booking\(s\) were cancelled and the members told\.$/, how);
+
+      for (const r of [...held, queued]) {
+        const row = await ClassBooking.findById(r.body.data.id).lean();
+        assert.equal(row.status, 'cancelled', how);
+        assert.equal(row.cancelReason, `Zumba ${how} is no longer running`);
+        assert.equal(row.waitlistPosition, null);
+      }
+      assert.deepEqual([await creditsUsed(a), await creditsUsed(b), await creditsUsed(c)], [0, 0, 0], `${how}: the credits are back`);
+      assert.equal((await ClassBooking.findById(past._id).lean()).status, 'booked', `${how}: a session already held is left alone`);
+      assert.equal(await creditsUsed(earlier), 1);
+      const nowTold = await settle(() => h.calls.notifications.filter((x) => x.name === 'bookingCancelled').length === told + 3);
+      assert.ok(nowTold, `${how}: three members told`);
+
+      if (how !== 'remove') {
+        // Switched back on: nothing to cancel, and nothing comes back by itself.
+        const on = await stop.toggle(gymClass);
+        assert.equal(on.body.cancelled_bookings, 0);
+        assert.equal(on.body.message, 'Class activated successfully');
+        assert.equal(await ClassBooking.countBooked(gymClass._id, tomorrow, '18:00'), 0);
+      } else {
+        assert.equal(await GymClass.findById(gymClass._id), null);
+      }
+    }
+  });
+});
+
 // A class that started at 09:00 today (the gym's clock reads midday). The
 // controller will not book into it, so the rows are written as they would
 // have been when it was booked: one place held on a pack credit, one waiting.

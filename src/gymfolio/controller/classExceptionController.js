@@ -40,11 +40,21 @@ function view(e) {
 }
 
 /** Cancels every live booking the exception covers, giving credits back. */
-async function cancelCoveredBookings(exception, by) {
-  const filter = { sessionDate: exception.date, status: { $in: ['booked', 'waitlisted'] } };
+function cancelCoveredBookings(exception, by) {
+  const filter = { sessionDate: exception.date };
   if (exception.classId) filter.classId = exception.classId;
   if (exception.startTime) filter.sessionStart = exception.startTime;
-  const found = await ClassBooking.find(filter).select('_id').lean();
+  return cancelBookings(filter, { by, reason: exception.note || 'Session cancelled by the gym' });
+}
+
+/**
+ * The gym cancelling bookings: every live one `filter` matches is cancelled,
+ * its credit goes back on the pack and the member is told. Returns how many.
+ * Also what happens to a class's coming bookings when the class itself is
+ * deleted or switched off (gymClassController).
+ */
+async function cancelBookings(filter, { by = null, reason = 'Session cancelled by the gym' } = {}) {
+  const found = await ClassBooking.find({ ...filter, status: { $in: ['booked', 'waitlisted'] } }).select('_id').lean();
   let cancelled = 0;
   for (const { _id } of found) {
     // One conditional update per booking, as a member's own cancel is
@@ -59,7 +69,7 @@ async function cancelCoveredBookings(exception, by) {
           status: 'cancelled',
           cancelledAt: new Date(),
           cancelledBy: by || null,
-          cancelReason: exception.note || 'Session cancelled by the gym',
+          cancelReason: reason,
           waitlistPosition: null
         }
       },
@@ -165,3 +175,7 @@ module.exports = {
     }
   }
 };
+
+// For the class controller: a class deleted or switched off cancels its
+// coming bookings the same way.
+module.exports.cancelBookings = cancelBookings;
