@@ -7,6 +7,12 @@
 //   node Seeder/createAttendance.js            seed (skips what already exists)
 //   node Seeder/createAttendance.js --days 60  a longer history
 //   node Seeder/createAttendance.js --reset    delete only what this seeded
+//   node Seeder/createAttendance.js --password '<value>'    (or SEED_PASSWORD)
+//
+// The accounts it creates -- members, and staff with front-desk access --
+// all get one password: the one given with --password or in SEED_PASSWORD,
+// or else a strong random one made for this run and printed once at the end.
+// None is written in this file.
 //
 // Refuses to seed when NODE_ENV=production unless --force is passed.
 //
@@ -22,7 +28,7 @@
 
 require('dotenv').config();
 const mongoose = require('mongoose');
-const { enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
+const { argValue, enterContext, resolveGymContextFromArgs } = require('../scripts/lib/tenantScript');
 const bcrypt = require('bcryptjs');
 
 const User = require('../src/models/user');
@@ -39,6 +45,7 @@ const {
   arrivalVerdict,
   departureVerdict
 } = require('../src/attendance/services/punchService');
+const { generatePassword, MIN_PASSWORD_LENGTH } = require('../src/services/adminPasswords');
 
 // Everything this seeder creates carries this marker, so --reset can undo it
 // without touching a single real row.
@@ -47,7 +54,10 @@ const SEED_TAG = 'seeded:createAttendance';
 // field: .test is reserved by RFC 2606 and can never collide with a real
 // address, and it needs no schema change to carry.
 const SEED_DOMAIN = '@gympilot.test';
-const SEED_PASSWORD = 'Gym@12345';
+// Given by whoever runs this, or generated for the run (see the top of the
+// file). Accounts that already exist keep the password they have.
+const SUPPLIED_PASSWORD = String(argValue('--password') || process.env.SEED_PASSWORD || '');
+const SEED_PASSWORD = SUPPLIED_PASSWORD || generatePassword(16);
 
 // ---------------------------------------------------------------------------
 // Deterministic randomness
@@ -697,12 +707,17 @@ async function reset() {
 async function main() {
   const args = process.argv.slice(2);
 
-  // This seeds sign-in accounts with a password printed in this file, and
-  // staff with front-desk access. Never against a live gym by accident;
-  // --reset (which only removes what this seeded) is always allowed.
+  // This seeds sign-in accounts that all share one password, and staff with
+  // front-desk access. Never against a live gym by accident; --reset (which
+  // only removes what this seeded) is always allowed.
   if (process.env.NODE_ENV === 'production' && !args.includes('--reset') && !args.includes('--force')) {
-    console.error('Refusing to seed: NODE_ENV is production, and this creates accounts with a known password.');
+    console.error('Refusing to seed: NODE_ENV is production, and this creates made-up members and staff who can sign in.');
     console.error('Point it at a development database, or pass --force if you really mean to.');
+    process.exit(1);
+  }
+  if (SUPPLIED_PASSWORD && SUPPLIED_PASSWORD.length < MIN_PASSWORD_LENGTH && !args.includes('--reset')) {
+    console.error(`The password for the seeded accounts must be at least ${MIN_PASSWORD_LENGTH} characters (--password or SEED_PASSWORD).`);
+    console.error('Leave both out to have a strong one generated and printed.');
     process.exit(1);
   }
 
@@ -734,7 +749,11 @@ async function main() {
   // shape both are normalised to -- see resolvePerson() in peopleDirectory.
   await seedPunches(members, [...trainers, ...staff], days);
 
-  console.log(`\nDone. Members sign in with the password: ${SEED_PASSWORD}`);
+  console.log(
+    '\nDone. The accounts this run created sign in with ' +
+      (SUPPLIED_PASSWORD ? 'the password you supplied.' : `this password, shown once: ${SEED_PASSWORD}`)
+  );
+  console.log('Accounts that already existed keep the password they had.');
   console.log('Undo everything with: node Seeder/createAttendance.js --reset');
   await mongoose.connection.close();
 }
