@@ -6,16 +6,16 @@
 // half from the portal; staff see and edit all of it from Users → Profile.
 
 const mongoose = require('mongoose');
-const fs = require('fs');
 const User = require('../models/user');
 const Settings = require('../models/settings');
-const { toPublicPath, localUploadPath } = require('../helper/upload');
+const { toPublicPath } = require('../helper/upload');
 const { membershipFor } = require('../attendance/services/peopleDirectory');
 const Attendance = require('../attendance/models/attendanceModel');
 const { primaryAddress, oneLine } = require('../services/memberFields');
 
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
-const blobUpload = USE_BLOB_STORAGE ? require('../helper/blobUpload') : null;
+const blobUpload = require('../helper/blobUpload');
+const { deleteStoredFile } = blobUpload;
 
 const PARQ_QUESTIONS = [
   'Has your doctor ever said that you have a heart condition and that you should only do physical activity recommended by a doctor?',
@@ -96,24 +96,10 @@ function applyParq(user, input) {
 }
 
 async function storeUpload(file, folder) {
-  if (USE_BLOB_STORAGE && blobUpload) {
+  if (USE_BLOB_STORAGE) {
     return blobUpload.uploadToBlob(file.buffer, file.originalname, file.mimetype, folder);
   }
   return toPublicPath(file.filename);
-}
-
-async function removeStored(url) {
-  if (!url) return;
-  try {
-    if (USE_BLOB_STORAGE && blobUpload && /^https?:\/\//.test(url)) {
-      await blobUpload.deleteFromBlob(url);
-    } else {
-      const local = localUploadPath(url);
-      if (local) await fs.promises.unlink(local).catch(() => {});
-    }
-  } catch {
-    /* an orphaned file is not worth failing the request */
-  }
 }
 
 async function setPhoto(user, file) {
@@ -121,7 +107,9 @@ async function setPhoto(user, file) {
   const old = user.avatarUrl;
   user.avatarUrl = url;
   await user.save();
-  if (old && old.startsWith('/uploads/')) await removeStored(old);
+  // The photo it replaces goes too, wherever it was stored. One that is not
+  // this gym's own upload (a Google picture) is left alone by the helper.
+  if (old && old !== url) await deleteStoredFile(old, 'members');
   return url;
 }
 
@@ -373,7 +361,7 @@ module.exports = {
       const url = doc.url;
       user.documents = user.documents.filter((d) => String(d._id) !== String(req.params.docId));
       await user.save();
-      await removeStored(url);
+      await deleteStoredFile(url, 'member-documents');
       return res.json({ success: true, message: 'Document removed.' });
     } catch (error) {
       console.error('[profile] remove document failed:', error);
