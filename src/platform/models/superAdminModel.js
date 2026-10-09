@@ -14,6 +14,11 @@ const superAdminSchema = new mongoose.Schema(
     password: { type: String, required: true, select: false },
     isActive: { type: Boolean, default: true },
     lastLogin: { type: Date, default: null },
+    // Which generation of sessions is still good. Every token carries the
+    // number it was signed under; changing or resetting the password, or
+    // signing out, moves this on and every token before it stops working
+    // (middleware/platformAuth.js).
+    tokenVersion: { type: Number, default: 0 },
 
     // Emailed six-digit code at sign-in, per account.
     twoFactor: {

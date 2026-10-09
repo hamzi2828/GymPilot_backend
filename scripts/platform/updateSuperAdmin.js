@@ -52,7 +52,9 @@ async function main() {
   }
   if (password) {
     admin.password = await bcrypt.hash(password, await bcrypt.genSalt(10));
-    changes.push('password changed');
+    // Every session signed in with the old password ends.
+    admin.tokenVersion = (admin.tokenVersion || 0) + 1;
+    changes.push('password changed (signed out everywhere)');
   }
   if (name !== null) {
     admin.name = name;

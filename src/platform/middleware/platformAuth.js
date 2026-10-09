@@ -18,11 +18,16 @@ function platformSecret() {
   return process.env.JWT_SECRET ? `${process.env.JWT_SECRET}::platform` : null;
 }
 
+/** The session generation a token was signed under, or an account is on: 0 until it first moves. */
+function tokenVersionOf(value) {
+  return Number(value && value.tokenVersion) || 0;
+}
+
 function signPlatformToken(admin) {
   const secret = platformSecret();
   if (!secret) throw new Error('Server misconfiguration: missing JWT secret');
   return jwt.sign(
-    { sid: String(admin._id), email: admin.email, name: admin.name || '', scope: 'platform' },
+    { sid: String(admin._id), email: admin.email, name: admin.name || '', scope: 'platform', tv: tokenVersionOf(admin) },
     secret,
     { expiresIn: TOKEN_TTL }
   );
@@ -53,6 +58,13 @@ async function platformAuth(req, res, next) {
     if (!admin || admin.isActive === false) {
       return res.status(401).json({ success: false, message: 'This account is no longer active' });
     }
+    // Signed before the password last changed, or before a sign-out: over,
+    // however long the token itself still has to run. A token from before
+    // versions existed carries none, which reads as 0 -- good until the
+    // account's first change.
+    if ((Number(decoded.tv) || 0) !== tokenVersionOf(admin)) {
+      return res.status(401).json({ success: false, message: 'This session has ended. Please sign in again.' });
+    }
 
     req.superAdmin = admin;
     return next();
@@ -81,4 +93,4 @@ async function ensureBootstrapSuperAdmin() {
   return admin;
 }
 
-module.exports = { platformAuth, signPlatformToken, ensureBootstrapSuperAdmin, platformSecret };
+module.exports = { platformAuth, signPlatformToken, ensureBootstrapSuperAdmin, platformSecret, tokenVersionOf };
