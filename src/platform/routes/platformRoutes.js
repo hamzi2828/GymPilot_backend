@@ -90,6 +90,8 @@ router.put('/gyms/:id/domains', gymsController.updateDomains);
 router.get('/gyms/:id/domains/status', gymsController.domainsStatus);
 router.patch('/gyms/:id/status', gymsController.setStatus);
 router.put('/gyms/:id/subscription', gymsController.updateSubscription);
+router.get('/gyms/:id/payments', gymsController.listPayments);
+router.post('/gyms/:id/payments', gymsController.recordPayment);
 router.post('/gyms/:id/reset-owner-password', gymsController.resetOwnerPassword);
 
 // Plans

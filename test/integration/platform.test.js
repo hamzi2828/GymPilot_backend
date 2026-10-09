@@ -15,6 +15,10 @@
 // removing its sign-in names and files -- and refusing while members still
 // pay it by card, or when the database is another gym's too.
 //
+// Hand billing: a payment recorded from the panel (gymsController
+// .recordPayment) reactivating a lapsed gym exactly once however often Save
+// is clicked, and the daily roll-over treating it as paid until its date.
+//
 // Provisioning: provisionGym() creating a tenant database and seeding it, and
 // rolling back on a failure part-way through seeding -- dropping a database it
 // created, never one that was already there. Email and Vercel are stand-ins.
@@ -410,4 +414,91 @@ test('deleting a gym stops its card, and takes its database, its sign-in names a
     platformBilling.cancelSubscriptionNow = real.cancel;
     Object.assign(gymFiles.store, real.store);
   }
+});
+
+test('a payment recorded by hand brings a lapsed gym back, once, and the daily roll-over then leaves it alone until it is due again', async () => {
+  const PlatformPayment = h.src('platform/models/platformPaymentModel');
+  const PlatformAuditLog = h.src('platform/models/platformAuditLogModel');
+  const gymsController = h.src('platform/controllers/gymsController');
+  const jobs = h.src('platform/jobs');
+  await PlatformPayment.init();
+
+  const DAY = 86400000;
+  const now = Date.now();
+  const gym = await h.createGym('bank-transfer-gym', { currency: 'PKR' });
+  // Billed by hand, its trial long over: cut off for not paying.
+  await Gym.updateOne(
+    { _id: gym._id },
+    { $set: { 'subscription.status': 'expired', 'subscription.billingCycle': 'monthly', 'subscription.amount': 8000, 'subscription.currentPeriodEnd': new Date(now - 20 * DAY), 'subscription.pastDueSince': new Date(now - 20 * DAY), 'subscription.notices.expired': new Date(now - 13 * DAY) } }
+  );
+  const superAdmin = { _id: new h.state.mongoose.Types.ObjectId(), email: 'admin@gympilot.test' };
+  const post = (body) => h.call(gymsController.recordPayment, { params: { id: String(gym._id) }, body, superAdmin });
+  const read = async () => (await Gym.findById(gym._id).lean()).subscription;
+
+  // What the form starts from: the bill, and one cycle on from today.
+  const before = await h.call(gymsController.listPayments, { params: { id: String(gym._id) }, superAdmin });
+  assert.equal(before.statusCode, 200);
+  assert.deepEqual(before.body.data, []);
+  assert.equal(before.body.next.canRecord, true);
+  assert.equal(before.body.next.amount, 8000);
+  const paidUntil = new Date(before.body.next.paidUntil);
+  assert.ok(paidUntil.getTime() > now + 27 * DAY && paidUntil.getTime() < now + 32 * DAY);
+
+  const form = { amount: 8000, method: 'bank_transfer', receivedAt: new Date(now - DAY).toISOString().slice(0, 10), reference: 'FT26283XYZ', note: 'HBL', paidUntil: paidUntil.toISOString().slice(0, 10), requestId: 'integration-request-1' };
+  // Two clicks at the same moment: one payment.
+  const [a, b] = await Promise.all([post(form), post(form)]);
+  assert.deepEqual([a.statusCode, b.statusCode].sort(), [200, 201], JSON.stringify([a.body, b.body]));
+  assert.equal(await PlatformPayment.countDocuments({ gymId: gym._id }), 1);
+  const made = a.statusCode === 201 ? a : b;
+  assert.equal(made.body.duplicate, false);
+  assert.equal(made.body.gym.subscription.status, 'active');
+  assert.equal(made.body.gym.access_block, null);
+
+  let sub = await read();
+  assert.equal(sub.status, 'active');
+  assert.equal(sub.currentPeriodEnd.getTime(), paidUntil.getTime());
+  assert.equal(sub.pastDueSince, null);
+  assert.equal(sub.notices.expired, null);
+  assert.equal(sub.amount, 8000, 'the bill itself is untouched');
+
+  // A third click, later, with the page's old form: still the same payment.
+  const again = await post(form);
+  assert.equal(again.statusCode, 200);
+  assert.equal(again.body.duplicate, true);
+  assert.equal((await read()).currentPeriodEnd.getTime(), paidUntil.getTime());
+  // The same transfer typed into a fresh form is refused.
+  const retyped = await post({ ...form, requestId: 'integration-request-2', paidUntil: new Date(paidUntil.getTime() + 31 * DAY).toISOString().slice(0, 10) });
+  assert.equal(retyped.statusCode, 409);
+  assert.equal(retyped.body.code, 'DUPLICATE_REFERENCE');
+  assert.equal(await PlatformPayment.countDocuments({ gymId: gym._id }), 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const audits = await PlatformAuditLog.find({ action: 'gym_payment_recorded', gymId: gym._id }).lean();
+  assert.equal(audits.length, 1, 'logged once');
+  assert.equal(audits[0].actorEmail, 'admin@gympilot.test');
+  assert.equal(audits[0].meta.reference, 'FT26283XYZ');
+
+  const history = await h.call(gymsController.listPayments, { params: { id: String(gym._id) }, superAdmin });
+  assert.equal(history.body.data.length, 1);
+  assert.equal(history.body.data[0].methodLabel, 'Bank transfer');
+  assert.equal(history.body.data[0].statusBefore, 'expired');
+  assert.equal(history.body.data[0].recordedBy, 'admin@gympilot.test');
+  // The next one starts from the date now paid until.
+  assert.ok(new Date(history.body.next.paidUntil).getTime() > paidUntil.getTime() + 27 * DAY);
+
+  // The daily roll-over: nothing to do while it is paid up...
+  await jobs.rollSubscriptionStatuses({ now: new Date(now + DAY) });
+  assert.equal((await read()).status, 'active');
+  // ...past due the day after the paid-until date, cut off a grace period later...
+  await jobs.rollSubscriptionStatuses({ now: new Date(paidUntil.getTime() + DAY) });
+  assert.equal((await read()).status, 'past_due');
+  await jobs.rollSubscriptionStatuses({ now: new Date(paidUntil.getTime() + 9 * DAY) });
+  assert.equal((await read()).status, 'expired');
+
+  // A gym that pays by card is Stripe's to record.
+  await Gym.updateOne({ _id: gym._id }, { $set: { 'subscription.stripeSubscriptionId': 'sub_card_billed' } });
+  const refused = await post({ ...form, requestId: 'integration-request-3', reference: 'FT-OTHER' });
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.body.code, 'STRIPE_BILLED');
+  await Gym.updateOne({ _id: gym._id }, { $set: { 'subscription.stripeSubscriptionId': '' } });
 });

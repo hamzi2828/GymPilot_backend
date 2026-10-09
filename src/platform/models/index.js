@@ -14,6 +14,7 @@ const PlatformAuditLog = require('./platformAuditLogModel');
 const DemoRequest = require('./demoRequestModel');
 const MemberDirectory = require('./memberDirectoryModel');
 const PlatformStripeEvent = require('./platformStripeEventModel');
+const PlatformPayment = require('./platformPaymentModel');
 
 let warmed = false;
 
@@ -29,6 +30,7 @@ function warmPlatformModels() {
   void DemoRequest.schema;
   void MemberDirectory.schema;
   void PlatformStripeEvent.schema;
+  void PlatformPayment.schema;
   warmed = true;
 }
 
@@ -42,5 +44,6 @@ module.exports = {
   DemoRequest,
   MemberDirectory,
   PlatformStripeEvent,
+  PlatformPayment,
   warmPlatformModels
 };

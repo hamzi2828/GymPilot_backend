@@ -24,8 +24,9 @@ const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { invalidatePlanCache } = require('../planLimits');
 const { sendOwnerInvite } = require('../ownerInvite');
 const { syncStripeSubscription, changesPrice, SubscriptionSyncError } = require('../services/subscriptionSync');
-// Called through the module, not destructured, so a test can stand in for it.
+// Called through the modules, not destructured, so a test can stand in for them.
 const platformBilling = require('../services/platformBilling');
+const manualPayments = require('../services/manualPayments');
 
 const User = require('../../models/user');
 const { ADMIN_SLUG } = require('../../services/roleService');
@@ -554,6 +555,70 @@ module.exports = {
       });
 
       return res.json({ success: true, data: publicGym(gym), stripeSynced });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // GET /api/platform/gyms/:id/payments
+  //
+  // The payments recorded by hand for this gym, newest first, and `next`:
+  // whether another can be recorded (`canRecord`, and the `reason` when
+  // not -- a gym that pays by card) and what the form starts from: `amount`,
+  // `currency`, `billingCycle`, `paidFrom`, `paidUntil`, `methods`.
+  listPayments: async (req, res) => {
+    try {
+      const gym = await loadGym(req.params.id);
+      if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
+      const rows = await manualPayments.listPayments(gym._id);
+      return res.json({ success: true, data: rows.map(manualPayments.publicPayment), next: manualPayments.paymentTerms(gym.toObject()) });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // POST /api/platform/gyms/:id/payments
+  //   { amount, method, receivedAt, reference, note, paidUntil, requestId }
+  //
+  // A payment taken outside Stripe (services/manualPayments.js): kept in
+  // the gym's payment history, its paid-until date moved to `paidUntil`
+  // (one cycle on by default), its subscription made active. 201 with the
+  // payment and the gym; the same `requestId` again answers 200
+  // `duplicate: true` with the payment already stored, and changes nothing.
+  // 409 `STRIPE_BILLED` for a gym that pays by card, 409
+  // `DUPLICATE_REFERENCE` for a reference already on record.
+  recordPayment: async (req, res) => {
+    try {
+      const gym = await loadGym(req.params.id);
+      if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
+
+      let outcome;
+      try {
+        outcome = await manualPayments.recordPayment({ gym: gym.toObject(), input: req.body || {}, actor: req.superAdmin });
+      } catch (error) {
+        if (error instanceof manualPayments.ManualPaymentError) {
+          return res.status(error.status).json({ success: false, code: error.code, message: error.message });
+        }
+        throw error;
+      }
+
+      const payment = manualPayments.publicPayment(outcome.payment);
+      const after = (await loadGym(req.params.id)) || gym;
+      if (!outcome.duplicate) {
+        audit(req, 'gym_payment_recorded', gym, {
+          paymentId: payment.id,
+          amount: payment.amount,
+          currency: payment.currency,
+          method: payment.method,
+          reference: payment.reference,
+          receivedAt: payment.receivedAt,
+          paidUntil: payment.periodTo,
+          statusBefore: payment.statusBefore
+        });
+      }
+      // Paying does not undo the operator's own switch.
+      const warnings = after.status === 'suspended' ? ['The payment is recorded, but this gym is suspended. Reactivate it to switch it back on.'] : [];
+      return res.status(outcome.duplicate ? 200 : 201).json({ success: true, data: payment, duplicate: outcome.duplicate, gym: publicGym(after), warnings });
     } catch (error) {
       return fail(res, error);
     }
