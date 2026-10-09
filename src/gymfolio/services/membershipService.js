@@ -991,39 +991,122 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
   return order;
 }
 
-async function submitTransferProof(order, { url, note, reference }) {
+// The payment statuses a transfer can still be acted on in: nothing received
+// yet, or a receipt waiting to be checked. Any other is settled -- paid, or
+// closed (rejected, never arrived, refunded) -- and none of the three calls
+// below reopens it: a receipt sent again must not bring a refunded or
+// rejected order back, and Approve must not hand its membership back.
+//
+// Each is one conditional update on that status, like recordPayment, so they
+// decide on the order as it is stored, not on the copy the caller read.
+const REVIEWABLE = ['pending', 'processing'];
+
+// An approval first claims the order by writing when it was reviewed; only
+// the request that wrote it activates. Two approvals sent together used to
+// both pass the "not paid yet" check on their own copies and both activate:
+// the term pushed a full period on, the coupon counted twice, two invoice
+// numbers. A claim this old was left by a request that died part-way, and
+// the next one may take it over (as REFUND_CLAIM_MS does for refunds).
+const REVIEW_CLAIM_MS = 10 * 60 * 1000;
+
+function reviewNotClaimed(now) {
+  return [{ 'payment.proof.reviewedAt': null }, { 'payment.proof.reviewedAt': { $lt: new Date(now.getTime() - REVIEW_CLAIM_MS) } }];
+}
+
+function reviewable(orderId, now) {
+  return { _id: orderId, 'payment.status': { $in: REVIEWABLE }, $or: reviewNotClaimed(now) };
+}
+
+function staffId(by) {
+  return by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null;
+}
+
+/** Why an order could not be acted on, read from the order as it now is. */
+async function reviewRefusal(orderId) {
+  const fresh = await PackageOrder.findById(orderId).select('payment.status').lean();
+  const status = fresh && fresh.payment ? fresh.payment.status : null;
+  if (status === 'paid') return new MembershipError('This order is already paid', 400, 'ALREADY_PAID');
+  if (status === 'refunded') {
+    return new MembershipError('This order was refunded, so it cannot be opened again. Start a new order for the package instead.', 409, 'ORDER_CLOSED');
+  }
+  if (!REVIEWABLE.includes(status)) {
+    return new MembershipError(
+      'This order is closed: its payment was not accepted. It cannot be opened again; start a new order for the package instead.',
+      409,
+      'ORDER_CLOSED'
+    );
+  }
+  return new MembershipError('Somebody else is confirming this payment right now. Reload the order in a moment.', 409, 'REVIEW_IN_PROGRESS');
+}
+
+async function submitTransferProof(order, { url, note, reference, now = new Date() }) {
   if (order.payment.method !== 'bank_transfer') throw new MembershipError('This order was not paid by bank transfer', 400);
-  if (order.payment.status === 'paid') throw new MembershipError('This order is already paid', 400);
-  order.payment.proof = {
-    url: url || (order.payment.proof && order.payment.proof.url) || '',
-    note: note || '',
-    reference: reference || '',
-    uploadedAt: new Date(),
-    reviewedAt: null,
-    reviewedBy: null,
-    rejectionReason: ''
-  };
-  order.payment.status = 'processing';
-  order.status = 'pending';
-  await order.save();
-  return order;
+  const updated = await PackageOrder.findOneAndUpdate(
+    reviewable(order._id, now),
+    {
+      $set: {
+        'payment.proof': {
+          url: url || (order.payment.proof && order.payment.proof.url) || '',
+          note: note || '',
+          reference: reference || '',
+          uploadedAt: now,
+          reviewedAt: null,
+          reviewedBy: null,
+          rejectionReason: ''
+        },
+        'payment.status': 'processing',
+        status: 'pending'
+      }
+    },
+    { new: true }
+  );
+  if (!updated) throw await reviewRefusal(order._id);
+  return updated;
 }
 
-async function approveTransfer(order, { by }) {
-  if (order.payment.status === 'paid') throw new MembershipError('This order is already paid', 400);
-  order.payment.proof = { ...(order.payment.proof || {}), reviewedAt: new Date(), reviewedBy: by || null, rejectionReason: '' };
-  await markPaidAndActivate(order, { paidAt: new Date() });
-  return order;
+/**
+ * Confirms the money arrived and activates the order -- once, however many
+ * approvals arrive together.
+ * @returns {Promise<object>} the order as activated
+ * @throws {MembershipError} 400 ALREADY_PAID; 409 ORDER_CLOSED (refunded,
+ *   rejected or failed) / REVIEW_IN_PROGRESS (another approval holds it)
+ */
+async function approveTransfer(order, { by, now = new Date() } = {}) {
+  const claimed = await PackageOrder.findOneAndUpdate(
+    reviewable(order._id, now),
+    { $set: { 'payment.proof.reviewedAt': now, 'payment.proof.reviewedBy': staffId(by), 'payment.proof.rejectionReason': '' } },
+    { new: true }
+  );
+  if (!claimed) throw await reviewRefusal(order._id);
+  try {
+    return await markPaidAndActivate(claimed, { paidAt: now });
+  } catch (error) {
+    // Let go, so the approval can be tried again.
+    await PackageOrder.updateOne(
+      { _id: order._id, 'payment.status': { $in: REVIEWABLE }, 'payment.proof.reviewedAt': now },
+      { $set: { 'payment.proof.reviewedAt': null, 'payment.proof.reviewedBy': null } }
+    ).catch(() => {});
+    throw error;
+  }
 }
 
-async function rejectTransfer(order, { by, reason }) {
-  if (order.payment.status === 'paid') throw new MembershipError('This order is already paid', 400);
-  order.payment.proof = { ...(order.payment.proof || {}), reviewedAt: new Date(), reviewedBy: by || null, rejectionReason: reason || '' };
-  order.payment.status = 'failed';
-  order.status = 'cancelled';
-  order.cancellation = { cancelledAt: new Date(), reason: reason || 'Bank transfer rejected', by: by || null, source: 'staff' };
-  await order.save();
-  return order;
+async function rejectTransfer(order, { by, reason, now = new Date() } = {}) {
+  const updated = await PackageOrder.findOneAndUpdate(
+    reviewable(order._id, now),
+    {
+      $set: {
+        'payment.proof.reviewedAt': now,
+        'payment.proof.reviewedBy': staffId(by),
+        'payment.proof.rejectionReason': reason || '',
+        'payment.status': 'failed',
+        status: 'cancelled',
+        cancellation: { cancelledAt: now, reason: reason || 'Bank transfer rejected', by: staffId(by), source: 'staff' }
+      }
+    },
+    { new: true }
+  );
+  if (!updated) throw await reviewRefusal(order._id);
+  return updated;
 }
 
 /* ------------------------------ lifecycle ------------------------------ */

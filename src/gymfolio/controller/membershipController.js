@@ -137,9 +137,9 @@ module.exports = {
       if (!url && !(req.body && (req.body.reference || req.body.note))) {
         return res.status(400).json({ success: false, message: 'Attach the transfer receipt or enter the transfer reference' });
       }
-      await service.submitTransferProof(order, { url, note: req.body && req.body.note, reference: req.body && req.body.reference });
-      tell('transferReceived', order);
-      return res.json({ success: true, message: 'Thanks — we will confirm your membership once the transfer is checked.', data: order });
+      const updated = await service.submitTransferProof(order, { url, note: req.body && req.body.note, reference: req.body && req.body.reference });
+      tell('transferReceived', updated);
+      return res.json({ success: true, message: 'Thanks — we will confirm your membership once the transfer is checked.', data: updated });
     } catch (error) {
       return fail(res, error);
     }
@@ -150,9 +150,11 @@ module.exports = {
     try {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-      await service.approveTransfer(order, { by: userId(req) });
-      tell('membershipConfirmed', order);
-      return res.json({ success: true, message: `Payment confirmed. ${order.packageDetails.name} is now active.`, data: order });
+      // The order as it was activated: of two approvals sent together only
+      // one gets this far, and the other is told it is already paid.
+      const approved = await service.approveTransfer(order, { by: userId(req) });
+      tell('membershipConfirmed', approved);
+      return res.json({ success: true, message: `Payment confirmed. ${approved.packageDetails.name} is now active.`, data: approved });
     } catch (error) {
       return fail(res, error);
     }
@@ -163,9 +165,9 @@ module.exports = {
     try {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-      await service.rejectTransfer(order, { by: userId(req), reason: req.body && req.body.reason });
-      tell('transferRejected', order);
-      return res.json({ success: true, message: 'Payment rejected and the member has been told.', data: order });
+      const rejected = await service.rejectTransfer(order, { by: userId(req), reason: req.body && req.body.reason });
+      tell('transferRejected', rejected);
+      return res.json({ success: true, message: 'Payment rejected and the member has been told.', data: rejected });
     } catch (error) {
       return fail(res, error);
     }
