@@ -236,9 +236,25 @@ async function joiningFeeDue({ userId, email } = {}) {
 }
 
 /**
+ * An account's email, for the rules that follow a person by the address on
+ * their orders (the joining fee, when a new term starts, one subscription
+ * each): empty until the address is confirmed (emailVerification.js). A
+ * sign-up can type anybody's address, and until it is shown to be theirs it
+ * must not pass for the guest who paid with it -- no fee taken off, no term
+ * stacked on that guest's, no word on whether they have a subscription.
+ * Orders under the account's own id count either way.
+ *
+ * Mind a projection: load the account with `emailVerified`, or an
+ * unconfirmed address reads as confirmed here.
+ */
+function provenEmail(account) {
+  return account && account.email && account.emailVerified !== false ? account.email : '';
+}
+
+/**
  * Who an online checkout is from, for the rules that follow a person (the
  * joining fee, one subscription each): the signed-in account -- its id and
- * its own email -- or null for a guest.
+ * its own email, once confirmed (provenEmail) -- or null for a guest.
  *
  * Never the email typed into the checkout form. Anybody can type a paying
  * member's address there: it used to take the joining fee off for them, and
@@ -248,8 +264,8 @@ async function joiningFeeDue({ userId, email } = {}) {
  */
 async function checkoutIdentity(userId) {
   if (!userId || !mongoose.Types.ObjectId.isValid(String(userId))) return null;
-  const account = await User.findById(userId).select('email').lean();
-  return account ? { userId: account._id, email: account.email || '' } : null;
+  const account = await User.findById(userId).select('email emailVerified').lean();
+  return account ? { userId: account._id, email: provenEmail(account) } : null;
 }
 
 /* ------------------------------- coupons ------------------------------- */
@@ -345,9 +361,13 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
   }
 
   const snapshot = order.packageDetails || {};
+  // After the terms of the account it was bought under, and no one else's:
+  // the address on the order is typed at checkout, and typing a member's
+  // used to start the buyer's term on the day that member's ends. A guest
+  // order has no account, so it starts when it is paid.
   const start = startDate
     ? new Date(startDate)
-    : await startDateFor({ userId: order.userId, email: order.customerInfo && order.customerInfo.email, kind: snapshot.kind || 'membership', now: paidAt });
+    : await startDateFor({ userId: order.userId, kind: snapshot.kind || 'membership', now: paidAt });
   const end = endDate ? new Date(endDate) : termEnd(start, snapshot);
 
   order.subscription.startDate = start;
@@ -632,7 +652,7 @@ async function createManualOrder({
   if (problem) throw new MembershipError(problem, 422, 'PAYMENT_METHOD_INVALID');
   const currency = resolveCurrency(pkg.currency, settings && settings.currency);
   const snapshot = packageSnapshot(pkg);
-  const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: user.email }) : !!chargeJoiningFee;
+  const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: provenEmail(user) }) : !!chargeJoiningFee;
   const joiningFee = feeDue ? round2(snapshot.joiningFee) : 0;
 
   let coach = null;
@@ -680,7 +700,7 @@ async function createManualOrder({
   }
   const balance = paid ? round2(amount - taken) : 0;
   const staff = paidBy && mongoose.Types.ObjectId.isValid(String(paidBy)) ? paidBy : null;
-  const start = startDate ? new Date(startDate) : await startDateFor({ userId: user._id, email: user.email, kind: snapshot.kind, now });
+  const start = startDate ? new Date(startDate) : await startDateFor({ userId: user._id, email: provenEmail(user), kind: snapshot.kind, now });
   let end = termEnd(start, snapshot);
   const months = Number(durationMonths);
   if (Number.isFinite(months) && months > 0) {
@@ -1035,11 +1055,11 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
 
   const { coupon, discount } = await applyCoupon(couponCode, pkg, listPrice);
   // Charged once: not to a member coming back (joiningFeeDue).
-  const joiningFee = (await joiningFeeDue({ userId: user._id, email: user.email })) ? round2(snapshot.joiningFee) : 0;
+  const joiningFee = (await joiningFeeDue({ userId: user._id, email: provenEmail(user) })) ? round2(snapshot.joiningFee) : 0;
   const amount = round2(Math.max(0, listPrice + joiningFee - discount));
 
   // The same rule as card checkout: one running subscription per member.
-  await assertNoActiveSubscription({ userId: user._id, email: user.email, snapshot });
+  await assertNoActiveSubscription({ userId: user._id, email: provenEmail(user), snapshot });
 
   const order = await PackageOrder.create({
     orderNumber: await PackageOrder.generateOrderNumber(),
@@ -2083,6 +2103,7 @@ module.exports = {
   startDateFor,
   joiningFeeDue,
   checkoutIdentity,
+  provenEmail,
   applyCoupon,
   redeemCoupon,
   assertNoActiveSubscription,

@@ -300,3 +300,122 @@ test('the checkout summary asks whether the fee is due -- for the signed-in acco
   assert.ok(layer, 'the route is mounted');
   assert.deepEqual(layer.route.stack.map((l) => l.handle.name), ['optionalAuth', 'joiningFeeDue']);
 });
+
+// A guest's paid order is known by the address typed at checkout. An account
+// only stands in for that guest once its address is confirmed
+// (emailVerification.js): until then it is new, wherever the rules ask.
+function guestOrder(email, { number, endInDays = 20, recurring = false } = {}) {
+  const now = Date.now();
+  return PackageOrder.create({
+    orderNumber: number,
+    userId: null,
+    packageId: monthly._id,
+    packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month', kind: 'membership' },
+    customerInfo: { fullName: 'Guest Buyer', email },
+    payment: { method: 'stripe', amount: 65, currency: 'GBP', status: 'paid', paidAt: new Date(now - 10 * 86400000), ...(recurring ? { stripeSubscriptionId: `sub_${number}` } : {}) },
+    subscription: { isActive: true, startDate: new Date(now - 10 * 86400000), endDate: new Date(now + endInDays * 86400000), autoRenew: recurring },
+    status: 'active'
+  });
+}
+
+test('an account whose email is not confirmed does not inherit the guest who paid with that address', async () => {
+  const asked = [];
+  h.setStripe({
+    checkout: {
+      sessions: {
+        create: async (params) => {
+          asked.push(params);
+          return { id: `cs_unproven_${asked.length}`, url: 'https://stripe.test/pay' };
+        }
+      }
+    }
+  });
+  try {
+    await h.inGym(gym, async () => {
+      const feeDesk = h.src('gymfolio/services/feeDesk');
+      const controller = h.src('gymfolio/controller/membershipController');
+      const rolling = await Package.create({
+        name: 'Rolling unproven',
+        price: '45',
+        currency: 'GBP',
+        period: 'month',
+        features: ['Gym floor'],
+        joiningFee: 25,
+        billing: { mode: 'recurring', interval: 'month', intervalCount: 1 }
+      });
+      await guestOrder('paid-as-guest@fee.test', { number: 'FEE-GUEST-UNPROVEN', recurring: true });
+
+      // Somebody signs up with the guest's address and has not confirmed it.
+      const claimant = await User.create({ firstName: 'Claimant', lastName: 'Fee', email: 'paid-as-guest@fee.test', role: 'user', emailVerified: false });
+      const asClaimant = { id: String(claimant._id), email: claimant.email, role: 'user' };
+
+      assert.deepEqual(await service.checkoutIdentity(claimant._id), { userId: claimant._id, email: '' });
+      assert.equal((await h.call(controller.joiningFeeDue, { user: asClaimant })).body.data.due, true);
+      assert.equal((await feeDesk.deskView(claimant._id)).joiningFeeDue, true);
+
+      // Card checkout: the fee is charged, and the guest's running
+      // subscription is not given away by a refusal.
+      await payments.createPackageCheckoutSession(claimant._id, rolling._id, { email: claimant.email, fullName: 'Claimant Fee' });
+      assert.equal(asked.length, 1);
+      assert.equal(asked[0].line_items[1].price_data.product_data.name, 'Joining fee');
+
+      // Bank transfer: the same on both counts.
+      const transfer = await service.createBankTransferOrder({ user: await User.findById(claimant._id), pkg: rolling });
+      assert.equal(transfer.payment.amount, 70);
+
+      // At the desk: the fee is charged and the term starts today, not on
+      // the day the guest's ends.
+      const sold = await assign(claimant, monthly);
+      assert.equal(sold.statusCode, 201, JSON.stringify(sold.body));
+      assert.equal(sold.body.data.payment.amount, 65);
+      assert.ok(Math.abs(new Date(sold.body.data.subscription.startDate) - Date.now()) < 60000, 'starts now');
+
+      // Once the address is confirmed the account is that guest.
+      const proven = await User.create({ firstName: 'Proven', lastName: 'Fee', email: 'proven-guest@fee.test', role: 'user', emailVerified: false });
+      const theirs = await guestOrder('proven-guest@fee.test', { number: 'FEE-GUEST-PROVEN' });
+      await User.updateOne({ _id: proven._id }, { $set: { emailVerified: true } });
+      assert.equal((await feeDesk.deskView(proven._id)).joiningFeeDue, false);
+      const stacked = await assign(proven, monthly);
+      assert.equal(stacked.body.data.payment.amount, 40);
+      assert.equal(new Date(stacked.body.data.subscription.startDate).getTime(), new Date(theirs.subscription.endDate).getTime());
+    });
+  } finally {
+    h.setStripe(null);
+  }
+});
+
+test('an order starts after its own account\'s term, never after the term of whoever\'s address was typed at checkout', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember('Runs');
+    const running = await service.createManualOrder({ user: member, pkg: monthly });
+    const memberEnds = new Date(running.subscription.endDate).getTime();
+    const paidAt = new Date();
+    const typed = (userId, number) =>
+      PackageOrder.create({
+        orderNumber: number,
+        userId,
+        packageId: monthly._id,
+        packageDetails: { name: 'Monthly', price: '40', currency: 'GBP', period: 'month', kind: 'membership' },
+        customerInfo: { fullName: 'Typed It', email: member.email },
+        payment: { method: 'stripe', amount: 65, currency: 'GBP', status: 'pending' }
+      });
+
+    // Signed in as somebody else, typing the member's address.
+    const other = await newMember('Typist');
+    const theirs = await service.markPaidAndActivate(await typed(other._id, 'FEE-TYPED-1'), { paidAt });
+    assert.equal(new Date(theirs.subscription.startDate).getTime(), paidAt.getTime());
+
+    // A guest typing it: a guest order starts when it is paid.
+    const guest = await service.markPaidAndActivate(await typed(null, 'FEE-TYPED-2'), { paidAt });
+    assert.equal(new Date(guest.subscription.startDate).getTime(), paidAt.getTime());
+
+    // The member's own early renewal still follows on from their term.
+    const own = await service.markPaidAndActivate(await typed(member._id, 'FEE-TYPED-3'), { paidAt });
+    assert.equal(new Date(own.subscription.startDate).getTime(), memberEnds);
+
+    // The model's own activation reads the same owner.
+    const viaModel = await typed((await newMember('Modeltypist'))._id, 'FEE-TYPED-4');
+    await viaModel.activateSubscription();
+    assert.ok(new Date(viaModel.subscription.startDate).getTime() < memberEnds - 86400000);
+  });
+});

@@ -61,7 +61,7 @@ const gymfolioPaymentController = {
       const terms = membership.readDeskTerms(body);
 
       const [user, pkg] = await Promise.all([
-        User.findById(userId).select('firstName lastName email phone addresses'),
+        User.findById(userId).select('firstName lastName email emailVerified phone addresses'),
         Package.findById(packageId)
       ]);
       if (!user) return res.status(404).json({ success: false, message: 'User not found' });

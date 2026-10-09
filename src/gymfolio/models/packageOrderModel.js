@@ -447,8 +447,8 @@ packageOrderSchema.methods.activateSubscription = async function(options = {}) {
   const start = options.startDate
     ? new Date(options.startDate)
     : await service.startDateFor({
+        // By the account alone, as markPaidAndActivate does.
         userId: this.userId,
-        email: this.customerInfo && this.customerInfo.email,
         kind: (this.packageDetails && this.packageDetails.kind) || 'membership',
         now
       });

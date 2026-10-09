@@ -26,7 +26,7 @@ const { parseAmount, resolveCurrency } = require('../../helper/money');
 const { round2, paidSoFar } = require('./orderMoney');
 const { LIVE_STATUSES } = require('./membershipExpiry');
 const { willAutoRenew } = require('../../services/reminderJobs');
-const { MembershipError, stripeBilled, joiningFeeDue } = require('./membershipService');
+const { MembershipError, stripeBilled, joiningFeeDue, provenEmail } = require('./membershipService');
 const { summaryFor, IS_MEMBERSHIP, localDaysBetween } = require('./membershipLists');
 
 const DEFAULT_LIMIT = 8;
@@ -188,7 +188,7 @@ function membershipOf(order, now) {
  */
 async function deskView(userId, { now = new Date() } = {}) {
   if (!mongoose.Types.ObjectId.isValid(String(userId))) throw new MembershipError('Member not found', 404, 'MEMBER_NOT_FOUND');
-  const user = await User.findById(userId).select(`${MEMBER_FIELDS} role`).lean();
+  const user = await User.findById(userId).select(`${MEMBER_FIELDS} role emailVerified`).lean();
   if (!user) throw new MembershipError('Member not found', 404, 'MEMBER_NOT_FOUND');
 
   const mine = { userId: user._id, ...IS_MEMBERSHIP };
@@ -201,7 +201,7 @@ async function deskView(userId, { now = new Date() } = {}) {
     PackageOrder.find({ userId: user._id, 'payment.status': 'paid', 'payment.balanceDue': { $gt: 0 } })
       .sort({ 'subscription.endDate': 1, createdAt: 1 })
       .lean(),
-    joiningFeeDue({ userId: user._id, email: user.email }),
+    joiningFeeDue({ userId: user._id, email: provenEmail(user) }),
     Settings.getSettings().catch(() => null)
   ]);
 
