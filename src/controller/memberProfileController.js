@@ -407,7 +407,10 @@ module.exports = {
       const name = text((req.body || {}).signature, 120) || [user.firstName, user.lastName].filter(Boolean).join(' ');
       user.waiver = { signedAt: new Date(), version: config.version, signature: name, source: 'desk', ip: clientIp(req), recordedBy: actorId(req) };
       await user.save();
-      return res.json({ success: true, message: `Agreement recorded for ${user.email}.`, data: { ...config, ...waiverStatus(user, config) } });
+      // By email as always -- or, for a member who has none, by name or
+      // username (as securityController.labelOf does), never "undefined".
+      const who = user.email || [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'this member';
+      return res.json({ success: true, message: `Agreement recorded for ${who}.`, data: { ...config, ...waiverStatus(user, config) } });
     } catch (error) {
       console.error('[profile] record waiver failed:', error);
       return fail(res, 500, 'Could not record the agreement');

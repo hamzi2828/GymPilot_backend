@@ -113,3 +113,14 @@ test('a request with no account behind it reaches members only', async () => {
   const refused = await h.inGym(gym, () => h.call(profiles.updateProfile, { params: { id: String(people.admin._id) }, body: { phone: '1' } }));
   assert.equal(refused.statusCode, 403);
 });
+
+test('an agreement recorded for a member with no email names them, never "undefined"', async () => {
+  const noEmail = await h.inGym(gym, () => User.create({ firstName: 'Noor', lastName: 'Nomail', phone: '0300 4445556', role: 'user' }));
+  const res = await call(people.desk, profiles.recordWaiver, { params: { id: String(noEmail._id) }, body: {} });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.message, 'Agreement recorded for Noor Nomail.');
+
+  // With an email it reads as it always did.
+  const withEmail = await call(people.desk, profiles.recordWaiver, { params: { id: String(people.member._id) }, body: {} });
+  assert.equal(withEmail.body.message, `Agreement recorded for ${people.member.email}.`);
+});
