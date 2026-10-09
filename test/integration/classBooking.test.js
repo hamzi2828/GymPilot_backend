@@ -350,3 +350,143 @@ test('a membership sold to start later books the classes from its first day, and
     assert.equal(tooSoon.body.data.membership_status, 'pending');
   });
 });
+
+// The gym calls a session off (a timetable change) while a member is
+// cancelling their own place on it. The member's cancel is held back until
+// the gym's has read the bookings and is working through them, which is the
+// order that used to cancel that booking twice.
+test('the gym cancelling a session as a member cancels their place: the credit comes back once', async () => {
+  await h.inGym(gym, async () => {
+    const exceptions = h.src('gymfolio/controller/classExceptionController');
+    const date = T.shiftDateKey(tomorrow, 14);
+    const slot = [{ day: weekday, startTime: '18:00', endTime: '19:00', instructorName: 'Coach' }];
+    const circuits = await GymClass.create({ name: 'Circuits', description: 'Circuits class', capacity: 10, schedule: slot });
+
+    const people = [];
+    for (let n = 150; n < 156; n++) people.push(await member(n));
+    const held = [];
+    for (const m of people) {
+      // Several used already, so a credit handed back twice shows.
+      await PackageOrder.updateOne({ _id: m.order._id }, { $set: { 'sessions.used': 5 } });
+      const res = await book(m, circuits, date);
+      assert.equal(res.body.data.status, 'booked', JSON.stringify(res.body));
+      held.push(res.body.data.id);
+    }
+    const last = people.length - 1;
+
+    const calledOff = h.call(exceptions.create, { user: { id: String(people[0].user._id) }, body: { classId: String(circuits._id), date, startTime: '18:00', kind: 'cancelled', note: 'Coach is ill' } });
+    const underWay = await settle(async () => (await ClassBooking.findById(held[0]).select('status').lean()).status === 'cancelled', { tries: 2000, every: 0 });
+    assert.ok(underWay, 'the gym got as far as the first booking');
+    const own = await cancel(people[last], held[last]);
+    const res = await calledOff;
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+
+    // Whichever of the two reached the last booking first cancelled it.
+    assert.ok([200, 409].includes(own.statusCode), JSON.stringify(own.body));
+    assert.equal(res.body.cancelled_bookings + (own.statusCode === 200 ? 1 : 0), people.length);
+    for (const [i, m] of people.entries()) {
+      assert.equal((await ClassBooking.findById(held[i]).lean()).status, 'cancelled');
+      assert.equal(await creditsUsed(m), 5, `member ${i}: one credit taken to book, one given back`);
+    }
+  });
+});
+
+// A class that stops running takes its coming bookings with it: switched off
+// from the list, switched off from the edit form, or deleted.
+test('deactivating or deleting a class cancels its upcoming bookings, returns the credits and tells the members', async () => {
+  await h.inGym(gym, async () => {
+    const classesController = h.src('gymfolio/controller/gymClassController');
+    const today = T.dateKey();
+    const staff = { id: String(members[0].user._id) };
+    const slot = [{ day: weekday, startTime: '18:00', endTime: '19:00', instructorName: 'Coach' }];
+    const stop = {
+      toggle: (c) => h.call(classesController.toggleClassStatus, { user: staff, params: { id: String(c._id) }, body: {} }),
+      edit: (c) => h.call(classesController.updateClass, { user: staff, params: { id: String(c._id) }, body: { isActive: 'false' } }),
+      remove: (c) => h.call(classesController.deleteClass, { user: staff, params: { id: String(c._id) } })
+    };
+
+    let n = 160;
+    for (const [how, run] of Object.entries(stop)) {
+      const gymClass = await GymClass.create({ name: `Zumba ${how}`, description: 'Zumba class', capacity: 2, schedule: slot });
+      const [a, b, c, earlier] = [await member(n++), await member(n++), await member(n++), await member(n++)];
+      const held = [await book(a, gymClass, tomorrow), await book(b, gymClass, tomorrow)];
+      const queued = await book(c, gymClass, tomorrow);
+      assert.deepEqual([...held, queued].map((r) => r.body.data.status), ['booked', 'booked', 'waitlisted'], how);
+      // This morning's session, which has been and gone: not touched.
+      await PackageOrder.updateOne({ _id: earlier.order._id }, { $set: { 'sessions.used': 1 } });
+      const past = await ClassBooking.create({ classId: gymClass._id, className: gymClass.name, userId: earlier.user._id, sessionDate: today, sessionStart: '09:00', status: 'booked', seat: 1, creditUsed: true, orderId: earlier.order._id });
+
+      const told = h.calls.notifications.filter((x) => x.name === 'bookingCancelled').length;
+      const res = await run(gymClass);
+      assert.equal(res.statusCode, 200, `${how}: ${JSON.stringify(res.body)}`);
+      assert.equal(res.body.cancelled_bookings, 3, how);
+      assert.match(res.body.message, /3 upcoming booking\(s\) were cancelled and the members told\.$/, how);
+
+      for (const r of [...held, queued]) {
+        const row = await ClassBooking.findById(r.body.data.id).lean();
+        assert.equal(row.status, 'cancelled', how);
+        assert.equal(row.cancelReason, `Zumba ${how} is no longer running`);
+        assert.equal(row.waitlistPosition, null);
+      }
+      assert.deepEqual([await creditsUsed(a), await creditsUsed(b), await creditsUsed(c)], [0, 0, 0], `${how}: the credits are back`);
+      assert.equal((await ClassBooking.findById(past._id).lean()).status, 'booked', `${how}: a session already held is left alone`);
+      assert.equal(await creditsUsed(earlier), 1);
+      const nowTold = await settle(() => h.calls.notifications.filter((x) => x.name === 'bookingCancelled').length === told + 3);
+      assert.ok(nowTold, `${how}: three members told`);
+
+      if (how !== 'remove') {
+        // Switched back on: nothing to cancel, and nothing comes back by itself.
+        const on = await stop.toggle(gymClass);
+        assert.equal(on.body.cancelled_bookings, 0);
+        assert.equal(on.body.message, 'Class activated successfully');
+        assert.equal(await ClassBooking.countBooked(gymClass._id, tomorrow, '18:00'), 0);
+      } else {
+        assert.equal(await GymClass.findById(gymClass._id), null);
+      }
+    }
+  });
+});
+
+// A class that started at 09:00 today (the gym's clock reads midday). The
+// controller will not book into it, so the rows are written as they would
+// have been when it was booked: one place held on a pack credit, one waiting.
+test('after the class has started a member cannot cancel; the desk can, and nobody is promoted', async () => {
+  await h.inGym(gym, async () => {
+    const today = T.dateKey();
+    const slot = [{ day: T.weekdayNameForKey(today), startTime: '09:00', endTime: '10:00', instructorName: 'Coach' }];
+    const dawn = await GymClass.create({ name: 'Dawn', description: 'Early class', capacity: 1, schedule: slot });
+    const [holder, waiter] = [await member(140), await member(141)];
+    await PackageOrder.updateOne({ _id: holder.order._id }, { $set: { 'sessions.used': 1 } });
+
+    const row = (m, extra) => ({ classId: dawn._id, className: 'Dawn', userId: m.user._id, memberName: `${m.user.firstName} Test`, sessionDate: today, sessionStart: '09:00', sessionEnd: '10:00', ...extra });
+    const held = await ClassBooking.create(row(holder, { status: 'booked', seat: 1, creditUsed: true, orderId: holder.order._id }));
+    const queued = await ClassBooking.create(row(waiter, { status: 'waitlisted', waitlistPosition: 1 }));
+
+    // The member, after the class: refused, and nothing has moved.
+    const refused = await cancel(holder, held._id);
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body));
+    assert.match(refused.body.message, /already started/);
+    assert.match(refused.body.message, /front desk/);
+    assert.equal((await ClassBooking.findById(held._id).lean()).status, 'booked');
+    assert.equal(await creditsUsed(holder), 1, 'no credit back for a class that has been and gone');
+    assert.equal((await ClassBooking.findById(queued._id).lean()).status, 'waitlisted');
+    assert.equal(await creditsUsed(waiter), 0);
+
+    // The desk putting a mistake right: cancelled and the credit returned,
+    // but the waiting member is not moved into a finished class or charged.
+    const desk = await h.call(bookings.cancel, { user: { id: String(waiter.user._id) }, isStaffBooking: true, params: { id: String(held._id) }, body: {} });
+    assert.equal(desk.statusCode, 200, JSON.stringify(desk.body));
+    assert.equal(desk.body.promoted, null);
+    assert.equal(desk.body.data.status, 'cancelled');
+    assert.equal(await creditsUsed(holder), 0);
+    const still = await ClassBooking.findById(queued._id).lean();
+    assert.equal(still.status, 'waitlisted');
+    assert.equal(still.waitlistPosition, 1);
+    assert.equal(await creditsUsed(waiter), 0);
+
+    // A stale place on the waiting list can still be given up by the member.
+    const gaveUp = await cancel(waiter, queued._id);
+    assert.equal(gaveUp.statusCode, 200, JSON.stringify(gaveUp.body));
+    assert.equal(gaveUp.body.promoted, null);
+  });
+});

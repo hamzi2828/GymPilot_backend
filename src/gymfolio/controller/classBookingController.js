@@ -118,6 +118,30 @@ async function giveCreditBack(booking) {
   if (order) await refundSession(order).catch(() => {});
 }
 
+/**
+ * What cancelling a booking does, from when its session starts:
+ *
+ *   refused  a member cannot give a place up once the class has started.
+ *            There is nothing left to give up, and with no cancel-by window
+ *            (cancelHours 0) it would hand the credit back for a class they
+ *            may well have been to. The desk still can, to put a mistake right.
+ *   late     a member inside the cancel-by window: the place is freed but
+ *            the credit stays used. Staff cancelling never costs the member.
+ *   promote  the freed place goes to the waiting list -- only while there is
+ *            still a class to come to. Promoting into one that has started
+ *            took a credit from the next in line and told them to turn up.
+ */
+function cancelOutcome(booking, rules, { byStaff = false, now = new Date() } = {}) {
+  const startsAt = sessions.localInstant(booking.sessionDate, booking.sessionStart).getTime();
+  const started = startsAt <= now.getTime();
+  const heldAPlace = booking.status === 'booked';
+  return {
+    refused: started && heldAPlace && !byStaff,
+    late: !byStaff && rules.cancelHours > 0 && startsAt - rules.cancelHours * 3600 * 1000 < now.getTime(),
+    promote: heldAPlace && !started
+  };
+}
+
 function bookingView(booking) {
   return {
     id: String(booking._id),
@@ -449,13 +473,13 @@ module.exports = {
         return fail(res, 409, `This booking is already ${booking.status.replace('_', ' ')}.`);
       }
 
-      const heldAPlace = booking.status === 'booked';
-
       // Inside the cancel-by window a member keeps nothing: the place is
       // freed but the credit stays used. Staff cancelling never costs the
-      // member anything.
-      const startsAt = sessions.localInstant(booking.sessionDate, booking.sessionStart);
-      const late = rules.cancelHours > 0 && startsAt.getTime() - rules.cancelHours * 3600 * 1000 < Date.now();
+      // member anything. Once the class has started only the desk cancels.
+      const outcome = cancelOutcome(booking, rules, { byStaff: !!req.isStaffBooking });
+      if (outcome.refused) {
+        return fail(res, 409, 'This class has already started, so the booking can no longer be cancelled. Please speak to the front desk if something is wrong.');
+      }
 
       // One conditional update from the status read above to cancelled. Two
       // cancels arriving together (a double tap, the member and the desk)
@@ -471,7 +495,7 @@ module.exports = {
             cancelledBy: actorId || null,
             cancelReason: req.body && req.body.reason ? String(req.body.reason).trim() : '',
             waitlistPosition: null,
-            lateCancel: late && !req.isStaffBooking
+            lateCancel: outcome.late
           }
         },
         { new: true }
@@ -491,9 +515,10 @@ module.exports = {
       if (!booking.lateCancel) await giveCreditBack(booking);
 
       // Only a real place frees a place. Cancelling from the waiting list
-      // promotes nobody.
+      // promotes nobody, and neither does the desk cancelling a booking on
+      // a class that has already started.
       let promoted = null;
-      if (heldAPlace) {
+      if (outcome.promote) {
         // The freed place is taken by its seat number, which needs the
         // class's capacity to know which numbers there are.
         const gymClass = await GymClass.findById(booking.classId).select('capacity').lean();
@@ -681,3 +706,6 @@ module.exports = {
     }
   }
 };
+
+// Exported for the tests.
+module.exports.cancelOutcome = cancelOutcome;

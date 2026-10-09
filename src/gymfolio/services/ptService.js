@@ -195,25 +195,41 @@ async function book({ trainerId, memberId, date, startTime, by, bookedBy = 'memb
   }
 }
 
+/** Cancels a session and returns it as it now stands (the one passed in is not changed). */
 async function cancel(session, { by, reason = '', byStaff = false }) {
   if (session.status !== 'scheduled') throw new PtError(`This session is already ${session.status.replace('_', ' ')}`, 409);
   const rules = await ptRules();
   const startsAt = localInstant(session.date, session.startTime);
   const late = startsAt.getTime() - rules.cancelHours * 3600 * 1000 < Date.now();
 
-  session.status = 'cancelled';
-  session.cancelledAt = new Date();
-  session.cancelledBy = by || null;
-  session.cancelReason = String(reason || '').trim();
-  // Staff cancelling never costs the member a credit; a member cancelling
-  // late does.
-  session.lateCancel = late && !byStaff;
-  if (session.creditUsed && session.orderId && !session.lateCancel) {
-    const order = await PackageOrder.findById(session.orderId);
+  // One conditional update from scheduled to cancelled. Two cancels arriving
+  // together (a double tap, the member and the desk) used to both read
+  // 'scheduled' and both hand the credit back; only the one that makes the
+  // change carries on.
+  const cancelled = await PtSession.findOneAndUpdate(
+    { _id: session._id, status: 'scheduled' },
+    {
+      $set: {
+        status: 'cancelled',
+        cancelledAt: new Date(),
+        cancelledBy: by || null,
+        cancelReason: String(reason || '').trim(),
+        // Staff cancelling never costs the member a credit; a member
+        // cancelling late does.
+        lateCancel: late && !byStaff
+      }
+    },
+    { new: true }
+  );
+  if (!cancelled) {
+    const current = await PtSession.findById(session._id).select('status').lean();
+    throw new PtError(`This session is already ${(current ? current.status : 'cancelled').replace('_', ' ')}`, 409);
+  }
+  if (cancelled.creditUsed && cancelled.orderId && !cancelled.lateCancel) {
+    const order = await PackageOrder.findById(cancelled.orderId);
     if (order) await refundSession(order).catch(() => {});
   }
-  await session.save();
-  return session;
+  return cancelled;
 }
 
 const isSet = (value) => value !== null && value !== undefined && value !== '';

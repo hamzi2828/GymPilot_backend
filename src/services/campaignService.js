@@ -93,6 +93,25 @@ function addressFor(recipient, channel) {
   return recipient.phone;
 }
 
+/**
+ * The address the message log files a recipient under on this channel, which
+ * is what "already sent" has to be matched on. A phone number is logged as
+ * messaging.js normalises it before sending ("0300 1234567" goes out, and is
+ * logged, as "+923001234567"), not as it was typed into the member's record:
+ * compared as typed, nobody ever matched, and every batch texted the same
+ * first fifty members again. Push is logged under the member's id.
+ *
+ * '' when they cannot be reached on this channel at all: no address, a phone
+ * cell with no digits in it, or -- for push -- no device (`devices` is
+ * messaging.usersWithDevices()).
+ */
+function logAddress(recipient, channel, { defaultCountryCode = '', devices = null } = {}) {
+  const address = addressFor(recipient, channel);
+  if (channel === 'email' || !address) return address || '';
+  if (channel === 'push') return devices && devices.has(address) ? address : '';
+  return messaging.normalizePhone(address, defaultCountryCode);
+}
+
 function campaignVars(recipient, b) {
   return {
     firstName: recipient.firstName || 'there',
@@ -120,6 +139,9 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
   const b = await notify.brand();
   const channel = campaign.channel || 'email';
   const recipients = await resolveAudience(campaign.audience);
+  const reach = {};
+  if (channel === 'push') reach.devices = await messaging.usersWithDevices();
+  else if (channel !== 'email') reach.defaultCountryCode = (await messaging.messagingConfig()).defaultCountryCode;
 
   // Done: everyone reached, plus everyone this pass already tried and could
   // not reach. Failures from before the pass started are retried.
@@ -136,10 +158,11 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
   // reached, and while they stayed in the queue a batch made only of them
   // came round again on every call -- fifty members with no email at the
   // front of the list, and nobody behind them was ever sent the campaign.
+  // The same goes for a push campaign and members with no device.
   const unreachable = [];
   const pending = [];
   for (const recipient of recipients) {
-    const address = addressFor(recipient, channel);
+    const address = logAddress(recipient, channel, reach);
     if (!address) unreachable.push(recipient);
     else if (!already.has(address)) pending.push(recipient);
   }
@@ -156,16 +179,16 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
   // thousands, and (like MessageLog.record) never failing the send.
   if (unreachable.length && !(await MessageLog.exists({ campaignId: campaign._id, status: 'skipped' }))) {
     skipped = unreachable.length;
-    const error = `no ${channel === 'email' ? 'email address' : channel === 'push' ? 'account' : 'phone number'}`;
+    const missing = (recipient) => (channel === 'email' ? 'email address' : channel !== 'push' ? 'phone number' : recipient.userId ? 'device' : 'account');
     const body = String(campaign.body || '').slice(0, 500);
     await MessageLog.insertMany(
-      unreachable.map((recipient) => ({ channel, to: '', userId: recipient.userId || null, subject: campaign.subject, body, context: 'campaign', campaignId: campaign._id, status: 'skipped', error })),
+      unreachable.map((recipient) => ({ channel, to: '', userId: recipient.userId || null, subject: campaign.subject, body, context: 'campaign', campaignId: campaign._id, status: 'skipped', error: `no ${missing(recipient)}` })),
       { ordered: false }
     ).catch((err) => console.error('[campaigns] could not log the skipped recipients:', err.message));
   }
 
   for (const recipient of batch) {
-    const address = addressFor(recipient, channel);
+    const address = logAddress(recipient, channel, reach);
     const vars = campaignVars(recipient, b);
     const meta = { context: 'campaign', campaignId: campaign._id, userId: recipient.userId || null, sentBy: actorId };
 
@@ -174,11 +197,19 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
       const subject = templates.fill(campaign.subject, vars, false);
       const html = shell(b.siteName, subject, templates.bodyToHtml(campaign.body, vars), footerFor(recipient, b));
       result = await sendEmail(address, subject, html);
-      MessageLog.record({ ...meta, channel, to: address, subject, body: campaign.body, status: result.success ? 'sent' : 'failed', error: result.success ? '' : result.error, provider: 'smtp' });
+      await MessageLog.record({ ...meta, channel, to: address, subject, body: campaign.body, status: result.success ? 'sent' : 'failed', error: result.success ? '' : result.error, provider: 'smtp' });
     } else if (channel === 'push') {
       result = await messaging.sendPush(recipient.userId, { title: templates.fill(campaign.subject || b.siteName, vars, false), body: templates.fill(campaign.body, vars, false), url: campaign.url || b.accountUrl }, meta);
     } else {
       result = await messaging.sendText(channel, address, templates.fill(campaign.body, vars, false), meta);
+    }
+
+    // A send messaging.js skipped left no row saying so (the member's last
+    // device went a moment ago, the provider was removed mid-campaign). It
+    // is logged here as failed, so every recipient a batch takes is in the
+    // log afterwards and the same batch can never come round again.
+    if (result && result.skipped && channel !== 'email') {
+      await MessageLog.record({ ...meta, channel, to: address, subject: campaign.subject, body: campaign.body, status: 'failed', error: result.skipped });
     }
 
     if (result && result.success) sent += 1;
@@ -189,4 +220,4 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
   return { done: remaining <= 0, remaining, targeted: recipients.length, sent, failed, skipped };
 }
 
-module.exports = { resolveAudience, sendBatch, addressFor };
+module.exports = { resolveAudience, sendBatch, addressFor, logAddress };
