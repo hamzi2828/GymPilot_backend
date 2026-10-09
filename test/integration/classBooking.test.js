@@ -350,3 +350,47 @@ test('a membership sold to start later books the classes from its first day, and
     assert.equal(tooSoon.body.data.membership_status, 'pending');
   });
 });
+
+// A class that started at 09:00 today (the gym's clock reads midday). The
+// controller will not book into it, so the rows are written as they would
+// have been when it was booked: one place held on a pack credit, one waiting.
+test('after the class has started a member cannot cancel; the desk can, and nobody is promoted', async () => {
+  await h.inGym(gym, async () => {
+    const today = T.dateKey();
+    const slot = [{ day: T.weekdayNameForKey(today), startTime: '09:00', endTime: '10:00', instructorName: 'Coach' }];
+    const dawn = await GymClass.create({ name: 'Dawn', description: 'Early class', capacity: 1, schedule: slot });
+    const [holder, waiter] = [await member(140), await member(141)];
+    await PackageOrder.updateOne({ _id: holder.order._id }, { $set: { 'sessions.used': 1 } });
+
+    const row = (m, extra) => ({ classId: dawn._id, className: 'Dawn', userId: m.user._id, memberName: `${m.user.firstName} Test`, sessionDate: today, sessionStart: '09:00', sessionEnd: '10:00', ...extra });
+    const held = await ClassBooking.create(row(holder, { status: 'booked', seat: 1, creditUsed: true, orderId: holder.order._id }));
+    const queued = await ClassBooking.create(row(waiter, { status: 'waitlisted', waitlistPosition: 1 }));
+
+    // The member, after the class: refused, and nothing has moved.
+    const refused = await cancel(holder, held._id);
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body));
+    assert.match(refused.body.message, /already started/);
+    assert.match(refused.body.message, /front desk/);
+    assert.equal((await ClassBooking.findById(held._id).lean()).status, 'booked');
+    assert.equal(await creditsUsed(holder), 1, 'no credit back for a class that has been and gone');
+    assert.equal((await ClassBooking.findById(queued._id).lean()).status, 'waitlisted');
+    assert.equal(await creditsUsed(waiter), 0);
+
+    // The desk putting a mistake right: cancelled and the credit returned,
+    // but the waiting member is not moved into a finished class or charged.
+    const desk = await h.call(bookings.cancel, { user: { id: String(waiter.user._id) }, isStaffBooking: true, params: { id: String(held._id) }, body: {} });
+    assert.equal(desk.statusCode, 200, JSON.stringify(desk.body));
+    assert.equal(desk.body.promoted, null);
+    assert.equal(desk.body.data.status, 'cancelled');
+    assert.equal(await creditsUsed(holder), 0);
+    const still = await ClassBooking.findById(queued._id).lean();
+    assert.equal(still.status, 'waitlisted');
+    assert.equal(still.waitlistPosition, 1);
+    assert.equal(await creditsUsed(waiter), 0);
+
+    // A stale place on the waiting list can still be given up by the member.
+    const gaveUp = await cancel(waiter, queued._id);
+    assert.equal(gaveUp.statusCode, 200, JSON.stringify(gaveUp.body));
+    assert.equal(gaveUp.body.promoted, null);
+  });
+});
