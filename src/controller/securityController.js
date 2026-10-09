@@ -63,6 +63,12 @@ function nameOf(user) {
   return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'This account';
 }
 
+// Who a message to staff is about: the address, as these messages always
+// said -- or, for a member who has none, their name or username.
+function labelOf(user) {
+  return user.email || nameOf(user);
+}
+
 function consentRecord(given, source, by) {
   return { given: !!given, at: new Date(), source, recordedBy: by || null, version: BIOMETRIC_CONSENT_VERSION };
 }
@@ -238,7 +244,7 @@ module.exports = {
   forceLogout: async (req, res) => {
     try {
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'User not found' });
-      const target = await User.findById(req.params.id).select(`email ${REACH_FIELDS}`).lean();
+      const target = await User.findById(req.params.id).select(`firstName lastName username email ${REACH_FIELDS}`).lean();
       if (!target) return res.status(404).json({ message: 'User not found' });
       const refusal = await reachRefusal(req, target, 'sign out');
       if (refusal) return res.status(403).json({ message: refusal });
@@ -246,7 +252,7 @@ module.exports = {
       const user = await User.findByIdAndUpdate(target._id, { $inc: { tokenVersion: 1 } }, { new: true }).select('_id');
       if (!user) return res.status(404).json({ message: 'User not found' });
       forgetSession(user._id);
-      return res.json({ success: true, message: `${target.email} has been signed out of every device.` });
+      return res.json({ success: true, message: `${labelOf(target)} has been signed out of every device.` });
     } catch (error) {
       console.error('[security] force logout failed:', error);
       return res.status(500).json({ message: 'Could not sign the user out' });
@@ -310,7 +316,7 @@ module.exports = {
       }
       return res.json({
         success: true,
-        message: given ? `Biometric consent recorded for ${user.email}.` : `Consent withdrawn for ${user.email}${removed ? `; ${removed} fingerprint(s) deleted` : ''}.`,
+        message: given ? `Biometric consent recorded for ${labelOf(user)}.` : `Consent withdrawn for ${labelOf(user)}${removed ? `; ${removed} fingerprint(s) deleted` : ''}.`,
         data: { biometric: user.consents.biometric }
       });
     } catch (error) {

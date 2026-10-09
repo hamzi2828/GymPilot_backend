@@ -169,3 +169,18 @@ test('nor record or withdraw their fingerprint consent, which would delete their
   assert.equal((await inGym(() => User.findById(member._id).lean())).consents.biometric.given, true);
   assert.equal((await consent(admin, admin, false)).statusCode, 200);
 });
+
+test('a member with no email is named in these messages, never "undefined"', async () => {
+  const pat = await inGym(() => User.create({ firstName: 'Pat', lastName: 'Phone', phone: '0300 7770001', password: 'x' }));
+  const nameless = await inGym(() => User.collection.insertOne({ firstName: '', lastName: '', username: 'walkin482', role: 'user', isActive: true }));
+
+  const out = await signOut(receptionist, pat);
+  assert.equal(out.statusCode, 200, JSON.stringify(out.body));
+  assert.equal(out.body.message, 'Pat Phone has been signed out of every device.');
+  assert.equal((await signOut(receptionist, { _id: nameless.insertedId })).body.message, 'walkin482 has been signed out of every device.');
+
+  assert.equal((await consent(receptionist, pat, true)).body.message, 'Biometric consent recorded for Pat Phone.');
+  assert.equal((await consent(receptionist, pat, false)).body.message, 'Consent withdrawn for Pat Phone.');
+  // An account with an address is still named by it.
+  assert.equal((await signOut(receptionist, member)).body.message, 'mia@role-access.test has been signed out of every device.');
+});
