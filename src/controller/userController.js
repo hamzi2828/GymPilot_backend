@@ -1297,7 +1297,10 @@ const userController = {
                 return res.status(401).json({ message: 'Invalid or expired token' });
             }
 
-            const user = await User.findById(currentUser.id).select('role isActive').lean();
+            // The photo and the uploaded documents ride along for
+            // releaseAccount, which removes the stored files with the
+            // account; `documents` is select: false, so it is asked for.
+            const user = await User.findById(currentUser.id).select('role isActive avatarUrl +documents').lean();
             if (!user) {
                 return res.status(404).json({ message: 'User not found' });
             }
@@ -1624,7 +1627,9 @@ const userController = {
             const billing = await subscriptionsBlockDeletion(id, { self: false, by: currentUser.id });
             if (billing) return res.status(409).json(billing);
 
-            const deleted = await User.findByIdAndDelete(id);
+            // With the uploaded documents (select: false), so releaseAccount
+            // can remove the stored files along with the account.
+            const deleted = await User.findByIdAndDelete(id).select('+documents');
             if (!deleted) {
                 return res.status(404).json({ message: 'User not found' });
             }
