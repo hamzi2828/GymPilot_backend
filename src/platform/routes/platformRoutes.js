@@ -33,6 +33,7 @@ router.post('/auth/reset-password', passwordResetConfirmLimiter, authController.
 router.get('/auth/me', platformAuth, authController.me);
 router.put('/auth/password', platformAuth, authController.changePassword);
 router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
+router.post('/auth/logout', platformAuth, authController.logout);
 
 // Public: what the marketing site (GymPilot_frontendAdmin) reads and posts.
 // No session; nothing here says anything about a gym.
@@ -90,6 +91,8 @@ router.put('/gyms/:id/domains', gymsController.updateDomains);
 router.get('/gyms/:id/domains/status', gymsController.domainsStatus);
 router.patch('/gyms/:id/status', gymsController.setStatus);
 router.put('/gyms/:id/subscription', gymsController.updateSubscription);
+router.get('/gyms/:id/payments', gymsController.listPayments);
+router.post('/gyms/:id/payments', gymsController.recordPayment);
 router.post('/gyms/:id/reset-owner-password', gymsController.resetOwnerPassword);
 
 // Plans

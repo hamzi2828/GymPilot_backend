@@ -24,6 +24,9 @@ const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { invalidatePlanCache } = require('../planLimits');
 const { sendOwnerInvite } = require('../ownerInvite');
 const { syncStripeSubscription, changesPrice, SubscriptionSyncError } = require('../services/subscriptionSync');
+// Called through the modules, not destructured, so a test can stand in for them.
+const platformBilling = require('../services/platformBilling');
+const manualPayments = require('../services/manualPayments');
 
 const User = require('../../models/user');
 const { ADMIN_SLUG } = require('../../services/roleService');
@@ -54,7 +57,9 @@ function audit(req, action, gym, meta = null) {
 
 function fail(res, error) {
   if (error instanceof ProvisioningError) {
-    return res.status(error.status).json({ success: false, message: error.message, details: error.details });
+    // `code` when the panel has something to do about it (see deleteGym).
+    const code = error.details && error.details.code;
+    return res.status(error.status).json({ success: false, ...(code ? { code } : {}), message: error.message, details: error.details });
   }
   if (error && error.name === 'ValidationError') {
     return res.status(400).json({ success: false, message: error.message });
@@ -379,6 +384,14 @@ module.exports = {
   },
 
   // PATCH /api/platform/gyms/:id/status   { status: 'active' | 'suspended' }
+  //
+  // A gym that pays by card is not charged while it is suspended: Stripe
+  // stops collecting on its subscription (platformBilling
+  // .setCollectionPaused) and starts again when it is reactivated. The
+  // switch itself never waits on Stripe -- a gym may need taking offline now
+  // -- so when Stripe refuses, the status still changes and `warnings` says
+  // what is left to do by hand. `billing` is `{ subscriptionId, paused }`
+  // when Stripe took it, else null.
   setStatus: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
@@ -389,12 +402,30 @@ module.exports = {
         return res.status(400).json({ success: false, message: `Status must be one of: ${Gym.GYM_STATUSES.join(', ')}` });
       }
 
+      const changed = gym.status !== status;
       gym.status = status;
       await gym.save();
       invalidateTenantCache();
-      audit(req, status === 'suspended' ? 'gym_suspended' : 'gym_activated', gym);
 
-      return res.json({ success: true, data: publicGym(gym) });
+      const subscriptionId = (gym.subscription && gym.subscription.stripeSubscriptionId) || '';
+      const suspended = status === 'suspended';
+      const warnings = [];
+      let billing = null;
+      if (changed && subscriptionId) {
+        try {
+          await platformBilling.setCollectionPaused(subscriptionId, suspended);
+          billing = { subscriptionId, paused: suspended };
+        } catch (error) {
+          warnings.push(
+            suspended
+              ? `The gym is suspended, but Stripe would not pause its card subscription (${error.message}), so its owner is still being charged. Pause or cancel ${subscriptionId} in the Stripe dashboard.`
+              : `The gym is back on, but Stripe would not start charging its card subscription again (${error.message}). Resume ${subscriptionId} in the Stripe dashboard.`
+          );
+        }
+      }
+      audit(req, suspended ? 'gym_suspended' : 'gym_activated', gym, subscriptionId ? { billing, warnings } : null);
+
+      return res.json({ success: true, data: publicGym(gym), billing, warnings });
     } catch (error) {
       return fail(res, error);
     }
@@ -529,6 +560,70 @@ module.exports = {
     }
   },
 
+  // GET /api/platform/gyms/:id/payments
+  //
+  // The payments recorded by hand for this gym, newest first, and `next`:
+  // whether another can be recorded (`canRecord`, and the `reason` when
+  // not -- a gym that pays by card) and what the form starts from: `amount`,
+  // `currency`, `billingCycle`, `paidFrom`, `paidUntil`, `methods`.
+  listPayments: async (req, res) => {
+    try {
+      const gym = await loadGym(req.params.id);
+      if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
+      const rows = await manualPayments.listPayments(gym._id);
+      return res.json({ success: true, data: rows.map(manualPayments.publicPayment), next: manualPayments.paymentTerms(gym.toObject()) });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // POST /api/platform/gyms/:id/payments
+  //   { amount, method, receivedAt, reference, note, paidUntil, requestId }
+  //
+  // A payment taken outside Stripe (services/manualPayments.js): kept in
+  // the gym's payment history, its paid-until date moved to `paidUntil`
+  // (one cycle on by default), its subscription made active. 201 with the
+  // payment and the gym; the same `requestId` again answers 200
+  // `duplicate: true` with the payment already stored, and changes nothing.
+  // 409 `STRIPE_BILLED` for a gym that pays by card, 409
+  // `DUPLICATE_REFERENCE` for a reference already on record.
+  recordPayment: async (req, res) => {
+    try {
+      const gym = await loadGym(req.params.id);
+      if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
+
+      let outcome;
+      try {
+        outcome = await manualPayments.recordPayment({ gym: gym.toObject(), input: req.body || {}, actor: req.superAdmin });
+      } catch (error) {
+        if (error instanceof manualPayments.ManualPaymentError) {
+          return res.status(error.status).json({ success: false, code: error.code, message: error.message });
+        }
+        throw error;
+      }
+
+      const payment = manualPayments.publicPayment(outcome.payment);
+      const after = (await loadGym(req.params.id)) || gym;
+      if (!outcome.duplicate) {
+        audit(req, 'gym_payment_recorded', gym, {
+          paymentId: payment.id,
+          amount: payment.amount,
+          currency: payment.currency,
+          method: payment.method,
+          reference: payment.reference,
+          receivedAt: payment.receivedAt,
+          paidUntil: payment.periodTo,
+          statusBefore: payment.statusBefore
+        });
+      }
+      // Paying does not undo the operator's own switch.
+      const warnings = after.status === 'suspended' ? ['The payment is recorded, but this gym is suspended. Reactivate it to switch it back on.'] : [];
+      return res.status(outcome.duplicate ? 200 : 201).json({ success: true, data: payment, duplicate: outcome.duplicate, gym: publicGym(after), warnings });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
   // GET /api/platform/gyms/:id/admins  -- administrator accounts inside the gym
   listAdmins: async (req, res) => {
     try {
@@ -631,15 +726,43 @@ module.exports = {
     }
   },
 
-  // DELETE /api/platform/gyms/:id   { confirmSlug, dropDatabase }
+  // DELETE /api/platform/gyms/:id
+  //   { confirmSlug, dropDatabase, subscriptionCancelled, memberSubscriptionsAcknowledged }
+  //
+  // The gym's card subscription with the platform is cancelled in Stripe
+  // first. When Stripe will not cancel it nothing is deleted: 409
+  // `SUBSCRIPTION_NOT_CANCELLED`, with the subscription to cancel by hand
+  // in `details.subscriptionId`. `subscriptionCancelled: true` is the
+  // admin saying they have done that, and lets the deletion go on.
+  //
+  // A gym whose members still pay it by card on a subscription is refused
+  // too -- 409 `MEMBER_SUBSCRIPTIONS_ACTIVE`, `details.count` of them --
+  // until `memberSubscriptionsAcknowledged: true` says the admin knows
+  // those keep charging.
   remove: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
       if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
 
-      const { confirmSlug, dropDatabase } = req.body || {};
-      const result = await deleteGym(gym, { confirmSlug, dropDatabase: dropDatabase === true || dropDatabase === 'true' });
-      audit(req, 'gym_deleted', gym, { slug: gym.slug, databaseDropped: result.databaseDropped });
+      const { confirmSlug, dropDatabase, subscriptionCancelled, memberSubscriptionsAcknowledged } = req.body || {};
+      const yes = (value) => value === true || value === 'true';
+      const result = await deleteGym(gym, {
+        confirmSlug,
+        dropDatabase: yes(dropDatabase),
+        subscriptionCancelledByHand: yes(subscriptionCancelled),
+        memberSubscriptionsAcknowledged: yes(memberSubscriptionsAcknowledged)
+      });
+      audit(req, 'gym_deleted', gym, {
+        slug: gym.slug,
+        databaseDropped: result.databaseDropped,
+        billing: result.billing,
+        memberSubscriptionsAcknowledged: yes(memberSubscriptionsAcknowledged),
+        memberLoginsRemoved: result.memberLoginsRemoved,
+        filesRemoved: result.filesRemoved,
+        // What the store would not give up, so there is a trail to clear it by.
+        ...(result.filesLeft ? { filesLeft: true, filesError: result.filesError } : {}),
+        ...(result.backupsLeft ? { backupsLeft: result.backupsLeft } : {})
+      });
 
       return res.json({ success: true, data: result });
     } catch (error) {

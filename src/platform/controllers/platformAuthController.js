@@ -8,10 +8,11 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const SuperAdmin = require('../models/superAdminModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
-const { signPlatformToken, ensureBootstrapSuperAdmin } = require('../middleware/platformAuth');
+const { signPlatformToken, ensureBootstrapSuperAdmin, tokenVersionOf } = require('../middleware/platformAuth');
 const { sendEmail } = require('../../services/emailService');
 const { passwordMatches } = require('../../services/passwordCheck');
 const { shell, paragraph, button, escapeHtml } = require('../../templates/gymEmails');
+const { localFallback } = require('../tenantContext');
 
 const MIN_PASSWORD_LENGTH = 10;
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -49,26 +50,19 @@ function maskEmail(email) {
 }
 
 /**
- * Where the panel lives, for links in email. Never taken from a raw
- * Origin header unless that origin is one the platform already trusts --
- * a reset link pointing at an attacker's domain would hand them the token.
+ * Where the panel lives, for links in email: what PLATFORM_ADMIN_ORIGIN
+ * says, and nothing else. Never the request's Origin header, however
+ * trusted that origin is for other things -- a gym's own domain is a
+ * registered origin, and a reset link built on it would hand the super
+ * admin's token to whoever runs that site. When the variable is not set, a
+ * developer's machine gets the panel's local address and production gets
+ * null: no link is better than one that points somewhere else.
  */
-async function panelOrigin(req) {
+function panelOrigin(env = process.env) {
   // May be a comma-separated list (www and apex, for CORS); the first entry
   // is the one links point at.
-  if (process.env.PLATFORM_ADMIN_ORIGIN) return process.env.PLATFORM_ADMIN_ORIGIN.split(',')[0].trim().replace(/\/+$/, '');
-  const origin = String(req.headers.origin || '').replace(/\/+$/, '');
-  if (origin) {
-    const trusted = new Set([process.env.FRONTEND_ORIGIN, process.env.GYMFOLIO_URL].filter(Boolean).map((o) => o.replace(/\/+$/, '')));
-    if (trusted.has(origin)) return origin;
-    try {
-      const { isRegisteredOrigin } = require('../middleware/resolveTenant');
-      if (await isRegisteredOrigin(origin)) return origin;
-    } catch {
-      /* fall through */
-    }
-  }
-  return (process.env.FRONTEND_ORIGIN || 'http://localhost:3000').replace(/\/+$/, '');
+  const first = String(env.PLATFORM_ADMIN_ORIGIN || '').split(',')[0].trim().replace(/\/+$/, '');
+  return /^https?:\/\/\S+$/i.test(first) ? first : localFallback('http://localhost:3001', env);
 }
 
 async function startChallenge(admin) {
@@ -83,7 +77,9 @@ async function startChallenge(admin) {
     `<p style="margin:0 0 16px;font-size:32px;letter-spacing:0.3em;font-weight:700;color:#18181b">${code}</p>`,
     paragraph('It expires in 10 minutes. If you did not try to sign in, ignore this email.')
   ].join('');
-  const result = await sendEmail(admin.email, `${code} is your ${PLATFORM_NAME} platform sign-in code`, shell(PLATFORM_NAME, 'Your sign-in code', body));
+  // The code is in the body only: subjects are written to the mail log
+  // (services/emailService.js), and shown by every notification on a phone.
+  const result = await sendEmail(admin.email, `Your ${PLATFORM_NAME} platform sign-in code`, shell(PLATFORM_NAME, 'Your sign-in code', body));
   return { challengeId, emailed: !!result.success, error: result.success ? null : result.error };
 }
 
@@ -189,6 +185,14 @@ module.exports = {
       const email = String((req.body && req.body.email) || '').toLowerCase().trim();
       if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
 
+      // Said before any account is looked up, and the same whoever asks: it
+      // is about this server, not about the address typed.
+      const origin = panelOrigin();
+      if (!origin) {
+        console.error('[platform] PLATFORM_ADMIN_ORIGIN is not set, so no password reset link can be sent');
+        return res.status(503).json({ success: false, message: 'Password reset by email is not set up on this server yet. Ask whoever runs it to set PLATFORM_ADMIN_ORIGIN.' });
+      }
+
       const admin = await SuperAdmin.findOne({ email });
       if (!admin || !admin.isActive) return res.json(reply);
 
@@ -196,7 +200,7 @@ module.exports = {
       admin.passwordReset = { tokenHash: hashToken(token), expiresAt: new Date(Date.now() + RESET_TTL_MS) };
       await admin.save();
 
-      const url = `${await panelOrigin(req)}/reset?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
+      const url = `${origin}/reset?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
       const body = [
         paragraph(`Hi ${escapeHtml(admin.name || 'there')}, someone asked to reset the password for your ${PLATFORM_NAME} platform account.`),
         button(url, 'Choose a new password'),
@@ -235,6 +239,8 @@ module.exports = {
       admin.passwordReset = { tokenHash: null, expiresAt: null };
       admin.twoFactor = admin.twoFactor || {};
       admin.twoFactor.pending = null;
+      // Whoever was signed in with the old password is not any more.
+      admin.tokenVersion = tokenVersionOf(admin) + 1;
       await admin.save();
       PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: 'password_reset', ip: clientIp(req) });
 
@@ -263,18 +269,44 @@ module.exports = {
 
       const admin = await SuperAdmin.findById(req.superAdmin._id).select('+password');
       if (!admin || !(await bcrypt.compare(currentPassword, admin.password))) {
-        return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+        // 400, not 401: the session is fine, it is the form that is wrong.
+        // The panel treats a 401 as "signed out" and would send the admin
+        // to the sign-in page for a typo.
+        return res.status(400).json({ success: false, code: 'WRONG_PASSWORD', message: 'The current password is not right. Nothing was changed.' });
       }
 
       admin.password = await bcrypt.hash(newPassword, await bcrypt.genSalt(10));
+      // Every other session ends with the old password. This one carries on
+      // with the new token in the answer.
+      admin.tokenVersion = tokenVersionOf(admin) + 1;
       await admin.save();
 
       PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: 'password_changed', ip: clientIp(req) });
 
-      return res.json({ success: true, message: 'Password updated' });
+      return res.json({ success: true, message: 'Password updated. Everywhere else you were signed in has been signed out.', token: signPlatformToken(admin) });
     } catch (error) {
       console.error('[platform] change password failed:', error);
       return res.status(500).json({ success: false, message: 'Could not update password' });
     }
-  }
+  },
+
+  // POST /api/platform/auth/logout
+  //
+  // Ends the session on the server, not just in the browser: the token (and
+  // every other token of this account -- sessions are told apart only by
+  // generation) stops working at once. $inc, so two sign-outs racing cannot
+  // cancel each other out.
+  logout: async (req, res) => {
+    try {
+      await SuperAdmin.updateOne({ _id: req.superAdmin._id }, { $inc: { tokenVersion: 1 } });
+      PlatformAuditLog.record({ actorId: req.superAdmin._id, actorEmail: req.superAdmin.email, action: 'logout', ip: clientIp(req) });
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('[platform] sign out failed:', error);
+      return res.status(500).json({ success: false, message: 'Could not sign out' });
+    }
+  },
+
+  // exported for tests
+  panelOrigin
 };

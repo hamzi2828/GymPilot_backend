@@ -69,9 +69,24 @@ function subdomainHostFor(slug, root = process.env.PLATFORM_ROOT_DOMAIN) {
 }
 
 /**
+ * A localhost address standing in for one nobody configured -- on a
+ * developer's machine only. In production there is no such stand-in: an
+ * email or redirect carrying localhost sends its reader to their own
+ * computer. Null there, and the caller leaves the link out or refuses.
+ */
+function localFallback(url, env = process.env) {
+  return env.NODE_ENV === 'production' ? null : url;
+}
+
+// Gyms already reported as having no address, so the log says it once each.
+const addressless = new Set();
+
+/**
  * The website address a gym is reached at, whether or not a request is in
  * flight: its primary registered domain; failing that, its platform
  * subdomain; failing that, the env fallback the single-gym deployment used.
+ * In production, a gym with none of those has no address: '' (a link built
+ * on it is a bare path, never localhost), and the log says what to set.
  *
  * The gym a bare deployment defaults to keeps answering with the env value
  * it always used, so a single-gym install behaves exactly as before the
@@ -90,7 +105,16 @@ function siteUrlFor(gym) {
   const subdomain = subdomainHostFor(gym && gym.slug);
   if (subdomain) return originForHost(subdomain);
 
-  return envOrigin || 'http://localhost:3000';
+  if (envOrigin) return envOrigin;
+  const local = localFallback('http://localhost:3000');
+  if (local) return local;
+
+  const who = (gym && gym.slug) || 'no gym';
+  if (!addressless.has(who)) {
+    addressless.add(who);
+    console.error(`[tenant] ${who} has no web address: no registered domain, and neither PLATFORM_ROOT_DOMAIN nor FRONTEND_ORIGIN is set. Links to its site are being sent without one.`);
+  }
+  return '';
 }
 
 function isDefaultTenant(gym) {
@@ -236,6 +260,7 @@ module.exports = {
   currentTenantSlug,
   frontendOrigin,
   siteUrlFor,
+  localFallback,
   inviteSiteUrlFor,
   isDefaultTenant,
   subdomainHostFor,

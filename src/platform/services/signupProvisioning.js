@@ -40,7 +40,7 @@ const { applyCheckoutToGym, retrieveCheckoutSubscription, checkoutStatus, period
 const platformBilling = require('./platformBilling');
 const emailService = require('../../services/emailService');
 const { getPlatformStripe } = require('./platformStripe');
-const { emailAdmins, panelUrl } = require('../controllers/demoRequestsController');
+const { emailAdmins, panelLink } = require('../controllers/demoRequestsController');
 // The same window after which the webhook lets a retry take over an event
 // nobody finished: a signup claim that old belongs to a delivery that died.
 const { STALE_CLAIM_MS } = require('../controllers/platformSettingsController');
@@ -248,7 +248,7 @@ async function fail(signup, reason, { notify = false } = {}) {
         'Stripe retries the payment\'s webhook for up to three days, and the daily job retries the signup too; each retry tries again. Fix what the reason says, or set the gym up by hand from the request: the next retry then attaches the payment to it. ' +
           'A signup still not set up after three days of retries is given up on: its Stripe subscription is cancelled and the buyer told.'
       ),
-      paragraph(`<a href="${panelUrl()}">${panelUrl()}</a>`)
+      panelLink()
     ]);
   }
   throw new Error(reason);
@@ -276,7 +276,9 @@ async function removeHalfMadeGym(signup, gym, subscriptionId, now = Date.now()) 
 
   const withUri = await Gym.findByIdWithUri(gym._id);
   if (!withUri || withUri.provisionedAt || (withUri.database && withUri.database.uri)) return false;
-  await provisioning.deleteGym(withUri, { confirmSlug: withUri.slug, dropDatabase: true });
+  // The subscription stays: it is the payment the gym is about to be made
+  // again from.
+  await provisioning.deleteGym(withUri, { confirmSlug: withUri.slug, dropDatabase: true, keepSubscription: true });
   PlatformAuditLog.record({
     actorId: null,
     actorEmail: 'signup',
@@ -313,7 +315,7 @@ async function secondPayment(signup, gym, subscriptionId) {
   const note = `A second payment (Stripe subscription ${subscriptionId}) completed after this signup's gym was set up. It is not on any gym: cancel and refund it in Stripe.`;
   const pushed = await DemoRequest.updateOne({ _id: signup._id, warnings: { $ne: note } }, { $push: { warnings: note } });
   if (pushed && pushed.modifiedCount) {
-    tell(`Second payment for ${signup.gymName || signup.email}`, 'A signup paid twice', [paragraph(escapeHtml(note)), paragraph(`<a href="${panelUrl()}">${panelUrl()}</a>`)]);
+    tell(`Second payment for ${signup.gymName || signup.email}`, 'A signup paid twice', [paragraph(escapeHtml(note)), panelLink()]);
   }
   return { gym, result: `signup ${signup._id}: second payment ${subscriptionId} not linked to ${gym.slug}` };
 }
@@ -448,7 +450,7 @@ async function completeSignupCheckout(session, stripe, eventAt) {
     case 'gone': {
       const note = `Paid (Stripe subscription ${subscriptionId}), but the gym this signup was set up as has been deleted. The subscription is on no gym: cancel it in Stripe, or set the gym up again by hand.`;
       await DemoRequest.updateOne({ _id: signup._id }, { $set: { 'signup.error': note } }).catch(() => null);
-      tell(`Payment for a deleted gym: ${signup.gymName || signup.email}`, 'A signup paid for a deleted gym', [paragraph(escapeHtml(note)), paragraph(`<a href="${panelUrl()}">${panelUrl()}</a>`)]);
+      tell(`Payment for a deleted gym: ${signup.gymName || signup.email}`, 'A signup paid for a deleted gym', [paragraph(escapeHtml(note)), panelLink()]);
       return { gym: null, result: `signup ${signupId}'s gym was deleted; subscription ${subscriptionId} is on no gym` };
     }
     case 'wait':
@@ -519,7 +521,7 @@ async function alertStillStuck(signup, reason, now) {
     paragraph(
       `Retries go on every day. If it is still not set up by ${escapeHtml(dateLabel(new Date(startedAt.getTime() + GIVE_UP_AFTER_MS)))}, it is given up on: its Stripe subscription is cancelled, so nothing more is charged, and the buyer is told.`
     ),
-    paragraph(`<a href="${panelUrl()}">${panelUrl()}</a>`)
+    panelLink()
   ]);
   return true;
 }
@@ -582,7 +584,7 @@ async function giveUp(signup, reason, { stripe = null, subscriptionId = '', now 
       ['Refund', charged ? `${charged} was taken: refund it in Stripe` : 'nothing was charged'],
       ['Buyer told', buyer && buyer.success ? 'yes' : 'NO -- the email could not be sent']
     ]),
-    paragraph(`<a href="${panelUrl()}">${panelUrl()}</a>`)
+    panelLink()
   ]);
   return true;
 }

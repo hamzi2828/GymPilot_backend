@@ -313,7 +313,8 @@ test('a gym left half made by a delivery that died is cleared away and made afre
     const outcome = await handlePlatformStripeEvent(signupEvent(signup._id), stripeSaying('trialing'));
     assert.equal(outcome.result, 'signup: gym created (trialing)');
     assert.equal(deleted.length, 1);
-    assert.deepEqual(deleted[0].options, { confirmSlug: 'iron-works', dropDatabase: true });
+    // keepSubscription: the payment it is made again from must not be cancelled.
+    assert.deepEqual(deleted[0].options, { confirmSlug: 'iron-works', dropDatabase: true, keepSubscription: true });
     assert.equal(world.calls.provisioned.length, 1, 'then made again');
     assert.ok(world.calls.audits.some((a) => a.action === 'gym_deleted'));
   } finally {

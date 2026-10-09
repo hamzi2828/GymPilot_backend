@@ -93,13 +93,17 @@ function periodEndOfInvoice(invoice) {
   return ends.length ? new Date(Math.max(...ends.map((d) => d.getTime()))) : null;
 }
 
+/**
+ * The gym a subscription's metadata names -- by its id, and only its id. The
+ * slug is in the metadata too (for reading in the Stripe dashboard), but a
+ * slug is free again the day its gym is deleted: matched on, a late event
+ * about the deleted gym's subscription would land on whichever gym took the
+ * name next, hand it the old customer and subscription, and mark it paid on
+ * somebody else's card.
+ */
 async function gymByMetadata(metadata) {
   const m = metadata || {};
-  if (m.gymId && mongoose.Types.ObjectId.isValid(String(m.gymId))) {
-    const gym = await Gym.findById(m.gymId).lean();
-    if (gym) return gym;
-  }
-  if (m.gymSlug) return Gym.findOne({ slug: String(m.gymSlug).toLowerCase() }).lean();
+  if (m.gymId && mongoose.Types.ObjectId.isValid(String(m.gymId))) return Gym.findById(m.gymId).lean();
   return null;
 }
 

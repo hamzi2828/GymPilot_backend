@@ -83,9 +83,24 @@ async function dropTenantDatabase(gym) {
   await mongoose.connection.getClient().db(name).dropDatabase();
 }
 
+/**
+ * A gym's database through the driver itself. On the shared cluster no
+ * models are compiled on the way -- compiling them starts building their
+ * indexes in the background, and a database dropped a moment later would be
+ * brought back, empty, by whichever index build finished last. For reading
+ * one number from a gym that is about to be deleted.
+ */
+async function rawTenantDatabase(gym) {
+  const database = (gym && gym.database) || {};
+  if (database.uri) return (await getTenantConnection(gym)).getClient().db();
+  await mongoose.connection.asPromise();
+  return mongoose.connection.getClient().db(database.name || databaseNameFor(gym.slug));
+}
+
 module.exports = {
   getTenantConnection,
   dropTenantDatabase,
+  rawTenantDatabase,
   databaseNameFor,
   CONNECTION_OPTIONS
 };

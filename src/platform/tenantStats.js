@@ -5,6 +5,39 @@
 // gym's own database inside a tenant context, the way every request does.
 
 const { runWithTenant } = require('./tenantContext');
+const { rawTenantDatabase } = require('./connections');
+
+// Where a gym's membership orders are kept (gymfolio/models/packageOrderModel.js).
+const PACKAGE_ORDERS_COLLECTION = 'packageorders';
+
+// A member's card subscription in the gym's OWN Stripe account that will
+// charge again: live (frozen and past due included -- Stripe still holds
+// them) and not already set to end with the period paid for.
+const CARD_SUBSCRIPTION_FILTER = {
+  'payment.stripeSubscriptionId': { $nin: [null, ''] },
+  status: { $in: ['active', 'frozen', 'past_due'] },
+  'subscription.cancelAtPeriodEnd': { $ne: true }
+};
+
+/**
+ * How many members pay this gym by card on a subscription that is still
+ * running. The platform cannot see or stop those from outside the gym, so a
+ * gym deleted with any left keeps charging its members with nothing left to
+ * cancel them from. Null when the gym's database could not be read.
+ *
+ * Asked through the driver, not the model: this runs just before a gym is
+ * deleted, and nothing may be compiled on a database about to be dropped
+ * (see connections.rawTenantDatabase).
+ */
+async function countCardSubscriptions(gym) {
+  try {
+    const db = await rawTenantDatabase(gym);
+    return await db.collection(PACKAGE_ORDERS_COLLECTION).countDocuments(CARD_SUBSCRIPTION_FILTER);
+  } catch (error) {
+    console.error(`[platform] card subscriptions of ${gym && gym.slug} could not be counted:`, error.message);
+    return null;
+  }
+}
 
 async function collectGymStats(gym) {
   try {
@@ -21,7 +54,7 @@ async function collectGymStats(gym) {
       monthStart.setUTCDate(1);
       monthStart.setUTCHours(0, 0, 0, 0);
 
-      const [members, staff, trainers, classes, activeMemberships, pendingOrders, revenue, lastVisit, lastLogin] =
+      const [members, staff, trainers, classes, activeMemberships, cardSubscriptions, pendingOrders, revenue, lastVisit, lastLogin] =
         await Promise.all([
           User.countDocuments({ role: 'user' }),
           // Counted the way the plan's staff limit counts: not the owner.
@@ -29,6 +62,7 @@ async function collectGymStats(gym) {
           Trainer.countDocuments({}),
           GymClass.countDocuments({}),
           PackageOrder.countDocuments({ 'payment.status': 'paid', status: 'active' }),
+          PackageOrder.countDocuments(CARD_SUBSCRIPTION_FILTER),
           PackageOrder.countDocuments({ 'payment.status': 'pending' }),
           // Every payment received this month -- the first one and each
           // renewal -- the way the gym's own accounts count it. paidAt alone
@@ -48,6 +82,8 @@ async function collectGymStats(gym) {
         trainers,
         classes,
         active_memberships: activeMemberships,
+        // Shown in the panel's delete confirmation: these keep charging.
+        card_subscriptions: cardSubscriptions,
         pending_orders: pendingOrders,
         revenue_this_month: revenue.map((row) => ({
           currency: row._id || '',
@@ -64,4 +100,4 @@ async function collectGymStats(gym) {
   }
 }
 
-module.exports = { collectGymStats };
+module.exports = { collectGymStats, countCardSubscriptions, CARD_SUBSCRIPTION_FILTER, PACKAGE_ORDERS_COLLECTION };

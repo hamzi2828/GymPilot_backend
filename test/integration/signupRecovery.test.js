@@ -58,6 +58,8 @@ const test = h.suite(async () => {
   jobs = h.src('platform/jobs');
   signupProvisioning = h.src('platform/services/signupProvisioning');
   signupController = h.src('platform/controllers/signupController');
+  // The mail server selfServeAvailable asks for a login: there is none here.
+  h.src('platform/services/platformEmail').verifyPlatformEmail = async () => ({ ok: true, error: '' });
   platformSettings = h.src('platform/controllers/platformSettingsController');
   const { getPlatformStripe } = h.src('platform/services/platformStripe');
 
