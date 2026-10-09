@@ -8,7 +8,7 @@ require('mongoose').set('bufferCommands', false);
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { packageSnapshot, termEnd, periodLength, periodProblem, MembershipError } = require('../../src/gymfolio/services/membershipService');
+const { packageSnapshot, termEnd, periodLength, periodProblem, creditAgainst, MembershipError } = require('../../src/gymfolio/services/membershipService');
 
 const start = new Date('2026-01-31T10:00:00Z');
 
@@ -99,4 +99,17 @@ test('a package is only saved when something says how long it lasts', () => {
   assert.match(problem, /day, week, fortnight, month, quarter, half year or year/);
   assert.match(problem, /how many days it is valid for/);
   assert.match(periodProblem({ period: '10 sessions' }), /"10 sessions"/);
+});
+
+test('a package-change credit comes off the new price and no further; the rest is named, never dropped', () => {
+  // A year paid with six months left, moved to a monthly: 480 has nowhere to go.
+  assert.deepEqual(creditAgainst(600, 120), { applied: 120, unused: 480 });
+  // The usual way round: the new package takes all of it.
+  assert.deepEqual(creditAgainst(600, 2000), { applied: 600, unused: 0 });
+  assert.deepEqual(creditAgainst(39.99, 39.99), { applied: 39.99, unused: 0 });
+  assert.deepEqual(creditAgainst(0, 120), { applied: 0, unused: 0 });
+  // A free package takes none of it.
+  assert.deepEqual(creditAgainst(75.5, 0), { applied: 0, unused: 75.5 });
+  // A price that cannot be read is refused further on; nothing is called lost here.
+  assert.deepEqual(creditAgainst(75.5, null), { applied: 75.5, unused: 0 });
 });

@@ -1418,11 +1418,28 @@ async function renew(
 }
 
 /**
+ * How a credit for unused days meets the new package's price: `applied`
+ * comes off it, and `unused` is what the price was too small to take.
+ */
+function creditAgainst(credit, listPrice) {
+  const whole = round2(Math.max(0, credit));
+  const applied = listPrice === null ? whole : Math.min(whole, round2(Math.max(0, listPrice)));
+  return { applied, unused: round2(whole - applied) };
+}
+
+/**
  * Moves a member to a different package. The unused part of what they paid
  * comes off the new price (pro rata by days). On a Stripe subscription the
  * subscription itself is switched and Stripe prorates.
+ *
+ * A credit worth more than the new package (a year paid, six months left,
+ * moved to a monthly) cannot all come off its price. The rest is money the
+ * member paid and would get nothing for, so the change is refused (409
+ * CREDIT_EXCEEDS_PRICE, with the figures on `details`) unless the desk sends
+ * `forfeitCredit`: then it goes ahead, and the answer says what was credited
+ * (`credit`) and what was given up (`creditUnused`).
  */
-async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by } = {}) {
+async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by, forfeitCredit = false } = {}) {
   assertActive(order);
   // The credit is for days already paid for; with money still owed it
   // would be worked out on money that never came in.
@@ -1494,14 +1511,29 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     return { order, previous: null, credit: null };
   }
 
+  const { applied, unused } = creditAgainst(credit, parseAmount(pkg.price));
+  if (unused > 0 && !forfeitCredit) {
+    const currency = String(order.payment.currency || '').toUpperCase();
+    const sum = (n) => `${currency} ${n.toFixed(2)}`.trim();
+    const refusal = new MembershipError(
+      `This member has ${sum(credit)} of unused days already paid for, but ${pkg.name} costs only ${sum(applied)}: ${sum(unused)} would be lost. ` +
+        `To give the money back, refund ${sum(credit)} of this membership and then assign ${pkg.name}. To change anyway and give up the ${sum(unused)}, confirm the change.`,
+      409,
+      'CREDIT_EXCEEDS_PRICE'
+    );
+    refusal.details = { credit, price: applied, creditUnused: unused, currency };
+    throw refusal;
+  }
+  const givenUp = unused > 0 ? `${unused} of unused credit given up` : '';
+
   const replacement = await createManualOrder({
     user,
     pkg,
     paymentMethod,
     markPaid,
     startDate: now,
-    discountAmount: credit,
-    discountNote: `Credit for ${Math.floor(remainingDays)} unused day(s) of ${order.packageDetails && order.packageDetails.name}`,
+    discountAmount: applied,
+    discountNote: `Credit for ${Math.floor(remainingDays)} unused day(s) of ${order.packageDetails && order.packageDetails.name}${givenUp ? ` (${givenUp})` : ''}`,
     notes: notes || `Changed from ${order.orderNumber} (${order.packageDetails && order.packageDetails.name})`,
     renewedFrom: order._id,
     // Nor is moving to another package: the member joined long ago.
@@ -1512,10 +1544,16 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   order.status = 'cancelled';
   order.subscription.isActive = false;
   order.subscription.endDate = now;
-  order.cancellation = { cancelledAt: now, reason: `Changed to ${pkg.name} (${replacement.orderNumber})`, by, source: 'staff', immediate: true };
+  order.cancellation = {
+    cancelledAt: now,
+    reason: `Changed to ${pkg.name} (${replacement.orderNumber})${givenUp ? `; ${givenUp}` : ''}`,
+    by,
+    source: 'staff',
+    immediate: true
+  };
   await order.save();
 
-  return { order: replacement, previous: order, credit };
+  return { order: replacement, previous: order, credit: applied, creditUnused: unused };
 }
 
 /* ------------------------------- sessions ------------------------------ */
@@ -1874,6 +1912,7 @@ module.exports = {
   cancel,
   resume,
   renew,
+  creditAgainst,
   changePackage,
   consumeSession,
   refundSession,

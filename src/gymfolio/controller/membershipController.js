@@ -29,7 +29,11 @@ if (USE_BLOB_STORAGE) {
 
 function fail(res, error) {
   if (error instanceof service.MembershipError || (error && error.status && error.message)) {
-    return res.status(error.status || 400).json({ success: false, message: error.message, code: error.code || undefined });
+    // `details`: the figures behind a refusal, for a screen that asks the
+    // desk to confirm (CREDIT_EXCEEDS_PRICE).
+    return res
+      .status(error.status || 400)
+      .json({ success: false, message: error.message, code: error.code || undefined, details: error.details || undefined });
   }
   console.error('[membership]', error);
   return res.status(500).json({ success: false, message: error.message || 'Request failed' });
@@ -280,7 +284,14 @@ module.exports = {
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/change-package  (staff)  { packageId, paymentMethod, markPaid, notes }
+  // POST /api/gymfolio/package-orders/:id/change-package  (staff)
+  //   { packageId, paymentMethod, markPaid, notes, forfeitCredit }
+  //
+  // The unused days of the old package are credited against the new price.
+  // When they are worth more than the new package the change is refused
+  // (409 CREDIT_EXCEEDS_PRICE, `details: { credit, price, creditUnused,
+  // currency }`) until the desk sends `forfeitCredit: true`; the answer then
+  // says what was credited (`credit`) and what was given up (`creditUnused`).
   changePackage: async (req, res) => {
     try {
       const order = await PackageOrder.findById(req.params.id);
@@ -291,15 +302,25 @@ module.exports = {
         paymentMethod: body.paymentMethod,
         markPaid: body.markPaid !== false && body.markPaid !== 'false',
         notes: body.notes,
+        forfeitCredit: body.forfeitCredit === true || body.forfeitCredit === 'true',
         by: req.user && req.user.email
       });
       if (result.order.payment.status === 'paid' && result.previous) tell('membershipConfirmed', result.order);
+      const currency = String(result.order.payment.currency || '').toUpperCase();
+      const sum = (n) => `${currency} ${Number(n || 0).toFixed(2)}`;
       return res.status(201).json({
         success: true,
-        message: result.credit !== null ? `Package changed. ${result.credit} credited for unused days.` : 'Subscription switched; Stripe will prorate the difference.',
+        // Exactly what was done with the credit, and what the new order costs.
+        message:
+          result.credit !== null
+            ? `Package changed. ${sum(result.credit)} credited for unused days` +
+              `${result.creditUnused > 0 ? `; the other ${sum(result.creditUnused)} was given up, as confirmed` : ''}. ` +
+              `The new membership comes to ${sum(result.order.payment.amount)}.`
+            : 'Subscription switched; Stripe will prorate the difference.',
         data: result.order,
         previous: result.previous,
-        credit: result.credit
+        credit: result.credit,
+        creditUnused: result.credit !== null ? result.creditUnused : null
       });
     } catch (error) {
       return fail(res, error);
