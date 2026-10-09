@@ -238,3 +238,33 @@ test('typed codes are capped per desk token with a clear 429; QR codes and picks
     assert.equal(run(limitCodePunches, { desktopToken: other, body: { code: 'GP-0001' } }).passed, true);
   });
 });
+
+test("wrong unlock passwords count against the desk account they were typed for, not every kiosk in the gym", async () => {
+  const bcrypt = require('bcryptjs');
+  const controller = require('../../src/attendance/controller/desktopAppController');
+  const User = require('../../src/models/user');
+
+  const hash = await bcrypt.hash('the desk password', 4);
+  const frontDesk = { _id: '6a9e47dadf00918e9825b001', email: 'front@gym-a.test', firstName: 'Front', lastName: 'Desk' };
+  const backDesk = { _id: '6a9e47dadf00918e9825b002', email: 'back@gym-a.test', firstName: 'Back', lastName: 'Desk' };
+  const unlock = async (desktopUser, password) => {
+    const res = fakeRes();
+    await controller.unlock({ body: { password }, desktopUser, desktopToken: kioskToken, deviceContext: { ip: '203.0.113.9', deviceLabel: 'kiosk', osUser: '', clientApp: 'GymPilotKiosk/1.0' } }, res);
+    return res;
+  };
+
+  await runWithTenant(gymA, async () => {
+    User.findById = () => ({ select: async () => ({ password: hash }) });
+    AttendanceLog.record = async () => null;
+
+    // Eight wrong guesses at the front desk's password lock the front desk...
+    for (let i = 0; i < 8; i++) assert.equal((await unlock(frontDesk, 'a guess')).statusCode, 400, `guess ${i + 1}`);
+    assert.equal((await unlock(frontDesk, 'the desk password')).statusCode, 429);
+
+    // ...and only the front desk: the kiosk at the back still opens,
+    const back = await unlock(backDesk, 'the desk password');
+    assert.equal(back.statusCode, 200, JSON.stringify(back.body));
+    // and its success does not wipe the front desk's count.
+    assert.equal((await unlock(frontDesk, 'the desk password')).statusCode, 429);
+  });
+});

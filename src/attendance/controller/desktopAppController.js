@@ -258,7 +258,7 @@ module.exports = {
         return res.status(400).json({ success: false, message: 'Enter the password for this desk account.' });
       }
 
-      const key = attemptKey(req.desktopUser.email, req.deviceContext.ip);
+      const key = attemptKey(req.desktopUser, null, req.deviceContext.ip);
       if (isThrottled(key)) {
         audit(false, 'Throttled after too many wrong passwords');
         return res.status(429).json({
