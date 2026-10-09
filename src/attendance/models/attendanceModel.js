@@ -31,7 +31,11 @@ const punchContextSchema = new mongoose.Schema(
       // number typed at a kiosk or desk.
       enum: ['fingerprint', 'manual', 'qr', 'code'],
       default: 'fingerprint'
-    }
+    },
+    // The desk's own id for the punch that recorded this half of the visit,
+    // when it sent one: the same id arriving again is that punch being sent
+    // again, not a new one (punchService.repeatedPunch).
+    requestId: { type: String }
   },
   { _id: false }
 );

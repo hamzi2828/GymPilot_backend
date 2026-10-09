@@ -20,7 +20,7 @@ const AttendanceLog = require('../models/attendanceLogModel');
 const { deviceContext, issueStaffUnlock } = require('../middleware/desktopAuth');
 const { listPeople, resolvePerson, activePersonKeys, trainerProfilesOf } = require('../services/peopleDirectory');
 const { currentPalette } = require('../services/deskTheme');
-const { recordPunch, currentVerdict } = require('../services/punchService');
+const { recordPunch, readRequestId, currentVerdict } = require('../services/punchService');
 const { openVisitExpr, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 const T = require('../services/timeUtils');
 const { verifyQrToken } = require('../services/qrToken');
@@ -500,13 +500,23 @@ module.exports = {
       if (!personId.match(/^[0-9a-fA-F]{24}$/)) {
         return res.status(400).json({ success: false, message: 'Unknown person.' });
       }
+      // Optional: the desk's id for this attempt, sent again unchanged when
+      // the answer to it was lost (punchService.repeatedPunch).
+      const requestId = readRequestId(body.request_id);
+      if (requestId === null) {
+        return res.status(400).json({
+          success: false,
+          message: 'request_id must be 8 to 100 letters, digits, hyphens or underscores (a UUID will do).'
+        });
+      }
 
       const result = await recordPunch({
         personType,
         personId,
         operator: req.desktopUser,
         device: req.deviceContext,
-        method
+        method,
+        requestId
       });
 
       AttendanceLog.record({
@@ -525,15 +535,20 @@ module.exports = {
         osUser: req.deviceContext.osUser,
         clientApp: req.deviceContext.clientApp,
         ip: req.deviceContext.ip,
-        meta: result.detail ? { status: result.detail.status } : null
+        meta: result.detail
+          ? { status: result.detail.status, ...(requestId ? { requestId } : {}), ...(result.repeated ? { repeated: true } : {}) }
+          : null
       });
 
       // A repeat scan and a real punch both carry a receipt, so the desk sees
-      // the person either way; only `success` differs.
+      // the person either way; only `success` differs. `repeated` marks the
+      // answer to a punch sent again with its request_id: the first answer,
+      // with nothing recorded this time.
       return res.json({
         success: result.success,
         message: result.message,
-        detail: result.detail || null
+        detail: result.detail || null,
+        ...(result.repeated ? { repeated: true } : {})
       });
     } catch (err) {
       console.error('[attendance] punch failed:', err);

@@ -998,3 +998,89 @@ test('a membership sold to start later: checked in and told when it starts, a wa
     assert.equal(row(renewed).paid, true);
   });
 });
+
+test('a punch sent again with its request_id gets the first answer, and nothing is recorded twice', async () => {
+  await h.inGym(gym, async () => {
+    const AttendanceLog = h.src('attendance/models/attendanceLogModel');
+    const lost = await User.create({ firstName: 'Lola', lastName: 'Lostreply', email: 'lola@attendance.test' });
+    const deskPunch = (body) => h.call(desktop.punch, { desktopUser: operator, deviceContext: device, body: { person_type: 'member', person_id: String(lost._id), method: 'fingerprint', ...body } });
+    const visits = () => Attendance.find({ personId: lost._id }).sort({ checkInAt: 1 }).lean();
+
+    // The punch is recorded; say its answer never reached the desk.
+    const first = await deskPunch({ request_id: 'punch-attempt-0001' });
+    assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+    assert.equal(first.body.success, true);
+    assert.equal(first.body.detail.action, 'check_in');
+    assert.equal(first.body.repeated, undefined);
+    assert.equal((await visits())[0].checkIn.requestId, 'punch-attempt-0001');
+
+    // The rescan comes more than a minute later -- what used to be taken for
+    // the way out. With the same id it is the same check-in.
+    await backdate(lost._id, 5);
+    const again = await deskPunch({ request_id: 'punch-attempt-0001' });
+    assert.equal(again.statusCode, 200, JSON.stringify(again.body));
+    assert.equal(again.body.repeated, true);
+    assert.deepEqual(Object.keys(again.body).sort(), ['detail', 'message', 'repeated', 'success']);
+    assert.equal(again.body.success, true);
+    assert.equal(again.body.message, first.body.message);
+    assert.equal(again.body.detail.action, 'check_in');
+    assert.deepEqual(Object.keys(again.body.detail).sort(), Object.keys(first.body.detail).sort());
+    assert.equal(again.body.detail.status, first.body.detail.status);
+    assert.equal(again.body.detail.warning, first.body.detail.warning);
+    assert.deepEqual(again.body.detail.alert, first.body.detail.alert);
+    let rows = await visits();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].checkOutAt, null, 'still inside');
+
+    // A new attempt has a new id: that one is the way out.
+    const out = await deskPunch({ request_id: 'punch-attempt-0002' });
+    assert.equal(out.body.detail.action, 'check_out', JSON.stringify(out.body));
+    assert.equal(out.body.repeated, undefined);
+    rows = await visits();
+    assert.equal(rows[0].checkOut.requestId, 'punch-attempt-0002');
+
+    // Each id still answers for its own half, however late it arrives: the
+    // check-in as it was, the check-out as it is. Neither opens a new visit.
+    await Attendance.collection.updateOne({ _id: rows[0]._id }, { $set: { checkOutAt: h.minutesAgo(3) } });
+    const inAgain = await deskPunch({ request_id: 'punch-attempt-0001' });
+    assert.equal(inAgain.body.repeated, true);
+    assert.equal(inAgain.body.detail.action, 'check_in');
+    assert.equal(inAgain.body.detail.check_out_time, first.body.detail.check_out_time);
+    const outAgain = await deskPunch({ request_id: 'punch-attempt-0002' });
+    assert.equal(outAgain.body.repeated, true);
+    assert.equal(outAgain.body.detail.action, 'check_out');
+    assert.equal(outAgain.body.message, out.body.message);
+    assert.equal((await visits()).length, 1);
+
+    // The id belongs to the person it was sent for: for somebody else it is
+    // a punch like any other.
+    const other = await User.create({ firstName: 'Otto', lastName: 'Other', email: 'otto@attendance.test' });
+    const theirs = await deskPunch({ person_id: String(other._id), request_id: 'punch-attempt-0001' });
+    assert.equal(theirs.body.detail.action, 'check_in');
+    assert.equal(theirs.body.repeated, undefined);
+
+    // Without an id nothing changes: the next scan opens the next visit.
+    const plain = await deskPunch({});
+    assert.equal(plain.body.detail.action, 'check_in', JSON.stringify(plain.body));
+    assert.equal(plain.body.repeated, undefined);
+    rows = await visits();
+    assert.equal(rows.length, 2);
+    assert.equal('requestId' in rows[1].checkIn, false);
+
+    // Something that is not an id is refused before anything is recorded.
+    for (const bad of ['short', 'has spaces in it', 'x'.repeat(101), 'semi;colon-12345']) {
+      const res = await deskPunch({ person_id: String(other._id), request_id: bad });
+      assert.equal(res.statusCode, 400, `${bad}: ${JSON.stringify(res.body)}`);
+      assert.match(res.body.message, /request_id must be 8 to 100/);
+    }
+    assert.equal(await Attendance.countDocuments({ personId: other._id }), 1);
+
+    // The audit trail says which answers were repeats.
+    let repeats = 0;
+    for (let i = 0; i < 40 && repeats < 3; i++) {
+      repeats = await AttendanceLog.countDocuments({ personId: lost._id, 'meta.repeated': true });
+      if (repeats < 3) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(repeats, 3);
+  });
+});

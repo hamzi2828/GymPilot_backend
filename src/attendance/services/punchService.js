@@ -45,8 +45,10 @@ function operatorLabel(user) {
   return [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.email;
 }
 
-function punchContext(operator, device, method) {
+function punchContext(operator, device, method, requestId) {
   return {
+    // Only when the desk sent one (see repeatedPunch).
+    ...(requestId ? { requestId } : {}),
     by: operator._id,
     byName: operatorLabel(operator),
     device: device.deviceLabel || '',
@@ -520,7 +522,81 @@ async function autoRenews(membership) {
   return willAutoRenew(order);
 }
 
-async function recordPunch({ personType, personId, operator, device, method = 'fingerprint' }) {
+// ---------------------------------------------------------------------------
+// A punch sent again
+//
+// The desk records a punch and the answer never arrives -- a timeout, a
+// dropped connection. It shows "Not recorded", the person scans again, and
+// more than a minute later that second scan would be taken for the way out.
+// So the desk may send `request_id` with a punch: any id it makes up for that
+// one attempt, sent again unchanged when it tries the same person again. The
+// id is kept on the half of the visit the punch recorded (checkIn.requestId
+// or checkOut.requestId); when it arrives again the first answer is given
+// back with `repeated: true` and nothing is recorded. Left out, every punch
+// is new, as before.
+//
+// Only a punch that recorded something is remembered: one that was answered
+// "already checked in a moment ago" changed nothing, and is judged afresh.
+// ---------------------------------------------------------------------------
+
+const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
+
+// How far back an id is looked for, in gym days. A retry comes minutes after
+// the punch it repeats; this only keeps the lookup to the person's last few
+// visits.
+const REPEAT_LOOKBACK_DAYS = 2;
+
+/**
+ * The `request_id` a punch carries: undefined when it has none, null when it
+ * is not one (the caller refuses the punch).
+ */
+function readRequestId(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const id = String(value).trim();
+  return REQUEST_ID.test(id) ? id : null;
+}
+
+// The visit as it stood when it was opened, for answering a repeated
+// check-in after the person has since checked out.
+function asCheckedIn(record) {
+  if (!record.checkOutAt) return record;
+  const visit = record.toObject();
+  visit.checkOutAt = null;
+  visit.checkOut = {};
+  visit.workedMinutes = null;
+  return visit;
+}
+
+// The answer the punch with this id was given, or null when no punch of this
+// person's recorded anything under it.
+async function repeatedPunch(requestId, { personType, personIds, person, now, settings }) {
+  if (!requestId) return null;
+  const visit = await Attendance.findOne({
+    personType,
+    personId: { $in: personIds },
+    shiftDate: { $gte: T.dateKey(new Date(now.getTime() - REPEAT_LOOKBACK_DAYS * 86400000)) },
+    $or: [{ 'checkIn.requestId': requestId }, { 'checkOut.requestId': requestId }]
+  }).sort({ checkInAt: -1 });
+  if (!visit) return null;
+
+  const action = visit.checkIn && visit.checkIn.requestId === requestId ? 'check_in' : 'check_out';
+  const record = action === 'check_in' ? asCheckedIn(visit) : visit;
+  const detail = await buildReceipt(record, action, person);
+  detail.warning = personType === 'member' ? memberWarning(record) : null;
+  detail.alert = personType === 'member' ? memberAlert(record, (await settings()).voice) : null;
+
+  return {
+    success: true,
+    repeated: true,
+    action,
+    message: action === 'check_in' ? 'Check-in recorded.' : 'Check-out recorded.',
+    detail,
+    person,
+    record: visit
+  };
+}
+
+async function recordPunch({ personType, personId, operator, device, method = 'fingerprint', requestId }) {
   const person = await resolvePerson(personType, personId);
   if (!person) {
     return {
@@ -530,7 +606,7 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   }
 
   const now = new Date();
-  const context = punchContext(operator, device, method);
+  const context = punchContext(operator, device, method, requestId);
   // The gym's attendance settings, read at most once per scan and only by a
   // scan that needs them (see attendanceSettings).
   let settingsRead = null;
@@ -544,6 +620,12 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   // peopleDirectory) from before the two were treated as one person; this
   // scan closes that visit rather than opening a second one.
   const personIds = [person.id, ...(person.aliasIds || [])];
+
+  // This very punch, sent again because its answer was lost: the same answer,
+  // and nothing recorded (see repeatedPunch).
+  const repeat = await repeatedPunch(requestId, { personType, personIds, person, now, settings: gymSettings });
+  if (repeat) return repeat;
+
   let openRecord = await Attendance.findOne({
     personType,
     personId: { $in: personIds },
@@ -892,6 +974,7 @@ function memberWarning(record) {
 // late/expired rules elsewhere is how the desk and the office start disagreeing.
 module.exports = {
   recordPunch,
+  readRequestId,
   MIN_PUNCH_GAP_SECONDS,
   OPEN_VISIT_HOURS,
   memberScanOut,
