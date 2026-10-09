@@ -81,3 +81,33 @@ test('the admin list still has them', async () => {
   assert.equal(row.commissionValue, 40);
   assert.equal(row.salary, 50000);
 });
+
+test('a public class read names its instructor without their email or phone', async () => {
+  const GymClass = h.src('gymfolio/models/gymClassModel');
+  const classes = h.src('gymfolio/controller/gymClassController');
+  const gymClass = await h.inGym(gym, () =>
+    GymClass.create({
+      name: 'Strength basics',
+      slug: 'strength-basics',
+      description: 'Barbell basics.',
+      category: 'Strength',
+      isActive: true,
+      isFeatured: true,
+      schedule: [{ day: 'Monday', startTime: '18:00', endTime: '19:00', instructor: trainer._id }]
+    })
+  );
+
+  const reads = [
+    ['active', await call(classes.getActiveClasses, { query: {} }), (body) => body.data.find((c) => c.slug === 'strength-basics')],
+    ['by id', await call(classes.getClassById, { params: { id: String(gymClass._id) } }), (body) => body.data],
+    ['by slug', await call(classes.getClassBySlug, { params: { slug: 'strength-basics' } }), (body) => body.data]
+  ];
+  for (const [name, res, pick] of reads) {
+    assert.equal(res.statusCode, 200, `${name}: ${JSON.stringify(res.body)}`);
+    const instructor = plain(pick(res.body)).schedule[0].instructor;
+    assert.equal(instructor.name, 'Tariq Trainer', name);
+    assert.equal(instructor.role, 'Strength coach', name);
+    for (const field of PRIVATE) assert.equal(field in instructor, false, `${name} leaves out ${field}`);
+    assert.doesNotMatch(JSON.stringify(res.body), /trainer-private|0300 1234567|TR-0007/, name);
+  }
+});

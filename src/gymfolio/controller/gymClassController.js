@@ -189,12 +189,14 @@ const getAllClasses = async (req, res) => {
   }
 };
 
-// Get single class by ID
+// Get single class by ID. Public, like the two reads around it: the
+// instructor is who the class page names -- never their own email or phone,
+// which the public trainer endpoints leave out too (trainerController).
 const getClassById = async (req, res) => {
   try {
     const { id } = req.params;
     const gymClass = await GymClass.findById(id)
-      .populate('schedule.instructor', 'name role image email phone');
+      .populate('schedule.instructor', 'name role image');
 
     if (!gymClass) {
       return res.status(404).json({
@@ -223,7 +225,7 @@ const getClassBySlug = async (req, res) => {
   try {
     const { slug } = req.params;
     const gymClass = await GymClass.findOne({ slug, isActive: true })
-      .populate('schedule.instructor', 'name role image email phone social');
+      .populate('schedule.instructor', 'name role image social');
 
     if (!gymClass) {
       return res.status(404).json({
