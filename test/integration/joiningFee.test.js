@@ -178,15 +178,77 @@ test('card checkout: a returning member is not sent a joining-fee line; a new on
       assert.equal(asked[0].line_items.length, 1);
       assert.equal(back.payment.amount, 40);
 
-      // A guest checking out with an email that has joined is known by it.
+      // A guest is nobody the gym knows yet, whatever address they type:
+      // typing a member's email does not take the fee off.
       await payments.createPackageCheckoutSession(null, monthly._id, { email: member.email, fullName: 'Card Fee' });
-      assert.equal(asked[1].line_items.length, 1);
+      assert.equal(asked[1].line_items.length, 2);
+      assert.equal(asked[1].line_items[1].price_data.product_data.name, 'Joining fee');
+      assert.equal((await PackageOrder.findOne({ 'payment.stripeSessionId': 'cs_fee_2' }).lean()).payment.amount, 65);
 
       await payments.createPackageCheckoutSession(null, monthly._id, { email: 'someone-new@fee.test', fullName: 'New' });
       assert.equal(asked[2].line_items.length, 2);
       assert.equal(asked[2].line_items[1].price_data.product_data.name, 'Joining fee');
       const fresh = await PackageOrder.findOne({ 'payment.stripeSessionId': 'cs_fee_3' }).lean();
       assert.equal(fresh.payment.amount, 65);
+    });
+  } finally {
+    h.setStripe(null);
+  }
+});
+
+test('card checkout: the fee and the one-subscription rule follow the signed-in account, never an email typed into the form', async () => {
+  const asked = [];
+  h.setStripe({
+    checkout: {
+      sessions: {
+        create: async (params) => {
+          asked.push(params);
+          return { id: `cs_who_${asked.length}`, url: 'https://stripe.test/pay' };
+        }
+      }
+    }
+  });
+  try {
+    await h.inGym(gym, async () => {
+      const rolling = await Package.create({
+        name: 'Rolling',
+        price: '45',
+        currency: 'GBP',
+        period: 'month',
+        features: ['Gym floor'],
+        joiningFee: 25,
+        billing: { mode: 'recurring', interval: 'month', intervalCount: 1 }
+      });
+      // A paying member, on a card subscription.
+      const payingMember = await newMember('Paying');
+      const theirs = await service.createManualOrder({ user: payingMember, pkg: rolling });
+      await PackageOrder.updateOne({ _id: theirs._id }, { $set: { 'payment.method': 'stripe', 'payment.stripeSubscriptionId': 'sub_paying', 'subscription.autoRenew': true } });
+
+      // Somebody new signs in and types that member's address: still new,
+      // so still charged the fee -- and not told the address has a subscription.
+      const newcomer = await newMember('Newcomer');
+      await payments.createPackageCheckoutSession(newcomer._id, rolling._id, { email: payingMember.email, fullName: 'New Comer' });
+      assert.equal(asked.length, 1);
+      assert.equal(asked[0].line_items.length, 2);
+      assert.equal(asked[0].line_items[1].price_data.product_data.name, 'Joining fee');
+      assert.equal((await PackageOrder.findOne({ 'payment.stripeSessionId': 'cs_who_1' }).lean()).payment.amount, 70);
+
+      // The member themselves is known by their account whatever they type:
+      // no second subscription, and nothing asked of Stripe.
+      await assert.rejects(
+        payments.createPackageCheckoutSession(payingMember._id, rolling._id, { email: 'typed-something-else@fee.test', fullName: 'Paying Fee' }),
+        (error) => error.code === 'SUBSCRIPTION_EXISTS' && error.status === 409
+      );
+      assert.equal(asked.length, 1);
+
+      // And for a one-off package their fee stays off, by the account alone.
+      await payments.createPackageCheckoutSession(payingMember._id, monthly._id, { email: 'typed-something-else@fee.test', fullName: 'Paying Fee' });
+      assert.equal(asked[1].line_items.length, 1);
+
+      // A token for an account that is gone is a guest: charged the fee.
+      const gone = new h.state.mongoose.Types.ObjectId();
+      await payments.createPackageCheckoutSession(gone, monthly._id, { email: payingMember.email, fullName: 'Gone' });
+      assert.equal(asked[2].line_items.length, 2);
     });
   } finally {
     h.setStripe(null);
@@ -222,13 +284,14 @@ test('the checkout summary asks whether the fee is due -- for the signed-in acco
     });
     assert.equal((await ask({ user: { id: String(guest._id), role: 'user' } })).body.data.due, false);
 
-    // Signed out: not known, and no email in the request is ever looked up --
-    // otherwise anyone could ask whether an address has been a member here.
+    // Signed out: due, as checkout charges a guest -- and no email in the
+    // request is ever looked up, otherwise anyone could ask whether an
+    // address has been a member here. `fresh` has joined, and it shows nothing.
     const signedOut = await ask({ user: null, query: { email: fresh.email }, body: { email: fresh.email } });
-    assert.deepEqual(signedOut.body, { success: true, data: { due: null } });
-    // Nor does a token for an account that is gone, or a malformed id.
-    assert.equal((await ask({ user: { id: String(new h.state.mongoose.Types.ObjectId()) } })).body.data.due, null);
-    assert.equal((await ask({ user: { id: 'not-an-id' } })).body.data.due, null);
+    assert.deepEqual(signedOut.body, { success: true, data: { due: true } });
+    // The same for a token whose account is gone, or a malformed id.
+    assert.equal((await ask({ user: { id: String(new h.state.mongoose.Types.ObjectId()) } })).body.data.due, true);
+    assert.equal((await ask({ user: { id: 'not-an-id' } })).body.data.due, true);
   });
 
   // Public, but reads the session when there is one.

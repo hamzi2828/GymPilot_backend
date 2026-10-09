@@ -29,7 +29,11 @@ if (USE_BLOB_STORAGE) {
 
 function fail(res, error) {
   if (error instanceof service.MembershipError || (error && error.status && error.message)) {
-    return res.status(error.status || 400).json({ success: false, message: error.message, code: error.code || undefined });
+    // `details`: the figures behind a refusal, for a screen that asks the
+    // desk to confirm (CREDIT_EXCEEDS_PRICE).
+    return res
+      .status(error.status || 400)
+      .json({ success: false, message: error.message, code: error.code || undefined, details: error.details || undefined });
   }
   console.error('[membership]', error);
   return res.status(500).json({ success: false, message: error.message || 'Request failed' });
@@ -133,9 +137,9 @@ module.exports = {
       if (!url && !(req.body && (req.body.reference || req.body.note))) {
         return res.status(400).json({ success: false, message: 'Attach the transfer receipt or enter the transfer reference' });
       }
-      await service.submitTransferProof(order, { url, note: req.body && req.body.note, reference: req.body && req.body.reference });
-      tell('transferReceived', order);
-      return res.json({ success: true, message: 'Thanks — we will confirm your membership once the transfer is checked.', data: order });
+      const updated = await service.submitTransferProof(order, { url, note: req.body && req.body.note, reference: req.body && req.body.reference });
+      tell('transferReceived', updated);
+      return res.json({ success: true, message: 'Thanks — we will confirm your membership once the transfer is checked.', data: updated });
     } catch (error) {
       return fail(res, error);
     }
@@ -146,9 +150,11 @@ module.exports = {
     try {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-      await service.approveTransfer(order, { by: userId(req) });
-      tell('membershipConfirmed', order);
-      return res.json({ success: true, message: `Payment confirmed. ${order.packageDetails.name} is now active.`, data: order });
+      // The order as it was activated: of two approvals sent together only
+      // one gets this far; the other is told it is being confirmed, or paid.
+      const approved = await service.approveTransfer(order, { by: userId(req) });
+      tell('membershipConfirmed', approved);
+      return res.json({ success: true, message: `Payment confirmed. ${approved.packageDetails.name} is now active.`, data: approved });
     } catch (error) {
       return fail(res, error);
     }
@@ -159,9 +165,9 @@ module.exports = {
     try {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-      await service.rejectTransfer(order, { by: userId(req), reason: req.body && req.body.reason });
-      tell('transferRejected', order);
-      return res.json({ success: true, message: 'Payment rejected and the member has been told.', data: order });
+      const rejected = await service.rejectTransfer(order, { by: userId(req), reason: req.body && req.body.reason });
+      tell('transferRejected', rejected);
+      return res.json({ success: true, message: 'Payment rejected and the member has been told.', data: rejected });
     } catch (error) {
       return fail(res, error);
     }
@@ -233,7 +239,11 @@ module.exports = {
 
   // POST /api/gymfolio/package-orders/:id/renew  (staff)
   //   { paymentMethod, markPaid, months, notes, force,
-  //     startDate, discountAmount, discountNote, amountOverride, amountPaid }
+  //     startDate, discountAmount, discountNote, amountOverride, amountPaid, requestId }
+  //
+  // `requestId` (optional): the desk's own id for this renewal. Sent again
+  // after a lost reply, the answer is the renewal already made (`repeated:
+  // true`), not a second term over it.
   //
   // The pricing and start fields are read as on a sale (readDeskTerms; no
   // trainer on a renewal). Left out, the term starts when the current one
@@ -271,16 +281,30 @@ module.exports = {
         amountOverride: terms.amountOverride,
         amountPaid: terms.amountPaid,
         paidBy: userId(req),
-        by: req.user && req.user.email
+        by: req.user && req.user.email,
+        requestId: terms.requestId
       });
-      if (renewal.payment.status === 'paid') tell('membershipConfirmed', renewal);
-      return res.status(201).json({ success: true, message: `Renewed: ${renewal.orderNumber} runs until ${new Date(renewal.subscription.endDate).toDateString()}.`, data: renewal });
+      const repeated = service.isRepeat(renewal);
+      if (renewal.payment.status === 'paid' && !repeated) tell('membershipConfirmed', renewal);
+      return res.status(201).json({
+        success: true,
+        message: `Renewed: ${renewal.orderNumber} runs until ${new Date(renewal.subscription.endDate).toDateString()}.`,
+        data: renewal,
+        repeated: repeated || undefined
+      });
     } catch (error) {
       return fail(res, error);
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/change-package  (staff)  { packageId, paymentMethod, markPaid, notes }
+  // POST /api/gymfolio/package-orders/:id/change-package  (staff)
+  //   { packageId, paymentMethod, markPaid, notes, forfeitCredit }
+  //
+  // The unused days of the old package are credited against the new price.
+  // When they are worth more than the new package the change is refused
+  // (409 CREDIT_EXCEEDS_PRICE, `details: { credit, price, creditUnused,
+  // currency }`) until the desk sends `forfeitCredit: true`; the answer then
+  // says what was credited (`credit`) and what was given up (`creditUnused`).
   changePackage: async (req, res) => {
     try {
       const order = await PackageOrder.findById(req.params.id);
@@ -291,38 +315,58 @@ module.exports = {
         paymentMethod: body.paymentMethod,
         markPaid: body.markPaid !== false && body.markPaid !== 'false',
         notes: body.notes,
-        by: req.user && req.user.email
+        forfeitCredit: body.forfeitCredit === true || body.forfeitCredit === 'true',
+        by: req.user && req.user.email,
+        changedBy: userId(req)
       });
       if (result.order.payment.status === 'paid' && result.previous) tell('membershipConfirmed', result.order);
+      const currency = String(result.order.payment.currency || '').toUpperCase();
+      const sum = (n) => `${currency} ${Number(n || 0).toFixed(2)}`;
       return res.status(201).json({
         success: true,
-        message: result.credit !== null ? `Package changed. ${result.credit} credited for unused days.` : 'Subscription switched; Stripe will prorate the difference.',
+        // Exactly what was done with the credit, and what the new order costs.
+        message:
+          result.credit !== null
+            ? `Package changed. ${sum(result.credit)} credited for unused days` +
+              `${result.creditUnused > 0 ? `; the other ${sum(result.creditUnused)} was given up, as confirmed` : ''}. ` +
+              `The new membership comes to ${sum(result.order.payment.amount)}.`
+            : 'Subscription switched; Stripe will prorate the difference.',
         data: result.order,
         previous: result.previous,
-        credit: result.credit
+        credit: result.credit,
+        creditUnused: result.credit !== null ? result.creditUnused : null
       });
     } catch (error) {
       return fail(res, error);
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/payments  (staff)  { amount, method?, note? }
+  // POST /api/gymfolio/package-orders/:id/payments  (staff)  { amount, method?, note?, requestId? }
   //
   // Money received at the desk against an order's balance due; see
-  // membershipService.recordPayment for what is refused and why.
+  // membershipService.recordPayment for what is refused and why. `requestId`
+  // (optional) is the desk's own id for this payment: sent again after a
+  // lost reply, the answer is the same and no second payment is recorded.
   recordPayment: async (req, res) => {
     try {
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       const body = req.body || {};
-      const updated = await service.recordPayment(order, { amount: body.amount, method: body.method, note: body.note, by: userId(req) });
+      const updated = await service.recordPayment(order, {
+        amount: body.amount,
+        method: body.method,
+        note: body.note,
+        by: userId(req),
+        requestId: service.readRequestId(body.requestId)
+      });
       const currency = String(updated.payment.currency || '').toUpperCase();
       const due = Number(updated.payment.balanceDue || 0);
       return res.json({
         success: true,
         message: due > 0 ? `Payment recorded. ${currency} ${due.toFixed(2)} still due.` : 'Payment recorded. Paid in full.',
-        data: updated
+        data: updated,
+        repeated: service.isRepeat(updated) || undefined
       });
     } catch (error) {
       return fail(res, error);
@@ -427,16 +471,15 @@ module.exports = {
   },
 
   // GET /api/gymfolio/membership/joining-fee-due -- whether checkout will add
-  // the joining fee for the signed-in account (service.joiningFeeDue, the rule
-  // checkout charges by), so the order summary shows the total actually paid.
-  // Asked only about the caller's own account, never about an email the
-  // request names: that would tell anyone who has been a member here. Signed
-  // out, `due` is null -- not known until checkout sees who is paying.
+  // the joining fee for the caller (service.joiningFeeDue for
+  // service.checkoutIdentity, exactly as checkout charges it), so the order
+  // summary shows the total actually paid. Asked only about the caller's own
+  // account, never about an email the request names: that would tell anyone
+  // who has been a member here. Signed out, `due` is true: a guest is
+  // charged it, and signing in is how a returning member has it taken off.
   joiningFeeDue: async (req, res) => {
     try {
-      const me = userId(req);
-      const user = me && mongoose.Types.ObjectId.isValid(String(me)) ? await User.findById(me).select('email').lean() : null;
-      const due = user ? await service.joiningFeeDue({ userId: user._id, email: user.email }) : null;
+      const due = await service.joiningFeeDue((await service.checkoutIdentity(userId(req))) || {});
       return res.json({ success: true, data: { due } });
     } catch (error) {
       return fail(res, error);

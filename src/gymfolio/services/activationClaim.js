@@ -14,6 +14,13 @@
 // fails is released back to the status it had, so a retry can win it again
 // instead of finding the order stuck.
 //
+// A claim that is never released -- the function was killed between taking
+// it and activating -- used to hold the order at 'processing' for good: paid
+// for, never activated, every later event turned away as "somebody else has
+// it". So a claim nothing has touched for STALE_CLAIM_MS belongs to a
+// request that is gone, and the next caller takes it over (the platform
+// webhook does the same with its event claims).
+//
 // Pure decisions live here so they can be unit-tested; the database calls
 // that apply them are in gymfolioPaymentService.
 
@@ -46,6 +53,22 @@ const REFUSED = [...BLOCKING, ...UNDONE];
 
 const CLAIMED_STATUS = 'processing';
 
+// How long a claim may sit unfinished before another caller may take it
+// over. Far longer than an activation takes. The claim's age is the order's
+// `updatedAt`: taking the claim is a write, and an order held by a dead
+// request is written by nobody else -- anything that does write it only
+// makes the takeover wait a little longer.
+const STALE_CLAIM_MS = 10 * 60 * 1000;
+
+// Only a card order's 'processing' is a claim. A bank transfer sits at
+// 'processing' while its receipt waits to be checked, however long that
+// takes, and is never a claim gone stale.
+const CLAIMED_METHOD = 'stripe';
+
+function staleBefore(now = new Date()) {
+  return new Date(new Date(now).getTime() - STALE_CLAIM_MS);
+}
+
 /** Whether an order whose payment is in `paymentStatus` may be claimed. */
 function canClaimActivation(paymentStatus) {
   const status = String(paymentStatus || '');
@@ -53,12 +76,42 @@ function canClaimActivation(paymentStatus) {
 }
 
 /**
+ * Whether an order, as it was read, is worth trying to claim: its status
+ * allows it, or the claim on it has gone stale. The claim itself is still
+ * decided by claimFilter, in the write.
+ */
+function claimable(order, now = new Date()) {
+  const payment = (order && order.payment) || {};
+  if (canClaimActivation(payment.status)) return true;
+  return (
+    payment.status === CLAIMED_STATUS &&
+    payment.method === CLAIMED_METHOD &&
+    !!order.updatedAt &&
+    new Date(order.updatedAt).getTime() < staleBefore(now).getTime()
+  );
+}
+
+/** Whether an order, as it was read, is held by a claim (live or stale). */
+function held(order) {
+  const payment = (order && order.payment) || {};
+  return payment.status === CLAIMED_STATUS && payment.method === CLAIMED_METHOD;
+}
+
+/**
  * The filter that wins the claim only when nobody else has -- and never on
  * an order whose sale was undone, even if it was undone after the caller
- * read it (a refund landing between the read and the claim).
+ * read it (a refund landing between the read and the claim). A claim gone
+ * stale is won too, and by one caller only: winning it is a write, so the
+ * order is no longer stale for the next.
  */
-function claimFilter(orderId) {
-  return { _id: orderId, 'payment.status': { $nin: [...REFUSED] } };
+function claimFilter(orderId, now = new Date()) {
+  return {
+    _id: orderId,
+    $or: [
+      { 'payment.status': { $nin: [...REFUSED] } },
+      { 'payment.status': CLAIMED_STATUS, 'payment.method': CLAIMED_METHOD, updatedAt: { $lt: staleBefore(now) } }
+    ]
+  };
 }
 
 /** The update that takes the claim. */
@@ -84,7 +137,10 @@ module.exports = {
   BLOCKING_STATUSES: [...BLOCKING],
   UNDONE_STATUSES: [...UNDONE],
   CLAIMED_STATUS,
+  STALE_CLAIM_MS,
   canClaimActivation,
+  claimable,
+  held,
   claimFilter,
   claimUpdate,
   releaseFilter,

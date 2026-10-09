@@ -117,8 +117,12 @@ function parseAmount(value) {
 
   // Money is two decimal places. Rounding here keeps a stray third digit out
   // of the stored amount, where it would later disagree with what Stripe
-  // charged in minor units.
-  return Math.round(amount * 100) / 100;
+  // charged in minor units. That holds for the three-decimal currencies too
+  // (dinars and the Omani rial): a card can only be charged to the nearest
+  // ten of their smallest unit (see toMinorUnits), which is two decimals.
+  // The epsilon makes a typed half round up every time -- 12.345 is 1234.4999...
+  // once multiplied, and came out as 12.34.
+  return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
 /**
@@ -188,6 +192,12 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
 ]);
 
 /**
+ * And these have a thousand minor units, not a hundred: a dinar is 1000
+ * fils. Multiplying by 100 charged a tenth of the price.
+ */
+const THREE_DECIMAL_CURRENCIES = new Set(['BHD', 'JOD', 'KWD', 'OMR', 'TND']);
+
+/**
  * @param {number} amount major units
  * @param {string} currency three-letter code
  * @returns {number} integer in the currency's smallest unit
@@ -195,7 +205,25 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
 function toMinorUnits(amount, currency) {
   const code = normaliseCurrency(currency) || FALLBACK_CURRENCY;
   if (ZERO_DECIMAL_CURRENCIES.has(code)) return Math.round(amount);
+  // Stripe takes these in thousandths but refuses an amount whose last
+  // digit is not 0, so it is rounded to the hundredth first: 12.5 is 12500.
+  if (THREE_DECIMAL_CURRENCIES.has(code)) return Math.round(amount * 100) * 10;
   return Math.round(amount * 100);
+}
+
+/**
+ * The way back: an amount Stripe reports (a charge, an invoice, a refund)
+ * in major units, to two decimals like every stored amount.
+ *
+ * @param {number} amount integer in the currency's smallest unit
+ * @param {string} currency three-letter code
+ * @returns {number} major units
+ */
+function fromMinorUnits(amount, currency) {
+  const code = normaliseCurrency(currency) || FALLBACK_CURRENCY;
+  const minor = Number(amount) || 0;
+  if (ZERO_DECIMAL_CURRENCIES.has(code)) return minor;
+  return Math.round(minor / (THREE_DECIMAL_CURRENCIES.has(code) ? 10 : 1)) / 100;
 }
 
 module.exports = {
@@ -204,5 +232,6 @@ module.exports = {
   parseAmountOrZero,
   normaliseCurrency,
   resolveCurrency,
-  toMinorUnits
+  toMinorUnits,
+  fromMinorUnits
 };

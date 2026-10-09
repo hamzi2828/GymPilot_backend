@@ -13,7 +13,7 @@ const Coupon = require('../models/couponModel');
 const Trainer = require('../models/trainerModel');
 const User = require('../../models/user');
 const Settings = require('../../models/settings');
-const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
+const { parseAmount, resolveCurrency, toMinorUnits, fromMinorUnits } = require('../../helper/money');
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
 const { readDeskMethod } = require('../../services/paymentMethods');
@@ -26,6 +26,9 @@ const MEMBERSHIP_KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt
 class MembershipError extends Error {
   constructor(message, status = 400, code = null) {
     super(message);
+    // Handlers outside this module tell these apart by name (the class
+    // booking and personal training controllers), not by instanceof.
+    this.name = 'MembershipError';
     this.status = status;
     this.code = code;
   }
@@ -87,7 +90,77 @@ function addMonths(date, months) {
   return T.localInstant(key, p.hour, p.minute, p.second, at.getUTCMilliseconds());
 }
 
-/** How long one term of this package lasts, from a start date. */
+// A one-off package says how long it lasts in words -- its `period` label.
+// These are the words understood, each with an optional count in front
+// ("3 months", "six months", "12-month"); anything around them is ignored
+// ("per month", "12 Months Membership"). The first one found in the label
+// is the length.
+const PERIOD_COUNT = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\\d+(?:\\.\\d+)?';
+const PERIOD_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+const counted = (unit) => new RegExp(`\\b(?:(${PERIOD_COUNT})\\s*)?(?:${unit})\\b`);
+const PERIOD_UNITS = [
+  { pattern: /\b(?:half\s*(?:a\s*)?year(?:ly)?|semi\s*annual(?:ly)?)\b/, months: 6 },
+  { pattern: /\b(?:fortnight(?:ly)?|bi\s*weekly)\b/, days: 14 },
+  { pattern: counted('quarter(?:s|ly)?'), months: 3 },
+  { pattern: counted('year(?:s|ly)?|annual(?:ly)?'), months: 12 },
+  { pattern: counted('month(?:s|ly)?'), months: 1 },
+  { pattern: counted('week(?:s|ly)?'), days: 7 },
+  { pattern: counted('days?|daily'), days: 1 }
+];
+// Twice a month or every two months, twice a year or every two years:
+// these read both ways, so they are not guessed at.
+const PERIOD_AMBIGUOUS = /\bbi\s*(?:month|annual|year|ennial)/;
+// Longer than a century is a typo, or a number that was never a count
+// ("2026 year plan").
+const PERIOD_MAX = { months: 1200, days: 36600 };
+
+/** What an admin is told when a period label cannot be read. */
+const PERIOD_HELP =
+  'Use day, week, fortnight, month, quarter, half year or year, with a number in front if you need one ("3 months"), or set how many days it is valid for.';
+
+/**
+ * The length a period label names: `{ months }` or `{ days }`, or null when
+ * it names none ("Custom", "Lifetime", "10 sessions").
+ */
+function periodLength(label) {
+  const text = String(label || '').toLowerCase().replace(/[^a-z0-9.]+/g, ' ').trim();
+  if (!text || PERIOD_AMBIGUOUS.test(text)) return null;
+
+  let found = null;
+  for (const unit of PERIOD_UNITS) {
+    const match = unit.pattern.exec(text);
+    if (match && (!found || match.index < found.match.index)) found = { unit, match };
+  }
+  if (!found) return null;
+
+  // The count beside the unit, else a number the label opens with
+  // ("3 x month"), else one.
+  const beside = found.match[1];
+  const count = beside ? PERIOD_WORDS[beside] || Number(beside) : parseInt(text, 10) || 1;
+  if (!Number.isInteger(count) || count < 1) return null;
+  const length = found.unit.months ? { months: found.unit.months * count } : { days: found.unit.days * count };
+  return (length.months || 0) > PERIOD_MAX.months || (length.days || 0) > PERIOD_MAX.days ? null : length;
+}
+
+/**
+ * Why a package cannot be saved as it is, or null. A one-off package with
+ * no validity in days takes its length from the period label; one that
+ * names no length used to be sold as 30 days whatever it cost.
+ */
+function periodProblem(pkg) {
+  const billing = (pkg && pkg.billing) || {};
+  if (billing.mode === 'recurring' || Number(pkg && pkg.durationDays) > 0) return null;
+  if (periodLength(pkg && pkg.period)) return null;
+  return `The period "${String((pkg && pkg.period) || '').trim()}" does not say how long this package lasts. ${PERIOD_HELP}`;
+}
+
+/**
+ * How long one term of this package lasts, from a start date: its validity
+ * in days when it has one, else its billing interval when it is recurring,
+ * else what its period label names (periodLength). A stored package whose
+ * label names no length still gets 30 days, as it always has; saving one
+ * like that is refused (periodProblem).
+ */
 function termEnd(start, snapshot) {
   const end = new Date(start);
   const days = Number(snapshot.durationDays) || 0;
@@ -104,13 +177,9 @@ function termEnd(start, snapshot) {
     else return addMonths(start, count);
     return end;
   }
-  const period = String(snapshot.period || 'month').toLowerCase();
-  const n = parseInt(period, 10) || 1;
-  if (period.includes('year')) return addMonths(start, 12 * n);
-  else if (period.includes('week')) end.setDate(end.getDate() + 7 * n);
-  else if (period.includes('day')) end.setDate(end.getDate() + n);
-  else if (period.includes('month')) return addMonths(start, n);
-  else end.setDate(end.getDate() + 30);
+  const length = periodLength(snapshot.period || 'month');
+  if (length && length.months) return addMonths(start, length.months);
+  end.setDate(end.getDate() + (length ? length.days : 30));
   return end;
 }
 
@@ -164,6 +233,23 @@ async function joiningFeeDue({ userId, email } = {}) {
     $and: [{ $or: [{ 'packageDetails.kind': 'membership' }, { 'packageDetails.kind': { $exists: false } }] }]
   });
   return !joined;
+}
+
+/**
+ * Who an online checkout is from, for the rules that follow a person (the
+ * joining fee, one subscription each): the signed-in account -- its id and
+ * its own email -- or null for a guest.
+ *
+ * Never the email typed into the checkout form. Anybody can type a paying
+ * member's address there: it used to take the joining fee off for them, and
+ * answered whether that address has a subscription. A guest is nobody the
+ * gym knows yet, so a guest pays the fee; signing in is how a returning
+ * member is recognised.
+ */
+async function checkoutIdentity(userId) {
+  if (!userId || !mongoose.Types.ObjectId.isValid(String(userId))) return null;
+  const account = await User.findById(userId).select('email').lean();
+  return account ? { userId: account._id, email: account.email || '' } : null;
 }
 
 /* ------------------------------- coupons ------------------------------- */
@@ -323,6 +409,51 @@ function money(value, field) {
   return round2(amount);
 }
 
+/* ---------------------------- desk repeats ----------------------------- */
+//
+// A desk request sent again because its answer never arrived -- a timeout, a
+// dropped connection -- must not sell a second term or record a second
+// installment. The desk may send `requestId` with a sale, a renewal or a part
+// payment: any id it makes up for that one action (a UUID will do), sent
+// again unchanged when it retries. A request whose id is already recorded
+// is answered with the first result and changes nothing. Left out, every
+// request is new, as before.
+//
+// The id is kept in the order's `metadata`: `requestId` on the order a sale
+// or renewal made, `lastPaymentRequestId` for the latest part payment. This
+// covers the retry after a lost reply; two requests with one id arriving at
+// the very same moment are not told apart (that needs a unique index).
+
+const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
+
+/** The `requestId` a desk request carries, or undefined when it has none. */
+function readRequestId(value) {
+  if (!present(value)) return undefined;
+  const id = String(value).trim();
+  if (!REQUEST_ID.test(id)) {
+    throw new MembershipError('requestId must be 8 to 100 letters, digits, hyphens or underscores (a UUID will do)', 400, 'INVALID_TERMS');
+  }
+  return id;
+}
+
+/** What an order's metadata holds under `key` (a Map on a loaded order). */
+function metadataOf(order, key) {
+  const metadata = order && order.metadata;
+  if (!metadata) return undefined;
+  return typeof metadata.get === 'function' ? metadata.get(key) : metadata[key];
+}
+
+/** Marks an order handed back as the first result of a request sent again. */
+function asRepeat(order) {
+  if (order.$locals) order.$locals.repeated = true;
+  return order;
+}
+
+/** Whether an order was handed back as the answer to a repeated request. */
+function isRepeat(order) {
+  return !!(order && order.$locals && order.$locals.repeated);
+}
+
 /**
  * A date the desk sent. A bare 'YYYY-MM-DD' (a date input) names a whole
  * day at the gym: its first moment for a start, its last for an end (a
@@ -373,6 +504,8 @@ function readStartDate(value, now = new Date()) {
  *   trainerCommissionType,       not renewals): 'percent' of the fee, or a
  *   trainerCommissionValue       fixed 'amount'
  *   notes
+ *   requestId                    this action's own id, so that sending it
+ *                                again makes no second order (desk repeats)
  *
  * @param {object} body
  * @param {{ trainer?: boolean, now?: Date }} [options] trainer: whether
@@ -407,6 +540,8 @@ function readDeskTerms(body = {}, { trainer: allowTrainer = true, now = new Date
   if (truthy(body.waiveJoiningFee)) terms.chargeJoiningFee = false;
   if (present(body.paymentMethod)) terms.paymentMethod = body.paymentMethod;
   if (present(body.notes)) terms.notes = String(body.notes).trim().slice(0, 1000);
+  const requestId = readRequestId(body.requestId);
+  if (requestId) terms.requestId = requestId;
 
   const trainerFields = ['trainerId', 'trainerFee', 'trainerCommissionType', 'trainerCommissionValue'].filter((key) => present(body[key]));
   if (trainerFields.length) {
@@ -455,6 +590,9 @@ function commissionOn(fee, { commissionType, commissionValue }) {
  * membership is granted all the same (paid, active) with the rest as
  * payment.balanceDue, and what was taken is the order's first installment,
  * recorded as received by `paidBy` (a staff account id).
+ *
+ * `requestId`: the desk's id for this action. When this member already has
+ * the order it made, that order is returned (isRepeat) and nothing is sold.
  */
 async function createManualOrder({
   user,
@@ -474,8 +612,13 @@ async function createManualOrder({
   trainer = null,
   amountPaid,
   paidBy = null,
-  by = null
+  by = null,
+  requestId
 }) {
+  if (requestId) {
+    const first = await PackageOrder.findOne({ userId: user._id, 'metadata.requestId': requestId });
+    if (first) return asRepeat(first);
+  }
   const settings = await Settings.getSettings().catch(() => null);
   const listPrice = parseAmount(pkg.price);
   if (listPrice === null) {
@@ -600,6 +743,7 @@ async function createManualOrder({
     renewedFrom,
     status: paid ? 'active' : 'pending',
     notes: notes || `Created from the admin panel by ${by || 'an administrator'}`,
+    metadata: requestId ? { requestId } : undefined,
     createdBy: null
   });
 
@@ -655,11 +799,17 @@ function refundInProgress() {
  * people recording the same payment at once take it off once, and the
  * second is told the balance moved.
  *
+ * `requestId`: the desk's id for this payment. Sent again, the order is
+ * returned as the payment left it (isRepeat) and nothing more is recorded.
+ *
  * @throws {MembershipError} 409 STRIPE_BILLED / NOT_PAID / NO_BALANCE /
  *   REFUND_IN_PROGRESS / BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
  *   than the balance); 422 PAYMENT_METHOD_INVALID
  */
-async function recordPayment(order, { amount, method, note = '', by = null, now = new Date() } = {}) {
+async function recordPayment(order, { amount, method, note = '', by = null, now = new Date(), requestId } = {}) {
+  // First of all: the payment may have settled the balance, and the repeat
+  // would otherwise be told nothing is owed.
+  if (requestId && metadataOf(order, 'lastPaymentRequestId') === requestId) return asRepeat(order);
   if (stripeBilled(order)) {
     throw new MembershipError('This membership is paid by card through Stripe; there is no balance to take at the desk.', 409, 'STRIPE_BILLED');
   }
@@ -707,7 +857,8 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
         'payment.installments': parts,
         'payment.amountPaid': round2(paidSoFar(order.payment) + paying),
         'payment.balanceDue': round2(balance - paying),
-        'payment.lastPaidAt': now
+        'payment.lastPaidAt': now,
+        ...(requestId ? { 'metadata.lastPaymentRequestId': requestId } : {})
       }
     },
     { new: true }
@@ -922,39 +1073,122 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
   return order;
 }
 
-async function submitTransferProof(order, { url, note, reference }) {
+// The payment statuses a transfer can still be acted on in: nothing received
+// yet, or a receipt waiting to be checked. Any other is settled -- paid, or
+// closed (rejected, never arrived, refunded) -- and none of the three calls
+// below reopens it: a receipt sent again must not bring a refunded or
+// rejected order back, and Approve must not hand its membership back.
+//
+// Each is one conditional update on that status, like recordPayment, so they
+// decide on the order as it is stored, not on the copy the caller read.
+const REVIEWABLE = ['pending', 'processing'];
+
+// An approval first claims the order by writing when it was reviewed; only
+// the request that wrote it activates. Two approvals sent together used to
+// both pass the "not paid yet" check on their own copies and both activate:
+// the term pushed a full period on, the coupon counted twice, two invoice
+// numbers. A claim this old was left by a request that died part-way, and
+// the next one may take it over (as REFUND_CLAIM_MS does for refunds).
+const REVIEW_CLAIM_MS = 10 * 60 * 1000;
+
+function reviewNotClaimed(now) {
+  return [{ 'payment.proof.reviewedAt': null }, { 'payment.proof.reviewedAt': { $lt: new Date(now.getTime() - REVIEW_CLAIM_MS) } }];
+}
+
+function reviewable(orderId, now) {
+  return { _id: orderId, 'payment.status': { $in: REVIEWABLE }, $or: reviewNotClaimed(now) };
+}
+
+function staffId(by) {
+  return by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null;
+}
+
+/** Why an order could not be acted on, read from the order as it now is. */
+async function reviewRefusal(orderId) {
+  const fresh = await PackageOrder.findById(orderId).select('payment.status').lean();
+  const status = fresh && fresh.payment ? fresh.payment.status : null;
+  if (status === 'paid') return new MembershipError('This order is already paid', 400, 'ALREADY_PAID');
+  if (status === 'refunded') {
+    return new MembershipError('This order was refunded, so it cannot be opened again. Start a new order for the package instead.', 409, 'ORDER_CLOSED');
+  }
+  if (!REVIEWABLE.includes(status)) {
+    return new MembershipError(
+      'This order is closed: its payment was not accepted. It cannot be opened again; start a new order for the package instead.',
+      409,
+      'ORDER_CLOSED'
+    );
+  }
+  return new MembershipError('Somebody else is confirming this payment right now. Reload the order in a moment.', 409, 'REVIEW_IN_PROGRESS');
+}
+
+async function submitTransferProof(order, { url, note, reference, now = new Date() }) {
   if (order.payment.method !== 'bank_transfer') throw new MembershipError('This order was not paid by bank transfer', 400);
-  if (order.payment.status === 'paid') throw new MembershipError('This order is already paid', 400);
-  order.payment.proof = {
-    url: url || (order.payment.proof && order.payment.proof.url) || '',
-    note: note || '',
-    reference: reference || '',
-    uploadedAt: new Date(),
-    reviewedAt: null,
-    reviewedBy: null,
-    rejectionReason: ''
-  };
-  order.payment.status = 'processing';
-  order.status = 'pending';
-  await order.save();
-  return order;
+  const updated = await PackageOrder.findOneAndUpdate(
+    reviewable(order._id, now),
+    {
+      $set: {
+        'payment.proof': {
+          url: url || (order.payment.proof && order.payment.proof.url) || '',
+          note: note || '',
+          reference: reference || '',
+          uploadedAt: now,
+          reviewedAt: null,
+          reviewedBy: null,
+          rejectionReason: ''
+        },
+        'payment.status': 'processing',
+        status: 'pending'
+      }
+    },
+    { new: true }
+  );
+  if (!updated) throw await reviewRefusal(order._id);
+  return updated;
 }
 
-async function approveTransfer(order, { by }) {
-  if (order.payment.status === 'paid') throw new MembershipError('This order is already paid', 400);
-  order.payment.proof = { ...(order.payment.proof || {}), reviewedAt: new Date(), reviewedBy: by || null, rejectionReason: '' };
-  await markPaidAndActivate(order, { paidAt: new Date() });
-  return order;
+/**
+ * Confirms the money arrived and activates the order -- once, however many
+ * approvals arrive together.
+ * @returns {Promise<object>} the order as activated
+ * @throws {MembershipError} 400 ALREADY_PAID; 409 ORDER_CLOSED (refunded,
+ *   rejected or failed) / REVIEW_IN_PROGRESS (another approval holds it)
+ */
+async function approveTransfer(order, { by, now = new Date() } = {}) {
+  const claimed = await PackageOrder.findOneAndUpdate(
+    reviewable(order._id, now),
+    { $set: { 'payment.proof.reviewedAt': now, 'payment.proof.reviewedBy': staffId(by), 'payment.proof.rejectionReason': '' } },
+    { new: true }
+  );
+  if (!claimed) throw await reviewRefusal(order._id);
+  try {
+    return await markPaidAndActivate(claimed, { paidAt: now });
+  } catch (error) {
+    // Let go, so the approval can be tried again.
+    await PackageOrder.updateOne(
+      { _id: order._id, 'payment.status': { $in: REVIEWABLE }, 'payment.proof.reviewedAt': now },
+      { $set: { 'payment.proof.reviewedAt': null, 'payment.proof.reviewedBy': null } }
+    ).catch(() => {});
+    throw error;
+  }
 }
 
-async function rejectTransfer(order, { by, reason }) {
-  if (order.payment.status === 'paid') throw new MembershipError('This order is already paid', 400);
-  order.payment.proof = { ...(order.payment.proof || {}), reviewedAt: new Date(), reviewedBy: by || null, rejectionReason: reason || '' };
-  order.payment.status = 'failed';
-  order.status = 'cancelled';
-  order.cancellation = { cancelledAt: new Date(), reason: reason || 'Bank transfer rejected', by: by || null, source: 'staff' };
-  await order.save();
-  return order;
+async function rejectTransfer(order, { by, reason, now = new Date() } = {}) {
+  const updated = await PackageOrder.findOneAndUpdate(
+    reviewable(order._id, now),
+    {
+      $set: {
+        'payment.proof.reviewedAt': now,
+        'payment.proof.reviewedBy': staffId(by),
+        'payment.proof.rejectionReason': reason || '',
+        'payment.status': 'failed',
+        status: 'cancelled',
+        cancellation: { cancelledAt: now, reason: reason || 'Bank transfer rejected', by: staffId(by), source: 'staff' }
+      }
+    },
+    { new: true }
+  );
+  if (!updated) throw await reviewRefusal(order._id);
+  return updated;
 }
 
 /* ------------------------------ lifecycle ------------------------------ */
@@ -1318,7 +1552,7 @@ async function resume(order, { by = null } = {}) {
  */
 async function renew(
   order,
-  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride, amountPaid, paidBy } = {}
+  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride, amountPaid, paidBy, requestId } = {}
 ) {
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(order.packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
@@ -1344,16 +1578,52 @@ async function renew(
     renewedFrom: order._id,
     // A renewal is not joining: the fee was taken with the first term.
     chargeJoiningFee: false,
-    by
+    by,
+    requestId
   });
+}
+
+/**
+ * The inline price for a subscription item. Unlike a Checkout line, which
+ * may create its product as it goes (product_data), a subscription item's
+ * price_data must name a product that already exists: Stripe refuses
+ * product_data there (platform/services/subscriptionSync.js does the same).
+ */
+function subscriptionPriceData({ currency, product, amount, billing }) {
+  return {
+    currency,
+    product,
+    unit_amount: toMinorUnits(amount, currency),
+    recurring: { interval: billing.interval, interval_count: billing.intervalCount }
+  };
+}
+
+/**
+ * How a credit for unused days meets the new package's price: `applied`
+ * comes off it, and `unused` is what the price was too small to take.
+ */
+function creditAgainst(credit, listPrice) {
+  const whole = round2(Math.max(0, credit));
+  const applied = listPrice === null ? whole : Math.min(whole, round2(Math.max(0, listPrice)));
+  return { applied, unused: round2(whole - applied) };
 }
 
 /**
  * Moves a member to a different package. The unused part of what they paid
  * comes off the new price (pro rata by days). On a Stripe subscription the
  * subscription itself is switched and Stripe prorates.
+ *
+ * A credit worth more than the new package (a year paid, six months left,
+ * moved to a monthly) cannot all come off its price. The rest is money the
+ * member paid and would get nothing for, so the change is refused (409
+ * CREDIT_EXCEEDS_PRICE, with the figures on `details`) unless the desk sends
+ * `forfeitCredit`: then it goes ahead, and the answer says what was credited
+ * (`credit`) and what was given up (`creditUnused`).
+ *
+ * `by` names who did it, for the notes; `changedBy` is their account id,
+ * recorded on the old order's cancellation.
  */
-async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by } = {}) {
+async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by, changedBy = null, forfeitCredit = false } = {}) {
   assertActive(order);
   // The credit is for days already paid for; with money still owed it
   // would be worked out on money that never came in.
@@ -1390,27 +1660,43 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   const credit = round2(membershipPaid * (remainingDays / totalDays));
 
   if (order.payment.stripeSubscriptionId) {
-    const stripe = await getStripe();
-    const sub = await stripe.subscriptions.retrieve(order.payment.stripeSubscriptionId);
-    const item = sub.items.data[0];
     const snapshot = packageSnapshot(pkg);
-    const { toMinorUnits } = require('../../helper/money');
+    const listPrice = parseAmount(pkg.price);
+    // Stripe charges a subscription on an interval, and a one-off package
+    // has none of its own: moved onto one, its whole price would be charged
+    // every month.
+    if (snapshot.billing.mode !== 'recurring' || listPrice === null || listPrice <= 0) {
+      throw new MembershipError(
+        `${pkg.name} is not paid by card subscription, so this subscription cannot be moved onto it. Cancel the subscription, then assign ${pkg.name} at the desk.`,
+        409,
+        'NOT_A_SUBSCRIPTION_PACKAGE'
+      );
+    }
+    const stripe = await getStripe();
+    const sub = await stripe.subscriptions.retrieve(order.payment.stripeSubscriptionId, { expand: ['items.data.price.product'] });
+    const item = sub.items && sub.items.data && sub.items.data[0];
+    if (!item) throw new MembershipError('Stripe shows nothing being billed on this subscription, so it was not changed. Check it in the Stripe dashboard.', 409, 'STRIPE_SUBSCRIPTION_EMPTY');
     const settings = await Settings.getSettings().catch(() => null);
     const currency = resolveCurrency(pkg.currency, settings && settings.currency).toLowerCase();
-    const updated = await stripe.subscriptions.update(sub.id, {
-      items: [
-        {
-          id: item.id,
-          price_data: {
-            currency,
-            product_data: { name: `${pkg.name} Package` },
-            unit_amount: toMinorUnits(parseAmount(pkg.price), currency),
-            recurring: { interval: snapshot.billing.interval, interval_count: snapshot.billing.intervalCount }
-          }
-        }
-      ],
-      proration_behavior: 'create_prorations'
-    });
+    let updated;
+    try {
+      // The subscription's own product when it already carries this name,
+      // else a new one: a subscription item is priced against a product
+      // that exists (see subscriptionPriceData).
+      const name = `${pkg.name} Package`;
+      const current = item.price && item.price.product;
+      const reusable = current && typeof current === 'object' && !current.deleted && current.active !== false && current.name === name;
+      const product = reusable ? current.id : (await stripe.products.create({ name, metadata: { packageId: String(pkg._id) } })).id;
+      updated = await stripe.subscriptions.update(sub.id, {
+        items: [{ id: item.id, price_data: subscriptionPriceData({ currency, product, amount: listPrice, billing: snapshot.billing }) }],
+        proration_behavior: 'create_prorations'
+      });
+    } catch (error) {
+      // Stripe unreachable is a gateway problem; anything else is Stripe
+      // saying no (another currency, a declined card).
+      const unreachable = error && (error.type === 'StripeConnectionError' || error.type === 'StripeAPIError');
+      throw new MembershipError(`Stripe did not accept the change, so the membership is as it was: ${error.message}`, unreachable ? 502 : 409, 'STRIPE_CHANGE_FAILED');
+    }
     order.packageId = pkg._id;
     // The new price lives in the snapshot, and Stripe charges it from here
     // on; each of those charges is recorded as a renewal with its own amount.
@@ -1425,14 +1711,29 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     return { order, previous: null, credit: null };
   }
 
+  const { applied, unused } = creditAgainst(credit, parseAmount(pkg.price));
+  if (unused > 0 && !forfeitCredit) {
+    const currency = String(order.payment.currency || '').toUpperCase();
+    const sum = (n) => `${currency} ${n.toFixed(2)}`.trim();
+    const refusal = new MembershipError(
+      `This member has ${sum(credit)} of unused days already paid for, but ${pkg.name} costs only ${sum(applied)}: ${sum(unused)} would be lost. ` +
+        `To give the money back, refund ${sum(credit)} of this membership and then assign ${pkg.name}. To change anyway and give up the ${sum(unused)}, confirm the change.`,
+      409,
+      'CREDIT_EXCEEDS_PRICE'
+    );
+    refusal.details = { credit, price: applied, creditUnused: unused, currency };
+    throw refusal;
+  }
+  const givenUp = unused > 0 ? `${unused} of unused credit given up` : '';
+
   const replacement = await createManualOrder({
     user,
     pkg,
     paymentMethod,
     markPaid,
     startDate: now,
-    discountAmount: credit,
-    discountNote: `Credit for ${Math.floor(remainingDays)} unused day(s) of ${order.packageDetails && order.packageDetails.name}`,
+    discountAmount: applied,
+    discountNote: `Credit for ${Math.floor(remainingDays)} unused day(s) of ${order.packageDetails && order.packageDetails.name}${givenUp ? ` (${givenUp})` : ''}`,
     notes: notes || `Changed from ${order.orderNumber} (${order.packageDetails && order.packageDetails.name})`,
     renewedFrom: order._id,
     // Nor is moving to another package: the member joined long ago.
@@ -1443,10 +1744,19 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   order.status = 'cancelled';
   order.subscription.isActive = false;
   order.subscription.endDate = now;
-  order.cancellation = { cancelledAt: now, reason: `Changed to ${pkg.name} (${replacement.orderNumber})`, by, source: 'staff', immediate: true };
+  order.cancellation = {
+    cancelledAt: now,
+    reason: `Changed to ${pkg.name} (${replacement.orderNumber})${givenUp ? `; ${givenUp}` : ''}`,
+    // An account id or nothing: `by` is a name (the desk's email), and
+    // writing that here failed the save -- after the new order was made,
+    // leaving the member with both.
+    by: changedBy && mongoose.Types.ObjectId.isValid(String(changedBy)) ? changedBy : null,
+    source: 'staff',
+    immediate: true
+  };
   await order.save();
 
-  return { order: replacement, previous: order, credit };
+  return { order: replacement, previous: order, credit: applied, creditUnused: unused };
 }
 
 /* ------------------------------- sessions ------------------------------ */
@@ -1554,13 +1864,6 @@ async function refundSession(order) {
 }
 
 /* -------------------------------- refunds ------------------------------ */
-
-function fromMinorUnits(amount, currency) {
-  // toMinorUnits(1) is 100 for a two-decimal currency and 1 for a
-  // zero-decimal one, which is exactly the scale to divide by.
-  const scale = toMinorUnits(1, currency) || 100;
-  return round2((Number(amount) || 0) / scale);
-}
 
 // The PaymentIntent that took the money for this order, found wherever the
 // order's Stripe trail leads: the intent itself for a one-off sale; the
@@ -1774,13 +2077,18 @@ module.exports = {
   MEMBERSHIP_KINDS,
   packageSnapshot,
   addMonths,
+  periodLength,
+  periodProblem,
   termEnd,
   startDateFor,
   joiningFeeDue,
+  checkoutIdentity,
   applyCoupon,
   redeemCoupon,
   assertNoActiveSubscription,
   markPaidAndActivate,
+  readRequestId,
+  isRepeat,
   readDeskTerms,
   commissionOn,
   createManualOrder,
@@ -1803,6 +2111,8 @@ module.exports = {
   cancel,
   resume,
   renew,
+  creditAgainst,
+  subscriptionPriceData,
   changePackage,
   consumeSession,
   refundSession,

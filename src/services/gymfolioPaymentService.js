@@ -20,7 +20,7 @@ const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const Package = require('../gymfolio/models/packageModel');
 const Settings = require('../models/settings');
 const User = require('../models/user');
-const { parseAmount, resolveCurrency, toMinorUnits } = require('../helper/money');
+const { parseAmount, resolveCurrency, toMinorUnits, fromMinorUnits } = require('../helper/money');
 const { frontendOrigin, currentTenantSlug } = require('../platform/tenantContext');
 const { getStripe, assertCardPaymentsAvailable } = require('./stripeClient');
 const membership = require('../gymfolio/services/membershipService');
@@ -30,15 +30,9 @@ const { idOf, subscriptionIdOf, periodOf, invoicePeriodOf } = require('../gymfol
 const claim = require('../gymfolio/services/activationClaim');
 
 const SESSION_TYPE = 'gymfolio_package_subscription';
-const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf']);
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
-}
-
-function fromMinorUnits(amount, currency) {
-  const n = Number(amount) || 0;
-  return ZERO_DECIMAL.has(String(currency || '').toLowerCase()) ? n : round2(n / 100);
 }
 
 // A free trial charges nothing at checkout (at most the joining fee); the
@@ -132,6 +126,47 @@ async function followZeroInvoice(order, periodEnd) {
   );
 }
 
+/**
+ * Which order a failed charge may put past due: one still paid for, where
+ * neither this invoice has been paid since (its id is the order's latest
+ * paid invoice, or among its renewals) nor any payment has been recorded
+ * after the failure happened (`eventCreated`: Stripe's event time, Unix
+ * seconds; left out, only the invoice is checked).
+ */
+function pastDueFilter(orderId, invoiceId, eventCreated) {
+  const filter = {
+    _id: orderId,
+    'payment.status': 'paid',
+    'payment.stripeInvoiceId': { $ne: invoiceId },
+    'subscription.renewals.invoiceId': { $ne: invoiceId }
+  };
+  const seconds = Number(eventCreated);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    filter.$or = [{ 'payment.lastPaidAt': null }, { 'payment.lastPaidAt': { $lt: new Date(seconds * 1000) } }];
+  }
+  return filter;
+}
+
+// An event about a payment whose order another caller is activating at this
+// moment. Nearly always that caller finishes within a second -- the success
+// page and the webhook learn of the money together, and one of them wins --
+// so the event waits briefly and is then simply acknowledged. Still held
+// after that, it is refused (409 ACTIVATION_IN_PROGRESS) so that Stripe
+// sends it again later: by then the other caller has finished, or it died
+// and its claim has gone stale and is taken over (activationClaim).
+// Acknowledging it at once is what used to leave such an order paid for and
+// never activated.
+const HELD_WAITS_MS = [250, 500, 1000];
+
+async function waitOutClaim(orderId) {
+  for (const ms of HELD_WAITS_MS) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    const row = await PackageOrder.findById(orderId).select('payment.status payment.method').lean();
+    if (!claim.held(row)) return;
+  }
+  throw new membership.MembershipError('This payment is still being recorded. Send the event again later.', 409, 'ACTIVATION_IN_PROGRESS');
+}
+
 async function orderForSubscription(subId, object) {
   const clauses = [];
   if (subId) clauses.push({ 'payment.stripeSubscriptionId': subId });
@@ -172,17 +207,21 @@ class GymfolioPaymentService {
     const currency = resolveCurrency(packageData.currency, settings && settings.currency).toLowerCase();
     const snapshot = membership.packageSnapshot(packageData);
     const recurring = snapshot.billing.mode === 'recurring';
-    // Charged once, with the first membership: a member coming back -- by
-    // account, or by the email a guest checkout gives -- is not charged it
-    // again (membershipService.joiningFeeDue).
-    const joiningFee = (await membership.joiningFeeDue({ userId, email: customerInfo.email })) ? round2(snapshot.joiningFee) : 0;
+    // Charged once, with the first membership: a member coming back is not
+    // charged it again (membershipService.joiningFeeDue). Who is coming back
+    // is the signed-in account, never the email typed into the form
+    // (checkoutIdentity); a guest pays it.
+    const payer = await membership.checkoutIdentity(userId);
+    const joiningFee = (await membership.joiningFeeDue(payer || {})) ? round2(snapshot.joiningFee) : 0;
 
     const { coupon, discount } = await membership.applyCoupon(options.couponCode, packageData, listPrice);
 
     // A signed-in member who is already on a subscription is sent to their
-    // account page rather than sold a second one that overlaps it.
-    if (userId) {
-      await membership.assertNoActiveSubscription({ userId, email: customerInfo.email, snapshot });
+    // account page rather than sold a second one that overlaps it. Asked
+    // about the account alone: a typed email would say whether somebody
+    // else has one.
+    if (payer) {
+      await membership.assertNoActiveSubscription({ ...payer, snapshot });
     }
 
     const orderNumber = await PackageOrder.generateOrderNumber();
@@ -351,6 +390,22 @@ class GymfolioPaymentService {
   }
 
   /**
+   * activateOnce for a webhook event (`what`, for the log). An order this
+   * event cannot claim because another caller holds it is waited for, and
+   * the event refused if it stays held (waitOutClaim).
+   */
+  async activateFromEvent(order, what, prepare) {
+    let current = order;
+    if (claim.claimable(order)) {
+      const result = await this.activateOnce(order, prepare);
+      if (result.activated) return;
+      current = result.order;
+    }
+    noteIgnoredPayment(current, what);
+    if (claim.held(current)) await waitOutClaim(current._id);
+  }
+
+  /**
    * Confirms a Checkout session and activates its order. Safe to call more
    * than once: an order already paid is returned as it is.
    */
@@ -359,11 +414,17 @@ class GymfolioPaymentService {
     const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent', 'subscription'] });
 
     let order = await PackageOrder.findOne({ 'payment.stripeSessionId': sessionId });
-    if (!order) throw new Error('Order not found for this session');
+    if (!order) {
+      throw new membership.MembershipError(
+        'We could not find an order for this payment. If you have paid, contact the gym with your receipt.',
+        404,
+        'ORDER_NOT_FOUND'
+      );
+    }
 
     const paid = session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
 
-    if (paid && claim.canClaimActivation(order.payment.status)) {
+    if (paid && claim.claimable(order)) {
       const result = await this.activateOnce(order, async (o) => {
         const customerId = idOf(session.customer);
 
@@ -404,7 +465,19 @@ class GymfolioPaymentService {
 
     switch (event.type) {
       case 'checkout.session.completed': {
-        if (object.metadata && object.metadata.type === SESSION_TYPE) await this.verifyPackagePayment(object.id);
+        if (!object.metadata || object.metadata.type !== SESSION_TYPE) break;
+        try {
+          const { paid, order } = await this.verifyPackagePayment(object.id);
+          if (paid && claim.held(order)) await waitOutClaim(order._id);
+        } catch (error) {
+          // A session with no order here -- a Stripe account that also
+          // takes payments for another site, say. Nothing here can ever
+          // apply it, and failing would have Stripe send it again for days:
+          // it is acknowledged, and said in the log. Anything else still
+          // fails, so Stripe does retry what a retry can fix.
+          if (!error || error.code !== 'ORDER_NOT_FOUND') throw error;
+          console.warn(`[payments] checkout.session.completed ${object.id} ignored: no order here for it (order number ${orderNumberOf(object) || object.client_reference_id || 'unknown'})`);
+        }
         break;
       }
 
@@ -432,14 +505,12 @@ class GymfolioPaymentService {
             ? { $or: [{ 'payment.stripePaymentIntentId': object.id }, { orderNumber, 'payment.method': 'stripe' }] }
             : { 'payment.stripePaymentIntentId': object.id }
         );
-        if (order && claim.canClaimActivation(order.payment.status)) {
-          await this.activateOnce(order, async (o) => {
+        if (order) {
+          await this.activateFromEvent(order, `payment_intent.succeeded ${object.id}`, async (o) => {
             o.payment.stripePaymentIntentId = object.id;
             if (!o.payment.stripeCustomerId && idOf(object.customer)) o.payment.stripeCustomerId = idOf(object.customer);
             return { transactionId: object.id };
           });
-        } else if (order) {
-          noteIgnoredPayment(order, `payment_intent.succeeded ${object.id}`);
         }
         break;
       }
@@ -464,9 +535,10 @@ class GymfolioPaymentService {
 
         const { start: periodStart, end: periodEnd } = invoicePeriodOf(object);
 
-        if (claim.canClaimActivation(order.payment.status)) {
-          // First payment arriving here before the success page verified it.
-          await this.activateOnce(order, async (o) => {
+        if (claim.claimable(order) || claim.held(order)) {
+          // First payment arriving here before the success page verified it,
+          // or while it is doing so.
+          await this.activateFromEvent(order, `invoice.paid ${object.id}`, async (o) => {
             o.payment.stripeSubscriptionId = subId;
             o.payment.stripeInvoiceId = object.id;
             if (!o.payment.stripeCustomerId && idOf(object.customer)) o.payment.stripeCustomerId = idOf(object.customer);
@@ -524,16 +596,26 @@ class GymfolioPaymentService {
 
       // A renewal could not be collected. Stripe keeps retrying on its own
       // schedule; the member is told and the desk sees "past due".
+      //
+      // Stripe does not promise the order of events, and redelivers them: a
+      // failed attempt that arrives after the payment that settled it must
+      // not put a paid member past due. So the write is refused -- in the
+      // write itself, as the platform webhook orders its events -- when this
+      // invoice is already recorded as paid, or when a payment has been
+      // recorded since the event was created.
       case 'invoice.payment_failed': {
         const subId = subscriptionIdOf(object);
         if (!subId) break;
         const order = await orderForSubscription(subId, object);
         if (!order || order.payment.status !== 'paid') break;
-        order.status = 'past_due';
-        order.payment.lastPaymentError =
-          (object.last_finalization_error && object.last_finalization_error.message) || 'Your card could not be charged';
-        await order.save();
-        afterResponse(notify.paymentFailed(order, await memberFor(order)), 'paymentFailed');
+        const lastPaymentError = (object.last_finalization_error && object.last_finalization_error.message) || 'Your card could not be charged';
+        const failed = await PackageOrder.findOneAndUpdate(
+          pastDueFilter(order._id, object.id, event.created),
+          { $set: { status: 'past_due', 'payment.lastPaymentError': lastPaymentError } },
+          { new: true }
+        );
+        if (failed) afterResponse(notify.paymentFailed(failed, await memberFor(failed)), 'paymentFailed');
+        else console.warn(`[payments] invoice.payment_failed ${object.id} ignored: order ${order._id} (${order.orderNumber}) has been paid since`);
         break;
       }
 
@@ -703,3 +785,4 @@ class GymfolioPaymentService {
 
 module.exports = new GymfolioPaymentService();
 module.exports.orderNumberOf = orderNumberOf;
+module.exports.pastDueFilter = pastDueFilter;

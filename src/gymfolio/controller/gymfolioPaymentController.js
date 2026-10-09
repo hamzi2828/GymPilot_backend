@@ -40,9 +40,14 @@ const gymfolioPaymentController = {
    * { userId, packageId, paymentMethod?, markPaid?, couponCode?, durationMonths?,
    *   startDate? | startAfterDays?, discountAmount?, discountNote?,
    *   amountOverride? (or amount), waiveJoiningFee?, amountPaid?, trainerId?,
-   *   trainerFee?, trainerCommissionType?, trainerCommissionValue?, notes? }
+   *   trainerFee?, trainerCommissionType?, trainerCommissionValue?, notes?,
+   *   requestId? }
    * -- the desk terms are read and checked by membershipService.readDeskTerms
    * (400 INVALID_TERMS naming the field).
+   *
+   * `requestId` is the desk's own id for this sale. Sent again after a lost
+   * reply, the answer is the order already made (`repeated: true`), not a
+   * second one stacked on it.
    */
   async assignPackageToUser(req, res) {
     try {
@@ -73,10 +78,11 @@ const gymfolioPaymentController = {
         by: req.user && req.user.email
       });
 
-      if (order.payment.status === 'paid') afterResponse(notify.membershipConfirmed(order, user), 'membershipConfirmed');
+      const repeated = membership.isRepeat(order);
+      if (order.payment.status === 'paid' && !repeated) afterResponse(notify.membershipConfirmed(order, user), 'membershipConfirmed');
 
       const who = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || 'the member';
-      return res.status(201).json({ success: true, message: `${pkg.name} assigned to ${who}`, data: order });
+      return res.status(201).json({ success: true, message: `${pkg.name} assigned to ${who}`, data: order, repeated: repeated || undefined });
     } catch (error) {
       return fail(res, error, 'Failed to assign package');
     }
@@ -198,6 +204,12 @@ const gymfolioPaymentController = {
       await gymfolioPaymentService.handleWebhook(event);
       return res.json({ received: true });
     } catch (error) {
+      // Another request is recording this very payment: nothing failed, but
+      // the event is not applied either. Anything but a 2xx has Stripe send
+      // it again later (gymfolioPaymentService waitOutClaim).
+      if (error && error.code === 'ACTIVATION_IN_PROGRESS') {
+        return res.status(409).json({ received: false, inProgress: true, message: error.message });
+      }
       console.error('❌ Error handling webhook:', error);
       return res.status(500).json({ success: false, message: 'Webhook handler failed' });
     }
