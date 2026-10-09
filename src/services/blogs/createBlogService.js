@@ -4,6 +4,7 @@ const Blog = require('../../models/blogModel');
 const BlogCategory = require(path.resolve(__dirname, '../../models/BlogCategory'));
 const mongoose = require('mongoose');
 const { gymSiteName } = require('../gymName');
+const { cleanBlogHtml, cleanExcerpt, readMetaSchema, writeMetaSchema } = require('./blogHtml');
 
 // Check if Vercel Blob is configured
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
@@ -23,7 +24,6 @@ const createBlogService = async (blogData, files, userId) => {
   try {
     const {
       title,
-      content,
       authorId, // Add authorId from request
       status = 'draft',
       slug,
@@ -34,6 +34,9 @@ const createBlogService = async (blogData, files, userId) => {
       metaKeywords,
       metaSchema
     } = blogData;
+    // The body is stored as the article markup it may contain and nothing
+    // else (services/blogs/blogHtml.js). One that is only a script is empty.
+    const content = cleanBlogHtml(blogData.content);
     // The category may arrive as an id or as the populated object an edit
     // form hands back; either way only the id is wanted.
     const categoryId = normaliseCategoryId(blogData.categoryId);
@@ -83,18 +86,8 @@ const createBlogService = async (blogData, files, userId) => {
       }
     }
 
-    // Validate JSON-LD schema
-    if (metaSchema) {
-      try {
-        const schema = JSON.parse(metaSchema);
-        // Ensure it has basic structure
-        if (!schema['@context'] || !schema['@type']) {
-          throw new Error('JSON-LD schema must include @context and @type');
-        }
-      } catch (e) {
-        throw new Error(`Invalid JSON-LD schema: ${e.message}`);
-      }
-    }
+    // Validate JSON-LD schema: a JSON object, stored re-serialised.
+    const storedSchema = metaSchema ? readMetaSchema(metaSchema) : null;
 
     // Generate slug if not provided
     const finalSlug = slug || generateSlug(title);
@@ -115,21 +108,21 @@ const createBlogService = async (blogData, files, userId) => {
     // Prepare blog data
     const newBlogData = {
       title: title.trim(),
-      content: content.trim(),
+      content,
       categoryId: new mongoose.Types.ObjectId(categoryId),
       status,
       featured,
       slug: finalSlug,
       image: imageUrl,
       thumbnail: thumbnailUrl,
-      excerpt: typeof excerpt === 'string' ? excerpt.trim().slice(0, 500) : '',
+      excerpt: cleanExcerpt(excerpt),
       author: authorId ? new mongoose.Types.ObjectId(authorId) : null, // Use authorId if provided
       tags: parsedTags,
       // SEO fields with fallbacks
       metaTitle: metaTitle || title.slice(0, 60),
       metaDescription: metaDescription || stripHtml(content).slice(0, 155),
       metaKeywords: metaKeywords || parsedTags.join(', '),
-      metaSchema: metaSchema || generateDefaultSchema(title, content, imageUrl, siteName)
+      metaSchema: storedSchema || generateDefaultSchema(title, content, imageUrl, siteName)
     };
 
     // Create and save the blog
@@ -233,7 +226,7 @@ const generateDefaultSchema = (title, content, imageUrl, siteName = 'GymPilot') 
     }
   };
 
-  return JSON.stringify(schema);
+  return writeMetaSchema(schema);
 };
 
 module.exports = createBlogService;
