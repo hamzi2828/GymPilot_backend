@@ -3,6 +3,7 @@ const Package = require('../models/packageModel');
 const PackageOrder = require('../models/packageOrderModel');
 const { currencyOr } = require('../../services/currency');
 const { parseAmount } = require('../../helper/money');
+const { periodProblem } = require('../services/membershipService');
 
 const KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt_pack'];
 const INTERVALS = ['day', 'week', 'month', 'year'];
@@ -26,6 +27,12 @@ function billingFields({ kind, billing, durationDays, sessions, joiningFee }, ex
   if (sessions !== undefined) out.sessions = Math.max(0, parseInt(sessions, 10) || 0);
   if (joiningFee !== undefined) out.joiningFee = Math.max(0, Number(joiningFee) || 0);
   return out;
+}
+
+// A package whose period names no length of time is not saved: it used to
+// be sold as 30 days whatever it cost (membershipService.periodProblem).
+function refusePeriod(res, problem) {
+  return res.status(400).json({ success: false, code: 'PERIOD_NOT_UNDERSTOOD', message: problem, errors: [problem] });
 }
 
 // Get all active packages (public endpoint)
@@ -143,6 +150,9 @@ const createPackage = async (req, res) => {
       ...billingFields({ kind, billing, durationDays, sessions, joiningFee })
     };
 
+    const problem = period ? periodProblem(packageData) : null;
+    if (problem) return refusePeriod(res, problem);
+
     const package = new Package(packageData);
     await package.save();
 
@@ -227,6 +237,16 @@ const updatePackage = async (req, res) => {
       order: order ? parseInt(order) : package.order,
       ...billingFields({ kind, billing, durationDays, sessions, joiningFee }, package)
     };
+
+    // Checked as the package will be once saved. One stored before periods
+    // were checked keeps saving while its period is left as it was, so its
+    // price or features can still be edited.
+    const problem = periodProblem({
+      period: updateData.period,
+      durationDays: updateData.durationDays !== undefined ? updateData.durationDays : package.durationDays,
+      billing: updateData.billing || package.billing
+    });
+    if (problem && !(periodProblem(package) && String(updateData.period).trim() === package.period)) return refusePeriod(res, problem);
 
     const updatedPackage = await Package.findByIdAndUpdate(id, updateData, {
       new: true,

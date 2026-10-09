@@ -90,7 +90,77 @@ function addMonths(date, months) {
   return T.localInstant(key, p.hour, p.minute, p.second, at.getUTCMilliseconds());
 }
 
-/** How long one term of this package lasts, from a start date. */
+// A one-off package says how long it lasts in words -- its `period` label.
+// These are the words understood, each with an optional count in front
+// ("3 months", "six months", "12-month"); anything around them is ignored
+// ("per month", "12 Months Membership"). The first one found in the label
+// is the length.
+const PERIOD_COUNT = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\\d+(?:\\.\\d+)?';
+const PERIOD_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+const counted = (unit) => new RegExp(`\\b(?:(${PERIOD_COUNT})\\s*)?(?:${unit})\\b`);
+const PERIOD_UNITS = [
+  { pattern: /\b(?:half\s*(?:a\s*)?year(?:ly)?|semi\s*annual(?:ly)?)\b/, months: 6 },
+  { pattern: /\b(?:fortnight(?:ly)?|bi\s*weekly)\b/, days: 14 },
+  { pattern: counted('quarter(?:s|ly)?'), months: 3 },
+  { pattern: counted('year(?:s|ly)?|annual(?:ly)?'), months: 12 },
+  { pattern: counted('month(?:s|ly)?'), months: 1 },
+  { pattern: counted('week(?:s|ly)?'), days: 7 },
+  { pattern: counted('days?|daily'), days: 1 }
+];
+// Twice a month or every two months, twice a year or every two years:
+// these read both ways, so they are not guessed at.
+const PERIOD_AMBIGUOUS = /\bbi\s*(?:month|annual|year|ennial)/;
+// Longer than a century is a typo, or a number that was never a count
+// ("2026 year plan").
+const PERIOD_MAX = { months: 1200, days: 36600 };
+
+/** What an admin is told when a period label cannot be read. */
+const PERIOD_HELP =
+  'Use day, week, fortnight, month, quarter, half year or year, with a number in front if you need one ("3 months"), or set how many days it is valid for.';
+
+/**
+ * The length a period label names: `{ months }` or `{ days }`, or null when
+ * it names none ("Custom", "Lifetime", "10 sessions").
+ */
+function periodLength(label) {
+  const text = String(label || '').toLowerCase().replace(/[^a-z0-9.]+/g, ' ').trim();
+  if (!text || PERIOD_AMBIGUOUS.test(text)) return null;
+
+  let found = null;
+  for (const unit of PERIOD_UNITS) {
+    const match = unit.pattern.exec(text);
+    if (match && (!found || match.index < found.match.index)) found = { unit, match };
+  }
+  if (!found) return null;
+
+  // The count beside the unit, else a number the label opens with
+  // ("3 x month"), else one.
+  const beside = found.match[1];
+  const count = beside ? PERIOD_WORDS[beside] || Number(beside) : parseInt(text, 10) || 1;
+  if (!Number.isInteger(count) || count < 1) return null;
+  const length = found.unit.months ? { months: found.unit.months * count } : { days: found.unit.days * count };
+  return (length.months || 0) > PERIOD_MAX.months || (length.days || 0) > PERIOD_MAX.days ? null : length;
+}
+
+/**
+ * Why a package cannot be saved as it is, or null. A one-off package with
+ * no validity in days takes its length from the period label; one that
+ * names no length used to be sold as 30 days whatever it cost.
+ */
+function periodProblem(pkg) {
+  const billing = (pkg && pkg.billing) || {};
+  if (billing.mode === 'recurring' || Number(pkg && pkg.durationDays) > 0) return null;
+  if (periodLength(pkg && pkg.period)) return null;
+  return `The period "${String((pkg && pkg.period) || '').trim()}" does not say how long this package lasts. ${PERIOD_HELP}`;
+}
+
+/**
+ * How long one term of this package lasts, from a start date: its validity
+ * in days when it has one, else its billing interval when it is recurring,
+ * else what its period label names (periodLength). A stored package whose
+ * label names no length still gets 30 days, as it always has; saving one
+ * like that is refused (periodProblem).
+ */
 function termEnd(start, snapshot) {
   const end = new Date(start);
   const days = Number(snapshot.durationDays) || 0;
@@ -107,13 +177,9 @@ function termEnd(start, snapshot) {
     else return addMonths(start, count);
     return end;
   }
-  const period = String(snapshot.period || 'month').toLowerCase();
-  const n = parseInt(period, 10) || 1;
-  if (period.includes('year')) return addMonths(start, 12 * n);
-  else if (period.includes('week')) end.setDate(end.getDate() + 7 * n);
-  else if (period.includes('day')) end.setDate(end.getDate() + n);
-  else if (period.includes('month')) return addMonths(start, n);
-  else end.setDate(end.getDate() + 30);
+  const length = periodLength(snapshot.period || 'month');
+  if (length && length.months) return addMonths(start, length.months);
+  end.setDate(end.getDate() + (length ? length.days : 30));
   return end;
 }
 
@@ -1777,6 +1843,8 @@ module.exports = {
   MEMBERSHIP_KINDS,
   packageSnapshot,
   addMonths,
+  periodLength,
+  periodProblem,
   termEnd,
   startDateFor,
   joiningFeeDue,
