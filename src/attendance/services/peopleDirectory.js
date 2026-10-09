@@ -18,6 +18,7 @@ const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const { defaultCurrency } = require('../../services/currency');
+const { unprovenIds } = require('../../services/emailVerification');
 
 const MEMBER_PREFIX = 'GP-';
 const STAFF_PREFIX = 'TR-';
@@ -240,6 +241,10 @@ async function trainerProfilesOf(userIds) {
 // Guest checkouts are matched by email as well as by userId: someone can buy
 // a package before ever creating an account, then sign up with the same
 // address, and the front desk should still see the package they paid for.
+// Only once the address is shown to be theirs, though -- sign-up takes any
+// address, and a guest's membership must not go to whoever types it
+// (services/emailVerification.js). Orders under the account's own id are
+// matched whatever the state of its address.
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Cancelled and suspended orders are decisions somebody made; neither counts
@@ -359,12 +364,16 @@ function describeOrder(order, status, now) {
 
 // The address guest checkouts are matched on -- compared exactly, as the
 // query does, so an order the database would not return is never claimed.
-function ownerEmail(user) {
-  return user && user.email ? String(user.email).toLowerCase().trim() : null;
+// None for an address nobody has shown is theirs. `unproven` is the ids
+// unprovenIds found: a caller's projection may not carry the flag itself.
+function ownerEmail(user, unproven = null) {
+  if (!user || !user.email || user.emailVerified === false) return null;
+  if (unproven && unproven.has(String(user._id))) return null;
+  return String(user.email).toLowerCase().trim();
 }
 
 async function membershipFor(user) {
-  const emailMatch = ownerEmail(user);
+  const emailMatch = ownerEmail(user, await unprovenIds([user]));
   const ownerClauses = [{ userId: user._id }];
   if (emailMatch) ownerClauses.push({ 'customerInfo.email': emailMatch });
 
@@ -476,8 +485,9 @@ function newestCreatedFirst(a, b) {
 // Files `orders` under their owners, and answers "which of these are this
 // user's" the way membershipFor's query does: by userId, or by an email that
 // matches theirs exactly. Each order once, even when it matches on both -- a
-// guest order later claimed by the account does.
-function ordersByOwner(orders) {
+// guest order later claimed by the account does. Accounts in `unproven`
+// (see ownerEmail) are answered by userId alone.
+function ordersByOwner(orders, unproven = null) {
   const byUser = new Map();
   const byEmail = new Map();
   const file = (map, key, order) => {
@@ -491,7 +501,7 @@ function ordersByOwner(orders) {
   }
 
   return (user) => {
-    const email = ownerEmail(user);
+    const email = ownerEmail(user, unproven);
     const mine = new Map();
     for (const order of byUser.get(String(user._id)) || []) mine.set(String(order._id), order);
     for (const order of (email && byEmail.get(email)) || []) mine.set(String(order._id), order);
@@ -504,9 +514,9 @@ function ordersByOwner(orders) {
  * all of them: each member is answered from exactly the orders membershipFor
  * would have fetched for them alone. Pure. Keyed by String(user._id).
  */
-function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date(), { currency = null } = {}) {
-  const paidOf = ordersByOwner(paidOrders);
-  const unpaidOf = ordersByOwner(unpaidOrders);
+function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date(), { currency = null, unproven = null } = {}) {
+  const paidOf = ordersByOwner(paidOrders, unproven);
+  const unpaidOf = ordersByOwner(unpaidOrders, unproven);
 
   const index = new Map();
   for (const user of users || []) {
@@ -528,7 +538,9 @@ function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date()
 async function membershipsFor(users, now) {
   if (!users || !users.length) return new Map();
 
-  const emails = users.map(ownerEmail).filter(Boolean);
+  // The addresses that may claim a guest order: the proven ones.
+  const unproven = await unprovenIds(users);
+  const emails = users.map((user) => ownerEmail(user, unproven)).filter(Boolean);
   const owners = {
     $or: [{ userId: { $in: users.map((user) => user._id) } }, { 'customerInfo.email': { $in: emails } }]
   };
@@ -544,7 +556,7 @@ async function membershipsFor(users, now) {
 
   // The gym's currency is only needed when money is owed in more than one.
   const currency = owedTotals(paidOrders).size > 1 ? await defaultCurrency() : null;
-  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date(), { currency });
+  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date(), { currency, unproven });
 }
 
 // The directory's entries as they go out to the desk. `codes` -- every code

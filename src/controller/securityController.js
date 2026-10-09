@@ -15,9 +15,13 @@ const Fingerprint = require('../attendance/models/fingerprintModel');
 const Contact = require('../models/contactModel');
 const AdminAuditLog = require('../models/adminAuditLogModel');
 const twoFactor = require('../services/twoFactorService');
-const { currentTenantId } = require('../platform/tenantContext');
+const verification = require('../services/emailVerification');
+const { gymSiteName } = require('../services/gymName');
+const { currentTenantId, currentTenantSlug, frontendOrigin } = require('../platform/tenantContext');
 const { forgetSession } = require('../middleware/auth');
 const { publicUserView } = require('../services/userView');
+const guards = require('../services/roleGuards');
+const { actorAccess, permissionsFor } = require('../services/roleService');
 
 const BIOMETRIC_CONSENT_VERSION = '2026-09';
 
@@ -45,6 +49,18 @@ function issueToken(user, { remember = false } = {}) {
 
 // One view of an account for every sign-in response (services/userView.js).
 const publicUser = publicUserView;
+
+// What an admin action here is judged on, about the account it is done to.
+const REACH_FIELDS = 'role allowAttendanceApp allowFingerprintEnrollment';
+
+// Why the caller may not `doing` this account, or null (services/roleGuards.js).
+async function reachRefusal(req, target, doing) {
+  return guards.reachProblem({ ...(await actorAccess(req)), target, targetPermissions: await permissionsFor(target.role), doing });
+}
+
+function nameOf(user) {
+  return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'This account';
+}
 
 function consentRecord(given, source, by) {
   return { given: !!given, at: new Date(), source, recordedBy: by || null, version: BIOMETRIC_CONSENT_VERSION };
@@ -104,6 +120,89 @@ module.exports = {
     } catch (error) {
       console.error('[2fa] set failed:', error);
       return res.status(500).json({ message: 'Could not update two-factor settings' });
+    }
+  },
+
+  // GET /user/verify-email?token=   -- the link in the "confirm your email"
+  // message. Shows a page with one button and changes nothing: mail scanners
+  // open every link in a message, and one of those must not confirm an
+  // address for whoever typed it (services/emailVerification.js).
+  verifyEmailPage: async (req, res) => {
+    try {
+      const token = typeof req.query.token === 'string' ? req.query.token : '';
+      const [account, siteName] = await Promise.all([verification.pending(token), gymSiteName()]);
+      res.setHeader('Cache-Control', 'no-store');
+      if (!account) return res.status(400).type('html').send(verification.invalidPage({ siteName }));
+      return res.status(200).type('html').send(verification.confirmPage({ siteName, email: account.email, token, slug: currentTenantSlug() }));
+    } catch (error) {
+      console.error('[security] confirmation page failed:', error);
+      return res.status(500).type('text/plain').send('Could not open this link. Please try again.');
+    }
+  },
+
+  // POST /user/verify-email   { token }  -- the button on that page (a form
+  // post, answered by sending the person to the gym's sign-in page), or a
+  // JSON call from the website or the app (answered in JSON).
+  verifyEmail: async (req, res) => {
+    const wantsJson = typeof req.is === 'function' && !!req.is('application/json');
+    try {
+      const token = req.body && typeof req.body.token === 'string' ? req.body.token : '';
+      const account = await verification.confirm(token);
+      res.setHeader('Cache-Control', 'no-store');
+      if (!account) {
+        if (wantsJson) return res.status(400).json({ success: false, code: 'VERIFY_LINK_INVALID', message: verification.LINK_INVALID });
+        return res.status(400).type('html').send(verification.invalidPage({ siteName: await gymSiteName() }));
+      }
+      if (wantsJson) return res.status(200).json({ success: true, message: 'Your email address is confirmed.', data: { email: account.email, emailVerified: true } });
+      return res.redirect(303, `${frontendOrigin()}/authentication?emailVerified=1`);
+    } catch (error) {
+      console.error('[security] confirming an email failed:', error);
+      if (wantsJson) return res.status(500).json({ success: false, message: 'Could not confirm your email address' });
+      return res.status(500).type('text/plain').send('Could not confirm your email address. Please try again.');
+    }
+  },
+
+  // POST /user/verify-email/send -- a fresh link for the signed-in account
+  sendVerifyEmail: async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id).select('firstName email emailVerified');
+      if (!user) return res.status(404).json({ message: 'Account not found' });
+      if (!user.email) return res.status(409).json({ success: false, message: 'This account has no email address to confirm.' });
+      if (verification.emailIsVerified(user)) {
+        return res.json({ success: true, alreadyVerified: true, message: 'Your email address is already confirmed.' });
+      }
+      const result = await verification.sendLink(user, { origin: verification.apiOrigin(req) });
+      if (!result.sent) {
+        return res.status(503).json({ success: false, message: 'We could not send the email just now. Please try again later, or ask at reception.' });
+      }
+      return res.json({ success: true, message: `We sent a link to ${user.email}. Open it to confirm the address is yours.` });
+    } catch (error) {
+      console.error('[security] sending a confirmation link failed:', error);
+      return res.status(500).json({ message: 'Could not send the confirmation email' });
+    }
+  },
+
+  // POST /admin/users/:id/verify-email  (staff) -- the desk vouches for an
+  // address: the member is standing there, the membership they bought as a
+  // guest is under it, and the emailed link was never opened.
+  vouchEmail: async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'User not found' });
+      const user = await User.findById(req.params.id).select(`firstName lastName username email emailVerified ${REACH_FIELDS}`);
+      if (!user) return res.status(404).json({ message: 'User not found' });
+      // Not your own: that would be vouching for an address you typed.
+      if (String(user._id) === String(req.user.id)) {
+        return res.status(403).json({ message: 'Confirm your own email address from the link we emailed you.' });
+      }
+      const refusal = await reachRefusal(req, user, 'confirm the email address of');
+      if (refusal) return res.status(403).json({ message: refusal });
+      if (!user.email) return res.status(409).json({ message: 'This account has no email address to confirm.' });
+
+      await User.updateOne({ _id: user._id, email: user.email }, { $set: { emailVerified: true, emailVerifyTokenHash: null, emailVerifyExpiresAt: null } });
+      return res.json({ success: true, message: `${nameOf(user)}'s email address is marked as confirmed.`, data: { id: String(user._id), emailVerified: true } });
+    } catch (error) {
+      console.error('[security] vouching for an email failed:', error);
+      return res.status(500).json({ message: 'Could not confirm the email address' });
     }
   },
 
@@ -206,16 +305,19 @@ module.exports = {
 
       // Matched by email as well only when the account has one: without it,
       // `{ email: undefined }` would match every record that has none -- other
-      // people's orders and enquiries.
+      // people's orders and enquiries. And only once the address is shown to
+      // be theirs: sign-up takes any address, and this is a download of
+      // whatever was bought or asked under it (services/emailVerification.js).
+      const ownsEmail = !!user.email && verification.emailIsVerified(user);
       const [orders, bookings, attendance, fingerprints, contacts] = await Promise.all([
-        PackageOrder.find(user.email ? { $or: [{ userId: user._id }, { 'customerInfo.email': user.email }] } : { userId: user._id }).lean(),
+        PackageOrder.find(ownsEmail ? { $or: [{ userId: user._id }, { 'customerInfo.email': user.email }] } : { userId: user._id }).lean(),
         ClassBooking.find({ userId: user._id }).lean(),
         // Every visit on record, voided ones included: an export is the
         // member's whole data, not what the totals count.
         Attendance.find({ personId: user._id }).setOptions({ withVoided: true }).sort({ checkInAt: -1 }).lean(),
         Fingerprint.find({ personId: user._id }).select('fingerIndex enrolledByName enrolledDevice isActive createdAt updatedAt').lean(),
         // Enquiries keep the address as `emailAddress`.
-        user.email ? Contact.find({ emailAddress: user.email }).lean().catch(() => []) : []
+        ownsEmail ? Contact.find({ emailAddress: user.email }).lean().catch(() => []) : []
       ]);
 
       // Start from the sign-in view, then add back what is the member's own.
@@ -234,7 +336,8 @@ module.exports = {
 
       const payload = {
         exported_at: new Date().toISOString(),
-        note: 'A copy of the personal data this gym holds about you. Fingerprint templates are encrypted and not included; only the fact that they exist.',
+        note: 'A copy of the personal data this gym holds about you. Fingerprint templates are encrypted and not included; only the fact that they exist.'
+          + (user.email && !ownsEmail ? ' Your email address is not confirmed yet, so anything bought or asked as a guest under it is left out: confirm it from the link we emailed you and download again.' : ''),
         account,
         memberships: orders,
         class_bookings: bookings,

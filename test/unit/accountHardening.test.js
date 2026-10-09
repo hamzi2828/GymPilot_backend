@@ -81,3 +81,78 @@ test('the reset and welcome emails carry a name as text, never as markup', () =>
   for (const raw of ['evil.test/login">', '<b>', '<i>', '<w>']) assert.equal(welcome.includes(raw), false, raw);
   assert.ok(welcome.includes('p&lt;w&gt;&amp;&quot;&#39;'), 'a password with symbols reads back exactly');
 });
+
+// ---- "is this address really theirs?" (services/emailVerification.js) ------
+
+const verification = require('../../src/services/emailVerification');
+const { membershipsFromOrders } = require('../../src/attendance/services/peopleDirectory');
+
+test('only an explicit false makes an address unproven; a list of addresses is not an address', () => {
+  assert.equal(verification.emailIsVerified({ email: 'a@b.test', emailVerified: false }), false);
+  assert.equal(verification.emailIsVerified({ email: 'a@b.test', emailVerified: true }), true);
+  // An account from before the flag has no value, and nobody was cut off.
+  assert.equal(verification.emailIsVerified({ email: 'a@b.test' }), true);
+  assert.equal(verification.emailIsVerified(null), false);
+
+  for (const good of ['a@b.test', 'first.last+tag@sub.gym.co.uk']) assert.equal(verification.looksLikeEmail(good), true, good);
+  for (const bad of ['', 'a@b', 'a b@c.test', 'a@b.test, c@d.test', 'a@b.test,c@d.test', 'a@b.test;c@d.test', 'Ann <a@b.test>', '"a"@b.test', null, 12, { $ne: null }]) {
+    assert.equal(verification.looksLikeEmail(bad), false, String(bad));
+  }
+});
+
+test('a guest order is matched by address only for an account whose address is proven', () => {
+  const now = new Date('2026-06-15T12:00:00Z');
+  const guest = {
+    _id: 'o1',
+    userId: null,
+    customerInfo: { email: 'gina@gym.test' },
+    packageDetails: { name: 'Monthly' },
+    payment: { status: 'paid' },
+    subscription: { startDate: new Date('2026-06-01T00:00:00Z'), endDate: new Date('2026-07-01T00:00:00Z') },
+    status: 'active',
+    createdAt: new Date('2026-06-01T00:00:00Z')
+  };
+  const own = { ...guest, _id: 'o2', userId: 'u2', customerInfo: { email: 'someone@gym.test' } };
+  const statusOf = (user, options) => membershipsFromOrders([user], [guest, own], [], now, options).get(String(user._id)).status;
+
+  assert.equal(statusOf({ _id: 'u1', email: 'gina@gym.test', emailVerified: true }), 'active');
+  assert.equal(statusOf({ _id: 'u1', email: 'gina@gym.test' }), 'active', 'an account from before the flag');
+  assert.equal(statusOf({ _id: 'u1', email: 'gina@gym.test', emailVerified: false }), 'none');
+  // A projection without the flag, which the database says is unproven.
+  assert.equal(statusOf({ _id: 'u1', email: 'gina@gym.test' }, { unproven: new Set(['u1']) }), 'none');
+  // Orders under the account's own id are theirs whatever the address says.
+  assert.equal(statusOf({ _id: 'u2', email: 'gina@gym.test', emailVerified: false }), 'active');
+});
+
+test('the confirmation email and its page show what was typed as text, and the link changes nothing by itself', () => {
+  const { subject, html } = verification.confirmationEmail({
+    firstName: '<a href="https://evil.test">Click</a>',
+    siteName: 'Iron <b>Works</b>',
+    url: 'https://api.gym.test/user/verify-email?token=abc&tenant=iron'
+  });
+  assert.equal(subject, 'Confirm your email for Iron <b>Works</b>');
+  assert.equal(html.match(/<a /g).length, 1, 'one link, the gym\'s own');
+  assert.ok(html.includes('href="https://api.gym.test/user/verify-email?token=abc&amp;tenant=iron"'));
+  assert.equal(html.includes('<b>'), false);
+  assert.match(html, /ignore this email/);
+
+  const page = verification.confirmPage({ siteName: 'Iron <b>Works</b>', email: 'a"><script>x</script>@b.test', token: 'abc"><i>', slug: 'iron' });
+  assert.equal(page.includes('<script>'), false);
+  assert.equal(page.includes('<i>'), false);
+  assert.equal(page.includes('<b>'), false);
+  // A form that posts: opening the page is not confirming.
+  assert.match(page, /<form method="post" action="\/user\/verify-email\?tenant=iron"/);
+  assert.match(verification.invalidPage({ siteName: 'Gym' }), /invalid or has expired/);
+});
+
+test('the link points at the address the API was reached on, or the one it is pinned to', () => {
+  const req = { protocol: 'https', get: (name) => (name === 'host' ? 'api.gym.test' : undefined) };
+  assert.equal(verification.apiOrigin(req), 'https://api.gym.test');
+  process.env.API_PUBLIC_URL = 'https://api.pinned.test/';
+  try {
+    assert.equal(verification.apiOrigin(req), 'https://api.pinned.test');
+  } finally {
+    delete process.env.API_PUBLIC_URL;
+  }
+  assert.equal(verification.apiOrigin(null), '');
+});

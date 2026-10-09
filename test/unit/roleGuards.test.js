@@ -110,3 +110,22 @@ test('nobody creates an account above their own, or gives a front-desk grant the
   // An administrator creates and grants anything.
   assert.equal(guards.createRoleProblem({ actorRole: 'admin', actorPermissions: allowAll(), role: 'manager', rolePermissions: MANAGER, grants: { allowAttendanceApp: true } }), null);
 });
+
+test('reaching into another account holds the same line: admins by admins, nothing above your own', () => {
+  const reach = (args) => guards.reachProblem({ doing: 'sign out', ...args });
+  assert.match(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: otherAdmin, targetPermissions: allowAll() }), /Only an administrator can sign out an administrator/);
+  assert.match(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: manager, targetPermissions: MANAGER }), /more access than yours \(.+\), so ask an administrator to sign out this account/);
+  assert.equal(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: member, targetPermissions: NONE }), null);
+  assert.equal(reach({ actorRole: 'manager', actorPermissions: MANAGER, target: { _id: 'r1', role: 'receptionist' }, targetPermissions: RECEPTION }), null);
+  assert.equal(reach({ actorRole: 'admin', target: otherAdmin, targetPermissions: allowAll() }), null);
+  // A front-desk grant the actor lacks is reach too.
+  assert.match(
+    reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, actorGrants: {}, target: { _id: 'u9', role: 'user', allowAttendanceApp: true }, targetPermissions: NONE }),
+    /front-desk app/
+  );
+  assert.equal(
+    reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, actorGrants: { allowAttendanceApp: true }, target: { _id: 'u9', role: 'user', allowAttendanceApp: true }, targetPermissions: NONE }),
+    null
+  );
+  assert.equal(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: null }), null);
+});

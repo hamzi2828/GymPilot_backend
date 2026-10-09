@@ -49,6 +49,8 @@ function safeUser(user) {
     firstName: user.firstName,
     lastName: user.lastName,
     email: user.email,
+    // false until the address is confirmed (services/emailVerification.js).
+    emailVerified: user.emailVerified !== false,
     phone: user.phone || '',
     role: user.role,
     avatarUrl: user.avatarUrl || '',

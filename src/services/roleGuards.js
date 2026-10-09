@@ -168,11 +168,42 @@ function createRoleProblem({ actorRole, actorPermissions, actorGrants, role, rol
   return grantProblem({ actorRole, actorGrants, grants });
 }
 
+/**
+ * Doing something to somebody else's account that is not a change of role,
+ * status or existence but still reaches into it: signing it out everywhere,
+ * recording its owner's consent, vouching for its email address. The same
+ * two lines as everything above -- an administrator's account only by an
+ * administrator, and nothing on an account that reaches further than the
+ * actor's own (a tab at a higher level, or a front-desk grant they lack).
+ * `doing` words the refusal: "sign out", "record consent for".
+ *
+ * @param {{ actorRole, actorPermissions, actorGrants, target, targetPermissions, doing }} args
+ *   target carries role and the two front-desk grants; targetPermissions are
+ *   those of its role.
+ */
+function reachProblem({ actorRole, actorPermissions, actorGrants = {}, target, targetPermissions, doing = 'change' }) {
+  if (!target) return null;
+
+  if (isAdmin(target.role) && !isAdmin(actorRole)) {
+    return `Only an administrator can ${doing} an administrator.`;
+  }
+  if (isAdmin(actorRole)) return null;
+
+  const above = widerTab(actorPermissions, targetPermissions);
+  if (above) return `This account has more access than yours (${above}), so ask an administrator to ${doing} this account.`;
+
+  if (deskGrantBeyond(actorGrants, target)) {
+    return `This account can use the front-desk app and yours cannot, so ask an administrator to ${doing} this account.`;
+  }
+  return null;
+}
+
 module.exports = {
   ADMIN_SLUG,
   isAdmin,
   widerTab,
   deskGrantBeyond,
+  reachProblem,
   roleChangeProblem,
   statusChangeProblem,
   deleteProblem,

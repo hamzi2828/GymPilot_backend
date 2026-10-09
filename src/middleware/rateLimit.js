@@ -164,6 +164,29 @@ const passwordResetConfirmLimiter = rateLimit({
 });
 
 /**
+ * The "confirm your email" link: opening it and pressing its button. The
+ * token is 32 random bytes, so as with a reset this only makes guessing
+ * pointless.
+ */
+const emailVerifyLimiter = rateLimit({
+  ...SHARED,
+  windowMs: 15 * MINUTE,
+  max: 30,
+  message: 'Too many attempts. Please wait a few minutes and try again.'
+});
+
+/**
+ * Asking for a fresh confirmation link. Each one sends an email, so it is
+ * counted like a reset request.
+ */
+const emailVerifySendLimiter = rateLimit({
+  ...SHARED,
+  windowMs: HOUR,
+  max: 5,
+  message: 'Too many confirmation emails requested. Please wait an hour and try again.'
+});
+
+/**
  * Account creation from the public sign-up form.
  */
 const signupLimiter = rateLimit({
@@ -273,6 +296,8 @@ module.exports = {
   passwordResetLimiter,
   appPasswordResetLimiter,
   passwordResetConfirmLimiter,
+  emailVerifyLimiter,
+  emailVerifySendLimiter,
   signupLimiter,
   googleLoginLimiter,
   desktopLoginLimiter,

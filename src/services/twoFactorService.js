@@ -74,7 +74,9 @@ async function startChallenge(user) {
     challengeId,
     codeHash: hashCode(challengeId, code),
     expiresAt: new Date(Date.now() + CODE_TTL_MS),
-    attempts: 0
+    attempts: 0,
+    // Where the code is about to go (see verify).
+    sentTo: user.email
   };
   await user.save();
 
@@ -129,6 +131,12 @@ async function verify(challengeId, code) {
     throw error;
   }
 
+  // Whoever typed the code reads the mailbox it went to: that address is
+  // theirs (services/emailVerification.js). Only that address -- the
+  // account's may have been changed since the code was sent.
+  if (user.emailVerified === false && pending.sentTo && pending.sentTo === user.email) {
+    user.emailVerified = true;
+  }
   user.twoFactor.pending = null;
   await user.save();
   return user;

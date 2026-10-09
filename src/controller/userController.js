@@ -19,6 +19,7 @@ const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
 const { passwordMatches } = require('../services/passwordCheck');
 const { escapeHtml } = require('../templates/gymEmails');
+const verification = require('../services/emailVerification');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -192,11 +193,17 @@ const { passwordProblem, initialPassword, setPasswordHandler } = require('../ser
 // the response has gone (see forgotPassword), so it reports trouble in the
 // log, never to the caller.
 async function sendResetLink(user, email) {
-  // Raw token goes in the email; only its hash is stored.
+  // Raw token goes in the email; only its hash is stored -- and only while
+  // the account still has the address the link is going to. A reset through
+  // it later counts as proof of that address (resetPassword), so a link must
+  // never outlive a change of address made while it was being sent.
   const token = crypto.randomBytes(32).toString('hex');
-  user.passwordResetTokenHash = hashResetToken(token);
-  user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
-  await user.save();
+  const tokenHash = hashResetToken(token);
+  const stored = await User.updateOne(
+    { _id: user._id, email },
+    { $set: { passwordResetTokenHash: tokenHash, passwordResetExpiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000) } }
+  );
+  if (!stored.matchedCount) return;
 
   const siteName = await gymSiteName();
   const frontend = tenantOrigin();
@@ -220,9 +227,10 @@ async function sendResetLink(user, email) {
     // nobody received from sitting valid for an hour, and the
     // logged error is how an admin finds out SMTP is misconfigured.
     console.error('[auth] reset email failed for', email, '-', result.error);
-    user.passwordResetTokenHash = null;
-    user.passwordResetExpiresAt = null;
-    await user.save();
+    await User.updateOne(
+      { _id: user._id, passwordResetTokenHash: tokenHash },
+      { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } }
+    );
   }
 }
 
@@ -253,6 +261,12 @@ async function linkGoogleAccount(user, { googleId, picture }) {
   if (picture && user.avatarUrl !== picture) updates.avatarUrl = picture;
   const takeover = user.provider !== 'google' && !!user.password;
   if (takeover) updates.password = null;
+  // Google has checked the address, which is more than sign-up did.
+  if (user.emailVerified === false) {
+    updates.emailVerified = true;
+    updates.emailVerifyTokenHash = null;
+    updates.emailVerifyExpiresAt = null;
+  }
   if (!Object.keys(updates).length) return user;
 
   await User.updateOne(
@@ -565,8 +579,14 @@ const userController = {
                 return res.status(400).json({ message: problem });
             }
 
+            // One address: the confirmation link below is sent to it.
+            const normalisedEmail = String(email).toLowerCase().trim();
+            if (!verification.looksLikeEmail(normalisedEmail)) {
+                return res.status(400).json({ message: 'Please provide a valid email address' });
+            }
+
             // Check if user already exists
-            const existing = await User.findOne({ email: email.toLowerCase().trim() });
+            const existing = await User.findOne({ email: normalisedEmail });
             if (existing) {
                 return res.status(409).json({ message: 'Email already in use' });
             }
@@ -585,8 +605,12 @@ const userController = {
             const user = await User.create({
                 firstName: firstName.trim(),
                 lastName: lastName.trim(),
-                email: email.toLowerCase().trim(),
+                email: normalisedEmail,
                 password: hashed,
+                // Anybody can type any address here. Until its owner opens
+                // the link sent below, it claims nothing that was bought
+                // under it (services/emailVerification.js).
+                emailVerified: false,
             });
 
             await assignMemberCode(user);
@@ -594,6 +618,7 @@ const userController = {
             // The welcome email carries their username for the phone app,
             // which they are told nowhere else. Not waited for.
             afterResponse(() => notify.memberWelcome(user), 'welcome email');
+            afterResponse(() => verification.sendLink(user, { origin: verification.apiOrigin(req) }), 'confirmation email');
 
             // Sanitize output
             return res.status(201).json({ message: 'User created successfully', data: publicUserView(user) });
@@ -708,6 +733,8 @@ const userController = {
                     provider: 'google',
                     googleId: googleId || null,
                     avatarUrl: picture || null,
+                    // Google has checked the address.
+                    emailVerified: true,
                 });
                 // A new member, as from the sign-up form -- with no password
                 // yet, which the phone app needs.
@@ -963,6 +990,10 @@ const userController = {
             user.passwordChangedAt = new Date();
             await user.save();
 
+            // The link only ever went to the account's address (sendResetLink),
+            // so whoever used it reads that mailbox: the address is theirs.
+            await verification.markVerified(user._id, user.email);
+
             return res.status(200).json({
                 message: 'Password updated. You can now sign in with your new password.'
             });
@@ -1075,6 +1106,8 @@ const userController = {
                     provider: 'google',
                     googleId: googleId || null,
                     avatarUrl: picture || null,
+                    // Google has checked the address.
+                    emailVerified: true,
                 });
                 await assignMemberCode(user);
                 afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
@@ -1139,26 +1172,54 @@ const userController = {
             }
             if (typeof safeUpdates.email === 'string') safeUpdates.email = safeUpdates.email.toLowerCase().trim();
 
+            // What the request does to the address: nothing (not sent, or
+            // the one already on the account), removes it, or changes it.
+            //
             // An empty box is "remove my email". The model reads '' as no
             // email at all, so a $set of it quietly kept the old address while
             // answering "updated"; it is an $unset, for an account that may
             // go without one (emailRemovalProblem).
             let removedEmail = false;
-            if (safeUpdates.email === '' || safeUpdates.email === null) {
-                delete safeUpdates.email;
+            let changedEmail = false;
+            if (safeUpdates.email !== undefined) {
                 const me = await User.findById(currentUser.id).select('email role employment.isStaff twoFactor.enabled provider googleId password').lean();
-                if (me && me.email) {
-                    const problem = emailRemovalProblem(me);
-                    if (problem) return res.status(409).json({ message: problem });
-                    removedEmail = true;
+                if (!me) return res.status(404).json({ message: 'User not found' });
+
+                if (safeUpdates.email === '' || safeUpdates.email === null) {
+                    delete safeUpdates.email;
+                    if (me.email) {
+                        const problem = emailRemovalProblem(me);
+                        if (problem) return res.status(409).json({ message: problem });
+                        removedEmail = true;
+                    }
+                } else if (safeUpdates.email !== me.email) {
+                    if (!verification.looksLikeEmail(safeUpdates.email)) {
+                        return res.status(400).json({ message: 'Please provide a valid email address' });
+                    }
+                    changedEmail = true;
                 }
             }
             if (!Object.keys(safeUpdates).length && !removedEmail) {
                 return res.status(400).json({ message: 'Nothing to update' });
             }
             const update = {};
-            if (Object.keys(safeUpdates).length) update.$set = safeUpdates;
+            if (Object.keys(safeUpdates).length) update.$set = { ...safeUpdates };
             if (removedEmail) update.$unset = { email: 1 };
+            if (changedEmail || removedEmail) {
+                // A new address is nobody's until its owner says so: it is
+                // sent a link, and claims no guest order before that
+                // (services/emailVerification.js). Links already out -- a
+                // reset, a confirmation -- went to the old address, and stop
+                // working with it.
+                update.$set = {
+                    ...update.$set,
+                    ...(changedEmail ? { emailVerified: false } : {}),
+                    emailVerifyTokenHash: null,
+                    emailVerifyExpiresAt: null,
+                    passwordResetTokenHash: null,
+                    passwordResetExpiresAt: null
+                };
+            }
             
             const updatedUser = await User.findByIdAndUpdate(
                 currentUser.id,
@@ -1170,14 +1231,23 @@ const userController = {
                 return res.status(404).json({ message: 'User not found' });
             }
 
+            if (changedEmail) {
+                afterResponse(() => verification.sendLink(updatedUser, { origin: verification.apiOrigin(req) }), 'confirmation email');
+            }
+
             // Remove sensitive data from response
-            res.status(200).json({
-                message: removedEmail
-                    ? `Your email address was removed. Sign in with your username${updatedUser.username ? `, ${updatedUser.username},` : ''} from now on.`
-                    : 'User updated successfully',
-                data: publicUserView(updatedUser)
-            });
+            let message = 'User updated successfully';
+            if (removedEmail) {
+                message = `Your email address was removed. Sign in with your username${updatedUser.username ? `, ${updatedUser.username},` : ''} from now on.`;
+            } else if (changedEmail) {
+                message = `Saved. We are sending a link to ${updatedUser.email}: open it to confirm the address is yours.`;
+            }
+            res.status(200).json({ message, data: publicUserView(updatedUser) });
         } catch (error) {
+            // Somebody else's address: said as the sign-up form says it.
+            if (error && error.code === 11000) {
+                return res.status(409).json({ message: duplicateMessage(error) });
+            }
             console.error('Update user error:', error);
             res.status(400).json({ 
                 message: 'Error updating user', 
