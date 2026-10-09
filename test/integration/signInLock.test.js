@@ -282,3 +282,45 @@ test('a code signs in once, even sent twice together, and an expired one not at 
   assert.equal((await submit({ $ne: null }, '123456')).statusCode, 401, 'a query in place of an id finds nothing');
   assert.equal((await submit(second.challengeId, '12')).statusCode, 400);
 });
+
+// ---- what a refused sign-in gives away -------------------------------------
+
+test('an account that only ever used Google is answered like any wrong password', async () => {
+  const gus = await inGym(() => User.create({ firstName: 'Gus', lastName: 'Google', email: 'gus@lock.test', provider: 'google', googleId: 'google-gus', password: null }));
+  const unknown = await login('nobody@lock.test', PASSWORD);
+  for (const name of [gus.email, gus.username]) {
+    const res = await login(name, PASSWORD);
+    assert.equal(res.statusCode, 401);
+    assert.deepEqual(res.body, unknown.body, 'nothing says the address is a member who uses Google');
+  }
+});
+
+test('a Google sign-in finished in a browser that did not start it is refused before Google is asked anything', async () => {
+  const oauthState = h.src('services/oauthState');
+  Object.assign(process.env, { GOOGLE_CLIENT_ID: 'client.test', GOOGLE_CLIENT_SECRET: 'secret.test', GOOGLE_REDIRECT_URI: 'https://api.gympilot.test/auth/google/callback' });
+  const callback = async ({ state, cookie }) => {
+    const res = h.fakeRes();
+    res.type = () => res;
+    res.cleared = [];
+    res.clearCookie = (name, options) => res.cleared.push({ name, options });
+    await inGym(() => users.googleOAuthCallback({ query: { code: 'attackers-code', state }, headers: cookie ? { cookie: `${oauthState.COOKIE_NAME}=${cookie}` } : {}, protocol: 'https' }, res));
+    return res;
+  };
+  try {
+    // The attacker's own, genuine state -- but the victim's browser has no cookie for it.
+    const theirs = oauthState.issue({ returnUrl: '/', tenant: gym.slug });
+    for (const attempt of [
+      { state: theirs.state },
+      { state: theirs.state, cookie: oauthState.issue({ tenant: gym.slug }).nonce },
+      { state: encodeURIComponent(JSON.stringify({ returnUrl: '/', tenant: gym.slug })), cookie: 'anything' },
+      { state: oauthState.issue({ returnUrl: '/', tenant: 'another-gym' }).state, cookie: theirs.nonce }
+    ]) {
+      const res = await callback(attempt);
+      assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+      assert.match(res.body, /did not start in this browser/);
+      assert.equal(res.cleared.length, 1, 'the cookie is spent either way');
+    }
+  } finally {
+    for (const key of ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI']) delete process.env[key];
+  }
+});

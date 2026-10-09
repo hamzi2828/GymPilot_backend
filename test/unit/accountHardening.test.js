@@ -224,3 +224,105 @@ test('a sent email is logged by recipient, never by subject', async () => {
   assert.ok(logged[0].includes('sam@gym.test'));
   assert.equal(logged[0].includes('482913'), false, 'whatever a subject carries stays out of the log');
 });
+
+// ---- what a session token must carry (middleware/auth.js) ------------------
+
+const jwt = require('jsonwebtoken');
+const auth = require('../../src/middleware/auth');
+
+test('a token that names no account or no gym is not a session', async () => {
+  const run = async (claims, tenant) => {
+    const res = fakeRes();
+    let passed = false;
+    const token = jwt.sign(claims, process.env.JWT_SECRET);
+    await auth({ headers: { authorization: `Bearer ${token}` }, tenant }, res, () => {
+      passed = true;
+    });
+    return { res, passed };
+  };
+  const gym = { _id: '000000000000000000000001' };
+
+  for (const claims of [
+    { email: 'a@b.test', role: 'admin', tid: '000000000000000000000001' }, // no account
+    { id: '000000000000000000000009', role: 'admin' }, // no gym
+    { role: 'admin' },
+    { id: '', tid: '' }
+  ]) {
+    for (const tenant of [gym, undefined]) {
+      const { res, passed } = await run(claims, tenant);
+      assert.equal(passed, false, JSON.stringify(claims));
+      assert.equal(res.statusCode, 401);
+      assert.equal(res.body.code, 'TOKEN_INVALID');
+    }
+  }
+
+  // The helpers optionalAuth shares hold the same line.
+  assert.equal(auth.tenantMismatch({ id: 'u1' }, { tenant: gym }), true);
+  assert.equal(auth.tenantMismatch({ id: 'u1', tid: '000000000000000000000001' }, { tenant: gym }), false);
+  assert.equal(auth.tenantMismatch({ id: 'u1', tid: '000000000000000000000002' }, { tenant: gym }), true);
+  assert.equal(typeof (await auth.sessionProblem({ tid: '000000000000000000000001' })), 'string');
+  assert.equal(typeof (await auth.sessionProblem(null)), 'string');
+});
+
+// ---- the state of a Google sign-in (services/oauthState.js) ----------------
+
+const oauthState = require('../../src/services/oauthState');
+
+test('a Google sign-in can only be finished by the browser that started it, for the gym that started it', () => {
+  const { state, nonce } = oauthState.issue({ returnUrl: '/packages?plan=gold%20plus&x=1', platformType: 'web', tenant: 'iron-works' });
+  // As the callback and the tenant resolver receive it: the URL carried it
+  // encoded once more, and Express took that layer off.
+  assert.deepEqual(oauthState.verify(state, nonce, 'iron-works'), { returnUrl: '/packages?plan=gold%20plus&x=1', platformType: 'web', tenant: 'iron-works' });
+  // The resolver still finds the gym in it.
+  assert.equal(JSON.parse(decodeURIComponent(state)).tenant, 'iron-works');
+
+  // Another browser: no cookie, or the cookie of a sign-in of its own.
+  assert.equal(oauthState.verify(state, '', 'iron-works'), null);
+  assert.equal(oauthState.verify(state, oauthState.issue({ tenant: 'iron-works' }).nonce, 'iron-works'), null);
+  // The request resolved to another gym than the one that was signed.
+  assert.equal(oauthState.verify(state, nonce, 'other-gym'), null);
+  assert.equal(oauthState.verify(state, nonce, null), null);
+
+  // Anything altered on the way: the gym, the return address, the nonce.
+  const tamper = (change) => encodeURIComponent(JSON.stringify({ ...JSON.parse(decodeURIComponent(state)), ...change }));
+  assert.equal(oauthState.verify(tamper({ tenant: 'other-gym' }), nonce, 'other-gym'), null);
+  assert.equal(oauthState.verify(tamper({ returnUrl: '/admin' }), nonce, 'iron-works'), null);
+  assert.equal(oauthState.verify(tamper({ nonce: 'mine' }), 'mine', 'iron-works'), null);
+  // What the old, unsigned state looked like, and plain junk.
+  assert.equal(oauthState.verify(encodeURIComponent(JSON.stringify({ returnUrl: '/', tenant: 'iron-works' })), nonce, 'iron-works'), null);
+  for (const junk of ['', '/', '{}', 'not json', '%E0%A4%A', undefined, null]) assert.equal(oauthState.verify(junk, nonce, 'iron-works'), null);
+
+  // The cookie: this browser only, the sign-in routes only, not for script.
+  assert.equal(oauthState.readCookie({ headers: { cookie: `a=1; ${oauthState.COOKIE_NAME}=${nonce}; b=2` } }), nonce);
+  assert.equal(oauthState.readCookie({ headers: {} }), '');
+  const options = oauthState.cookieOptions({ protocol: 'https' });
+  assert.deepEqual({ httpOnly: options.httpOnly, sameSite: options.sameSite, secure: options.secure, path: options.path }, { httpOnly: true, sameSite: 'lax', secure: true, path: '/auth/google' });
+});
+
+test('starting a Google sign-in leaves the cookie its state is tied to', async () => {
+  const env = { id: process.env.GOOGLE_CLIENT_ID, uri: process.env.GOOGLE_REDIRECT_URI };
+  process.env.GOOGLE_CLIENT_ID = 'client-id.apps.googleusercontent.test';
+  process.env.GOOGLE_REDIRECT_URI = 'https://api.gym.test/auth/google/callback';
+  const res = fakeRes();
+  const cookies = [];
+  res.cookie = (name, value, options) => cookies.push({ name, value, options });
+  res.redirect = (url) => {
+    res.redirectedTo = url;
+    return res;
+  };
+  res.send = res.json;
+  try {
+    await users.startGoogleOAuth({ headers: {}, protocol: 'https', query: { returnUrl: '/timetable' } }, res);
+  } finally {
+    for (const [key, name] of [['id', 'GOOGLE_CLIENT_ID'], ['uri', 'GOOGLE_REDIRECT_URI']]) {
+      if (env[key] === undefined) delete process.env[name];
+      else process.env[name] = env[key];
+    }
+  }
+  assert.equal(cookies.length, 1);
+  assert.equal(cookies[0].name, oauthState.COOKIE_NAME);
+  const sent = new URL(res.redirectedTo).searchParams.get('state');
+  // No gym in context in a unit test: the state is for "no gym", and only that.
+  assert.deepEqual(oauthState.verify(sent, cookies[0].value, null), { returnUrl: '/timetable', platformType: '', tenant: null });
+  assert.equal(oauthState.verify(sent, 'another-browser', null), null);
+});

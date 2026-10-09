@@ -21,9 +21,12 @@ const { currentPasswordRefusal } = require('../services/passwordCheck');
 const { escapeHtml } = require('../templates/gymEmails');
 const verification = require('../services/emailVerification');
 const signInLock = require('../services/signInLock');
+const oauthState = require('../services/oauthState');
 
-// One answer for a name nobody has, a wrong password and an account whose
-// password is paused after too many wrong ones (services/signInLock.js).
+// One answer for a name nobody has, a wrong password, an account that has
+// no password because it only ever used Google, and one whose password is
+// paused after too many wrong ones (services/signInLock.js). Any other
+// wording for one of them tells whoever is asking that the account exists.
 const SIGN_IN_REJECTED = `That email or username and password do not match. ${signInLock.PAUSE_NOTE}`;
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
@@ -650,9 +653,12 @@ const userController = {
             const platformType = req.query.platformType || '';
             // The gym rides along in `state`: Google sends the callback to the
             // API's own address, which says nothing about which site started
-            // the sign-in. See platform/middleware/tenantFromPayload.js.
-            const stateData = JSON.stringify({ returnUrl, platformType, tenant: currentTenantSlug() });
-            const state = encodeURIComponent(stateData);
+            // the sign-in. See platform/middleware/tenantFromPayload.js. It is
+            // signed, and tied to this browser by a cookie, so the sign-in can
+            // only be finished where it was started (services/oauthState.js).
+            const issued = oauthState.issue({ returnUrl, platformType, tenant: currentTenantSlug() });
+            res.cookie(oauthState.COOKIE_NAME, issued.nonce, oauthState.cookieOptions(req));
+            const state = encodeURIComponent(issued.state);
             const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}&access_type=offline&include_granted_scopes=true&prompt=consent&state=${state}`;
 
             return res.redirect(authUrl);
@@ -680,15 +686,16 @@ const userController = {
                 return res.status(500).send('Server misconfiguration: missing Google OAuth envs');
             }
 
-            // Parse state to get returnUrl and platformType
-            let returnUrl = '/';
-            try {
-                const stateData = JSON.parse(decodeURIComponent(state || '{}'));
-                returnUrl = stateData.returnUrl || '/';
-            } catch (parseError) {
-                // Fallback to treating state as just the returnUrl for backward compatibility
-                returnUrl = decodeURIComponent(state || '/');
+            // The state must be the one this server wrote, for this gym, and
+            // come back in the browser that was given its cookie -- or this
+            // is somebody else's sign-in being finished here
+            // (services/oauthState.js). Checked before the code is spent.
+            const stateData = oauthState.verify(state, oauthState.readCookie(req), currentTenantSlug());
+            res.clearCookie(oauthState.COOKIE_NAME, { path: oauthState.cookieOptions(req).path });
+            if (!stateData) {
+                return res.status(400).type('text/plain').send('This sign-in did not start in this browser, or took too long. Please go back to the sign-in page and try again.');
             }
+            const returnUrl = stateData.returnUrl || '/';
 
             const frontendOrigin = tenantOrigin();
 
@@ -822,15 +829,13 @@ const userController = {
 
             const user = await User.findOne(filter);
 
-            // Prevent password login for accounts created via Google
-            if (user && !user.password) {
-                return res.status(401).json({ message: 'This account uses Google login. Please sign in with Google.' });
-            }
-
             // One of the account's ten tries is used, then the password is
             // compared: a name nobody has costs the same bcrypt work and
             // gets the same answer as a wrong password or a paused account
-            // (services/signInLock.js, services/passwordCheck.js).
+            // (services/signInLock.js, services/passwordCheck.js). So does
+            // an account with no password -- one made with Google. Saying
+            // "this account uses Google" before any password was checked
+            // told anybody who asked which addresses are members.
             if (!(await signInLock.signInPasswordMatches(user, password))) {
                 return res.status(401).json({ message: SIGN_IN_REJECTED });
             }
