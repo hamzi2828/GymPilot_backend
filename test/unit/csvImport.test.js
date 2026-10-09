@@ -153,3 +153,21 @@ test('an unreadable date says which cell, what was in it and how to write it', (
     'Could not read the membership start date "30/09/26". Write the year in full, like 30/09/2026 or 2026-09-30'
   );
 });
+
+/* ---------------------------- the time budget ---------------------------- */
+
+test('an import stops starting rows after 40 seconds unless IMPORT_BUDGET_MS says otherwise', () => {
+  const { importBudgetMs } = require('../../src/controller/userImportController');
+  assert.equal(importBudgetMs({}), 40000);
+  assert.equal(importBudgetMs({ IMPORT_BUDGET_MS: '240000' }), 240000);
+  for (const bad of ['', '0', '-5', 'soon']) assert.equal(importBudgetMs({ IMPORT_BUDGET_MS: bad }), 40000, bad);
+});
+
+test('a run that stopped says how much is left and to upload the same file again', () => {
+  const { stoppedNote } = require('../../src/controller/userImportController');
+  assert.equal(
+    stoppedNote({ dryRun: false, remaining: 4786 }),
+    'Stopped before the time limit with 4786 row(s) still to do. Upload the same file again to carry on — members already imported are skipped, so nobody is added twice.'
+  );
+  assert.match(stoppedNote({ dryRun: true, remaining: 12 }), /^The preview stopped before the time limit: 12 row\(s\) were not checked\./);
+});

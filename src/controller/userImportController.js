@@ -11,18 +11,44 @@
 // "forgot password" when they first sign in -- or, with no email address
 // (which is allowed: a row needs an email OR a phone number), staff set one
 // for them from Users -> Set password and they sign in with their username.
+//
+// A big file takes more than one request. The import stops at its time
+// budget and says how many rows are left; the same file uploaded again
+// carries on, skipping whoever is already in and giving a membership to
+// anyone an earlier upload created without theirs.
 
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const User = require('../models/user');
 const Package = require('../gymfolio/models/packageModel');
+const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const { createManualOrder } = require('../gymfolio/services/membershipService');
-const { checkLimit } = require('../platform/planLimits');
+const { checkLimit, LIMIT_KINDS } = require('../platform/planLimits');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { oneLine } = require('../services/memberFields');
 const T = require('../attendance/services/timeUtils');
 
 const MAX_ROWS = 5000;
+
+// How long an import goes on starting new rows. Each row is a password hash
+// and a dozen round trips, so a big file cannot be done in one request: the
+// API runs as serverless functions with a time limit, and a run killed by it
+// answers nothing at all. IMPORT_BUDGET_MS must sit below the function's
+// limit by a few seconds; the default suits a 60-second function, like
+// DAILY_JOB_BUDGET_MS (platform/jobs.js).
+const DEFAULT_BUDGET_MS = 40000;
+function importBudgetMs(env = process.env) {
+  const ms = parseInt(env.IMPORT_BUDGET_MS, 10);
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_BUDGET_MS;
+}
+
+/** What staff are told when a run stops at its budget: what is left, and what to do. */
+function stoppedNote(report) {
+  if (report.dryRun) {
+    return `The preview stopped before the time limit: ${report.remaining} row(s) were not checked. Importing takes them in turn — upload the file again each time it stops.`;
+  }
+  return `Stopped before the time limit with ${report.remaining} row(s) still to do. Upload the same file again to carry on — members already imported are skipped, so nobody is added twice.`;
+}
 
 const COLUMNS = {
   firstName: ['firstname', 'first', 'givenname', 'forename'],
@@ -247,12 +273,48 @@ function splitFullName(value) {
   return { firstName: words[0] || '', lastName: words.slice(1).join(' ') };
 }
 
-function escapeRegex(text) {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function randomPassword() {
   return crypto.randomBytes(12).toString('base64url');
+}
+
+// Without an email, a member is known by their name on their phone number.
+function phoneNameKey(phone, firstName, lastName) {
+  return `${phone}|${firstName} ${lastName}`.toLowerCase();
+}
+
+/**
+ * The accounts the file's rows already have, read once for the whole file:
+ * `{ byEmail, byPhoneName }`, each to `{ _id, needsMembership }`. Asked row
+ * by row, a second upload of a large file spent its whole time on the rows
+ * the first had done and never reached the rest.
+ *
+ * `needsMembership`: a member account with no order of any kind, under its
+ * id or its email. That is what an import leaves behind when it made the
+ * account but not the membership, and the only account a row adds to.
+ */
+async function existingAccounts(people) {
+  const emails = [...new Set(people.map((p) => p.email).filter(Boolean))];
+  const phones = [...new Set(people.filter((p) => !p.email && p.phone).map((p) => p.phone))];
+  const either = [];
+  if (emails.length) either.push({ email: { $in: emails } });
+  if (phones.length) either.push({ phone: { $in: phones } });
+  const users = either.length ? await User.find({ $or: either }).select('email phone firstName lastName role').lean() : [];
+
+  const theirEmails = users.map((u) => u.email).filter(Boolean);
+  const [orderedById, orderedByEmail] = await Promise.all([
+    users.length ? PackageOrder.distinct('userId', { userId: { $in: users.map((u) => u._id) } }) : [],
+    theirEmails.length ? PackageOrder.distinct('customerInfo.email', { 'customerInfo.email': { $in: theirEmails } }) : []
+  ]);
+  const hasOrder = new Set([...orderedById, ...orderedByEmail].map(String));
+
+  const byEmail = new Map();
+  const byPhoneName = new Map();
+  for (const u of users) {
+    const account = { _id: u._id, needsMembership: u.role === 'user' && !hasOrder.has(String(u._id)) && !hasOrder.has(String(u.email || '')) };
+    if (u.email) byEmail.set(u.email, account);
+    if (u.phone) byPhoneName.set(phoneNameKey(u.phone, u.firstName, u.lastName), account);
+  }
+  return { byEmail, byPhoneName };
 }
 
 module.exports = {
@@ -270,6 +332,8 @@ module.exports = {
         return res.status(400).json({ success: false, message: 'Attach a CSV file' });
       }
       const dryRun = req.body && (req.body.dryRun === '1' || req.body.dryRun === 'true');
+      const startedAt = Date.now();
+      const budgetMs = importBudgetMs();
 
       const rows = parseCsv(req.file.buffer.toString('utf8'));
       if (rows.length < 2) return res.status(400).json({ success: false, message: 'The file has no data rows' });
@@ -293,6 +357,9 @@ module.exports = {
         total: rows.length - 1,
         created: 0,
         memberships: 0,
+        // Accounts that were already here with no membership at all and were
+        // given the one on their row (counted in `memberships` too).
+        completed: 0,
         withoutEmail: 0,
         inactive: 0,
         // Which of the recognised columns this file has, so the preview can
@@ -300,15 +367,39 @@ module.exports = {
         columns: Object.keys(columns),
         skipped: [],
         errors: [],
+        // Whether the run stopped at its time budget, how many rows it got
+        // through and how many are still to do (uploading the file again
+        // carries on).
+        stopped: false,
+        processed: rows.length - 1,
+        remaining: 0,
         dryRun: !!dryRun
       };
       const cell = (row, field) => (columns[field] === undefined ? '' : String(row[columns[field]] || '').trim());
       const seenEmails = new Set();
       const seenPhoneNames = new Set();
 
+      const already = await existingAccounts(rows.slice(1).map((row) => ({ email: cell(row, 'email').toLowerCase(), phone: cell(row, 'phone') })));
+      const plan = await checkLimit('members');
+      // How many more members the gym's plan has room for; counted here as
+      // rows come in rather than asked of the database for every row.
+      let room = plan.limit ? plan.limit - plan.used : Infinity;
+
       for (let i = 1; i < rows.length; i += 1) {
         const row = rows[i];
         const line = i + 1;
+
+        // Out of time: answer now, while there is still time to answer. Not
+        // before this run has added somebody, so that every upload of the
+        // file moves it on.
+        if (report.created + report.completed > 0 && Date.now() - startedAt >= budgetMs) {
+          report.stopped = true;
+          report.remaining = rows.length - i;
+          report.processed = report.total - report.remaining;
+          report.errors.unshift({ line, email: '', name: 'not finished', reason: stoppedNote(report) });
+          break;
+        }
+
         const email = cell(row, 'email').toLowerCase();
         const phone = cell(row, 'phone');
         // The separate name cells win; a single full-name cell fills in
@@ -331,47 +422,50 @@ module.exports = {
             continue;
           }
 
+          // Without an email, the same name on the same phone number is the
+          // same person: a second run of the same file must not make
+          // everybody twice. (A family sharing one phone has different
+          // names, so they still come in.)
+          const phoneName = phoneNameKey(phone, firstName, lastName);
           if (email) {
             if (seenEmails.has(email)) {
               report.skipped.push({ line, email, name, reason: 'Duplicate email in the file' });
               continue;
             }
             seenEmails.add(email);
-
-            if (await User.exists({ email })) {
-              report.skipped.push({ line, email, name, reason: 'An account with this email already exists' });
-              continue;
-            }
           } else {
-            // Without an email, the same name on the same phone number is
-            // the same person: a second run of the same file must not make
-            // everybody twice. (A family sharing one phone has different
-            // names, so they still come in.)
-            const key = `${phone}|${name.toLowerCase()}`;
-            if (seenPhoneNames.has(key)) {
+            if (seenPhoneNames.has(phoneName)) {
               report.skipped.push({ line, email, name, reason: 'Duplicate name and phone in the file' });
               continue;
             }
-            seenPhoneNames.add(key);
-
-            const same = await User.exists({
-              phone,
-              firstName: new RegExp(`^${escapeRegex(firstName)}$`, 'i'),
-              lastName: new RegExp(`^${escapeRegex(lastName)}$`, 'i')
-            });
-            if (same) {
-              report.skipped.push({ line, email, name, reason: 'A member with this name and phone number already exists' });
-              continue;
-            }
+            seenPhoneNames.add(phoneName);
           }
 
-          let active = parseActive(cell(row, 'active'));
+          const packageName = cell(row, 'package');
+          const pkg = packageName ? packageByName.get(packageName.toLowerCase()) : null;
+
+          // Already here. Skipped -- unless the account has no membership of
+          // any kind and this row names one: then the row finishes what an
+          // earlier import started (its membership failed, the run was cut
+          // off after the account was made, or the package did not exist
+          // yet). Skipping those left them without a membership for good.
+          const account = (email ? already.byEmail.get(email) : already.byPhoneName.get(phoneName)) || null;
+          const alreadyHere = email ? 'An account with this email already exists' : 'A member with this name and phone number already exists';
+          if (account && !(pkg && account.needsMembership)) {
+            report.skipped.push({ line, email, name, reason: alreadyHere });
+            continue;
+          }
+          if (packageName && !pkg) {
+            report.errors.push({ line, email, name, reason: `No package called "${packageName}" — the member is created without a membership` });
+          }
+
+          let active = account ? true : parseActive(cell(row, 'active'));
           if (active === null) {
             report.errors.push({ line, email, name, reason: `Could not read "${cell(row, 'active')}" as active or inactive — imported as active` });
             active = true;
           }
 
-          const joinedCell = cell(row, 'joinedAt');
+          const joinedCell = account ? '' : cell(row, 'joinedAt');
           const joinedAt = joinedCell ? parseDate(joinedCell, 'start') : null;
           if (joinedCell && !joinedAt) {
             report.errors.push({ line, email, name, reason: `${dateProblem('joining date', joinedCell)} — today is used` });
@@ -381,12 +475,6 @@ module.exports = {
           const discount = discountCell ? Number(discountCell.replace(/[^0-9.\-]/g, '')) : 0;
           if (discountCell && !(Number.isFinite(discount) && discount >= 0)) {
             report.errors.push({ line, email, name, reason: `Could not read the discount "${discountCell}" — none applied` });
-          }
-
-          const packageName = cell(row, 'package');
-          const pkg = packageName ? packageByName.get(packageName.toLowerCase()) : null;
-          if (packageName && !pkg) {
-            report.errors.push({ line, email, name, reason: `No package called "${packageName}" — the member is created without a membership` });
           }
 
           // The membership's dates, when there is one to make: access from
@@ -408,91 +496,121 @@ module.exports = {
             continue;
           }
 
-          const dobCell = cell(row, 'dateOfBirth');
+          const dobCell = account ? '' : cell(row, 'dateOfBirth');
           const dob = parseDate(dobCell);
           if (dobCell && !dob) {
             report.errors.push({ line, email, name, reason: `${dateProblem('date of birth', dobCell)} — left blank` });
           }
 
-          const limit = await checkLimit('members');
-          if (!limit.ok) {
-            report.skipped.push({ line, email, name, reason: limit.message });
+          if (!account && room <= 0) {
+            report.skipped.push({ line, email, name, reason: plan.message || `This gym's plan allows up to ${plan.limit} ${LIMIT_KINDS.members.label}. Upgrade the plan to add more.` });
             continue;
           }
 
           if (dryRun) {
-            report.created += 1;
-            if (!email) report.withoutEmail += 1;
-            if (!active) report.inactive += 1;
+            if (account) {
+              report.completed += 1;
+              account.needsMembership = false;
+            } else {
+              report.created += 1;
+              room -= 1;
+              if (!email) report.withoutEmail += 1;
+              if (!active) report.inactive += 1;
+              already.byPhoneName.set(phoneName, { needsMembership: false });
+            }
             if (pkg) report.memberships += 1;
             continue;
           }
 
-          const memberCode = cell(row, 'memberCode');
-          const codeTaken = memberCode ? await User.exists({ memberCode }) : false;
-          if (memberCode && codeTaken) {
-            report.errors.push({ line, email, name, reason: `Member code ${memberCode} is already in use — a new one will be assigned` });
-          }
+          let user = null;
+          if (account) {
+            // Read again, now: another upload of the same file may have got
+            // to this member since the list was read.
+            user = await User.findById(account._id);
+            account.needsMembership = false;
+            if (!user || (await PackageOrder.exists({ userId: user._id }))) {
+              report.skipped.push({ line, email, name, reason: alreadyHere });
+              continue;
+            }
+          } else {
+            const memberCode = cell(row, 'memberCode');
+            const codeTaken = memberCode ? await User.exists({ memberCode }) : false;
+            if (memberCode && codeTaken) {
+              report.errors.push({ line, email, name, reason: `Member code ${memberCode} is already in use — a new one will be assigned` });
+            }
 
-          // A quoted cell can hold line breaks; the desk's address is one line.
-          const address = oneLine(cell(row, 'address')).slice(0, 300);
-          const hashed = await bcrypt.hash(randomPassword(), await bcrypt.genSalt(10));
-          const user = await User.create({
-            firstName,
-            lastName,
-            email: email || undefined,
-            password: hashed,
-            role: 'user',
-            phone: phone || null,
-            dateOfBirth: dob,
-            gender: cell(row, 'gender') || null,
-            // One line, as the desk types it, in the account's primary
-            // address -- the shape the member's own address book uses.
-            addresses: address ? [{ label: 'primary', isDefault: true, address }] : [],
-            memberCode: memberCode && !codeTaken ? memberCode : null,
-            isActive: active,
-            // Their real joining date from the old system, so this month's
-            // "new members" is not everybody who was ever imported.
-            ...(joinedAt ? { createdAt: joinedAt } : {})
-          });
-          // The old system's ID when it had one that is free; otherwise the
-          // next in the gym's own series, as any new member gets.
-          if (!user.memberCode) await assignMemberCode(user);
-          report.created += 1;
-          if (!email) report.withoutEmail += 1;
-          if (!active) report.inactive += 1;
+            // A quoted cell can hold line breaks; the desk's address is one line.
+            const address = oneLine(cell(row, 'address')).slice(0, 300);
+            const hashed = await bcrypt.hash(randomPassword(), await bcrypt.genSalt(10));
+            user = await User.create({
+              firstName,
+              lastName,
+              email: email || undefined,
+              password: hashed,
+              role: 'user',
+              phone: phone || null,
+              dateOfBirth: dob,
+              gender: cell(row, 'gender') || null,
+              // One line, as the desk types it, in the account's primary
+              // address -- the shape the member's own address book uses.
+              addresses: address ? [{ label: 'primary', isDefault: true, address }] : [],
+              memberCode: memberCode && !codeTaken ? memberCode : null,
+              isActive: active,
+              // Their real joining date from the old system, so this month's
+              // "new members" is not everybody who was ever imported.
+              ...(joinedAt ? { createdAt: joinedAt } : {})
+            });
+            // The old system's ID when it had one that is free; otherwise the
+            // next in the gym's own series, as any new member gets.
+            if (!user.memberCode) await assignMemberCode(user);
+            report.created += 1;
+            room -= 1;
+            if (!email) report.withoutEmail += 1;
+            if (!active) report.inactive += 1;
+            // A later row with no email but this name and phone is this member.
+            already.byPhoneName.set(phoneName, { _id: user._id, needsMembership: false });
+          }
 
           if (pkg) {
             const amount = cell(row, 'amount');
-            await createManualOrder({
-              user,
-              pkg,
-              paymentMethod: 'cash',
-              markPaid: truthy(cell(row, 'paid'), true),
-              startDate: start || undefined,
-              endDate: end || undefined,
-              amountOverride: amount || undefined,
-              discountAmount: Number.isFinite(discount) && discount > 0 ? discount : 0,
-              discountNote: Number.isFinite(discount) && discount > 0 ? 'Imported from CSV' : '',
-              // These are existing members moving over from another system:
-              // they joined (and paid any joining fee) there. Charging it here
-              // would file part of the imported amount as admission money.
-              chargeJoiningFee: false,
-              notes: cell(row, 'notes') || `Imported from CSV by ${req.user && req.user.email}`,
-              by: req.user && req.user.email
-            });
+            try {
+              await createManualOrder({
+                user,
+                pkg,
+                paymentMethod: 'cash',
+                markPaid: truthy(cell(row, 'paid'), true),
+                startDate: start || undefined,
+                endDate: end || undefined,
+                amountOverride: amount || undefined,
+                discountAmount: Number.isFinite(discount) && discount > 0 ? discount : 0,
+                discountNote: Number.isFinite(discount) && discount > 0 ? 'Imported from CSV' : '',
+                // These are existing members moving over from another system:
+                // they joined (and paid any joining fee) there. Charging it here
+                // would file part of the imported amount as admission money.
+                chargeJoiningFee: false,
+                notes: cell(row, 'notes') || `Imported from CSV by ${req.user && req.user.email}`,
+                by: req.user && req.user.email
+              });
+            } catch (error) {
+              // The account stays; the row is not lost. The next upload of
+              // the file finds a member with no membership and adds it.
+              report.errors.push({ line, email, name, reason: `${account ? 'The membership was not added' : 'Imported without the membership'}: ${String(error.message || error).replace(/\.$/, '')}. Put that right and upload the file again to add it.` });
+              continue;
+            }
             report.memberships += 1;
+            if (account) report.completed += 1;
           }
         } catch (error) {
           report.errors.push({ line, email, name, reason: error.message });
         }
       }
 
+      const done = dryRun
+        ? `${report.created} member(s) would be created, ${report.skipped.length} skipped.`
+        : `${report.created} member(s) imported, ${report.memberships} membership(s) created, ${report.skipped.length} skipped.`;
       return res.json({
         success: true,
-        message: dryRun
-          ? `${report.created} member(s) would be created, ${report.skipped.length} skipped.`
-          : `${report.created} member(s) imported, ${report.memberships} membership(s) created, ${report.skipped.length} skipped.`,
+        message: report.stopped ? `${done} ${stoppedNote(report)}` : done,
         data: report
       });
     } catch (error) {
@@ -508,3 +626,5 @@ module.exports.parseDate = parseDate;
 module.exports.dateProblem = dateProblem;
 module.exports.parseActive = parseActive;
 module.exports.splitFullName = splitFullName;
+module.exports.importBudgetMs = importBudgetMs;
+module.exports.stoppedNote = stoppedNote;
