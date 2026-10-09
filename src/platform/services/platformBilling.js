@@ -17,21 +17,14 @@
 const { getPlatformStripe, platformBillingAvailable, PlatformStripeNotConfiguredError } = require('./platformStripe');
 const PlatformPlan = require('../models/platformPlanModel');
 const PlatformAddon = require('../models/platformAddonModel');
-const { toMinorUnits } = require('../../helper/money');
+// fromMinorUnits is Stripe's integer back to major units, for the amounts
+// written on the gym; re-exported below for the webhook.
+const { toMinorUnits, fromMinorUnits } = require('../../helper/money');
 
 const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
 // Stripe refuses a Checkout trial_end closer than this; a shorter trial is
 // simply charged now.
 const MIN_TRIAL_END_MS = 48 * 60 * 60 * 1000;
-
-const ZERO_DECIMAL = new Set(['BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF']);
-
-/** Stripe's integer back to major units, for the amounts written on the gym. */
-function fromMinorUnits(amount, currency) {
-  const n = Number(amount) || 0;
-  if (ZERO_DECIMAL.has(String(currency || '').toUpperCase())) return n;
-  return Math.round(n) / 100;
-}
 
 class PlatformBillingError extends Error {
   constructor(message, status = 400, code = 'PLATFORM_BILLING') {
