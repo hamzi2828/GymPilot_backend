@@ -439,7 +439,13 @@ module.exports = {
     try {
       const { order } = await loadOrder(req, { staffLevel: 'view' });
       if (order.payment.status !== 'paid') return res.status(400).json({ success: false, message: 'An invoice is issued once the order is paid' });
-      await ensureInvoice(order);
+      if (!(await ensureInvoice(order))) {
+        return res.status(404).json({
+          success: false,
+          code: 'NO_INVOICE',
+          message: 'This membership was brought over from another system, so there is no invoice for it here.'
+        });
+      }
       const pdf = await renderInvoicePdf(order);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${order.invoice.number}.pdf"`);

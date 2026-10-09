@@ -41,9 +41,14 @@ function dateLabel(value) {
 /**
  * Assigns an invoice number and tax breakdown to a paid order if it has none.
  * Idempotent: an order keeps its first number for life.
+ *
+ * Null for a membership imported already paid: the gym took that money in
+ * its old system and invoiced it there, so it gets no number from this
+ * gym's sequence.
  */
 async function ensureInvoice(order) {
   if (order.invoice && order.invoice.number) return order.invoice;
+  if (order.imported) return null;
 
   const settings = await Settings.getSettings().catch(() => null);
   const inv = (settings && settings.invoice) || {};

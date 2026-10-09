@@ -392,6 +392,12 @@ function ownPaymentEntries() {
  * to the ones where money came in. Pending and failed orders only appear when
  * a caller asks for them -- the sales list does -- dated by when they were
  * created and never counted as money in.
+ *
+ * A membership imported already paid (order.imported) has no first payment
+ * here: that money was taken in the gym's old system, and counting it would
+ * put every imported member into the takings of the day of the import.
+ * Anything paid on such an order afterwards -- a later part, a renewal -- is
+ * a payment like any other.
  */
 function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES } = {}) {
   const inRange = inRangeOf(range);
@@ -430,6 +436,7 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
         orderNumber: 1,
         userId: 1,
         renewedFrom: 1,
+        imported: 1,
         customer: '$customerInfo.fullName',
         email: '$customerInfo.email',
         packageName: '$packageDetails.name',
@@ -461,7 +468,7 @@ function membershipPaymentStages(range, match = {}, { statuses = MONEY_STATUSES 
       }
     },
     { $unwind: '$entries' },
-    { $match: { 'entries.at': inRange } },
+    { $match: { 'entries.at': inRange, $nor: [{ imported: true, 'entries.kind': 'initial' }] } },
     {
       $project: {
         orderNumber: 1,

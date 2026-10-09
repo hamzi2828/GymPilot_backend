@@ -588,6 +588,9 @@ module.exports = {
                 // they joined (and paid any joining fee) there. Charging it here
                 // would file part of the imported amount as admission money.
                 chargeJoiningFee: false,
+                // And they paid there: not today's takings, and no invoice
+                // from this gym's sequence (see the order model).
+                imported: true,
                 notes: cell(row, 'notes') || `Imported from CSV by ${req.user && req.user.email}`,
                 by: req.user && req.user.email
               });

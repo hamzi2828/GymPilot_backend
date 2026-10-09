@@ -386,7 +386,10 @@ module.exports = {
           { key: 'paidAt', label: 'Paid on', type: 'date', value: (r) => (r.payment && r.payment.paidAt ? T.dateKey(r.payment.paidAt) : T.dateKey(r.createdAt)) },
           { key: 'start', label: 'Starts', type: 'date', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
           { key: 'end', label: 'Ends', type: 'date', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
-          { key: 'invoice', label: 'Invoice', value: (r) => (r.invoice && r.invoice.number) || '' }
+          { key: 'invoice', label: 'Invoice', value: (r) => (r.invoice && r.invoice.number) || '' },
+          // Brought over already paid from the gym's old system: listed, but
+          // not money taken on its "Paid on" day (see the order model).
+          { key: 'imported', label: 'Imported', value: (r) => (r.imported ? 'Yes' : '') }
         ], rows);
       }
 

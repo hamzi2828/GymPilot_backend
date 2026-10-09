@@ -313,6 +313,14 @@ const packageOrderSchema = new mongoose.Schema(
     },
     // The order this one renewed or replaced.
     renewedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageOrder', default: null },
+    // Set only by the member import, on a membership that came in already
+    // paid: the money was taken in the gym's old system, before it moved
+    // here. The membership is as good as any other -- dates, the desk,
+    // bookings -- but its first payment is not today's takings: the money
+    // reports leave it out (ledger.membershipPaymentStages) and it is given
+    // no invoice number (invoiceService.ensureInvoice). Anything paid on it
+    // later is ordinary money in.
+    imported: { type: Boolean },
     // Issued once the order is paid; see services/invoiceService.js.
     invoice: {
       number: { type: String, default: null, index: true },

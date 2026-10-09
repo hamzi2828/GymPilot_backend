@@ -231,3 +231,106 @@ test('the plan limit is counted as the rows come in, in the preview too', async 
   }
   assert.equal(await h.inGym(gym, () => User.countDocuments({ role: 'user' })), members + 2);
 });
+
+// Members brought over from another system paid there, before the gym moved:
+// the import gives them their memberships, and none of it is today's money.
+test('imported memberships are not today\'s takings, get no invoice number, and are as good as any other at the desk', async () => {
+  const T = h.src('attendance/services/timeUtils');
+  const L = h.src('accounts/services/ledger');
+  const service = h.src('gymfolio/services/membershipService');
+  const dashboard = h.src('controller/dashboardController');
+  const accounts = h.src('accounts/controller/accountsController');
+  const membershipController = h.src('gymfolio/controller/membershipController');
+  const { dailySales } = h.src('services/dailySales');
+  const pnl = h.src('accounts/services/profitAndLoss');
+  const { membershipFor } = h.src('attendance/services/peopleDirectory');
+
+  // Every screen that says what was taken today.
+  const takings = () =>
+    h.inGym(gym, async () => {
+      const today = T.dateKey();
+      const range = L.readRange({ from: today, to: today });
+      const dash = await h.call(dashboard.overview);
+      const overview = await h.call(accounts.overview, { query: { from: today, to: today } });
+      const sales = await h.call(accounts.sales, { query: { from: today, to: today } });
+      for (const res of [dash, overview, sales]) assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      const daily = await dailySales(range);
+      const [ledger] = await PackageOrder.aggregate([...L.membershipPaymentStages(range), { $group: { _id: null, total: { $sum: '$amount' }, n: { $sum: 1 } } }]);
+      return JSON.parse(
+        JSON.stringify({
+          dashboard: { today: dash.body.revenue_today, month: dash.body.revenue, memberships: dash.body.membership_revenue },
+          overview: overview.body,
+          sales: { summary: sales.body.summary, rows: sales.body.sales.length },
+          daily: { days: daily.days, totals: daily.totals, by_method: daily.by_method },
+          profitAndLoss: await pnl.forRange(range),
+          ledger: { total: ledger ? ledger.total : 0, payments: ledger ? ledger.n : 0 }
+        })
+      );
+    });
+
+  // One real sale today, so there are takings to compare.
+  await h.inGym(gym, async () => {
+    const user = await User.create({ firstName: 'Reggie', lastName: 'Regular', email: 'reggie@import.test', role: 'user' });
+    await service.createManualOrder({ user, pkg: await Package.findOne({ name: 'Monthly' }), paymentMethod: 'cash' });
+  });
+  const before = await takings();
+  assert.deepEqual(before.ledger, { total: 4000, payments: 1 });
+  assert.equal(before.dashboard.today.base_amount, 4000);
+  const invoiced = () => h.inGym(gym, () => PackageOrder.countDocuments({ 'invoice.number': { $ne: null } }));
+  const invoicesBefore = await invoiced();
+
+  const day = (offset) => T.dateKey(new Date(Date.now() + offset * 86400000));
+  const file = [
+    'Name,Phone,Package,Start Date,End Date,Paid,Discount',
+    `Moved One,0300 7500001,Monthly,${day(-10)},${day(20)},yes,`,
+    `Moved Two,0300 7500002,Monthly,${day(-10)},${day(20)},yes,1000`,
+    `Owes Still,0300 7500003,Monthly,${day(-10)},${day(20)},no,`
+  ].join('\n');
+  const done = await runImport(file);
+  assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+  assert.deepEqual([done.body.data.created, done.body.data.memberships, done.body.data.errors.length], [3, 3, 0], JSON.stringify(done.body.data));
+
+  // Nothing was taken today: every figure is what it was.
+  assert.deepEqual(await takings(), before);
+  assert.equal(await invoiced(), invoicesBefore, 'no invoice number is used up');
+
+  // The memberships themselves are whole: paid, running, good at the desk.
+  for (const phone of ['0300 7500001', '0300 7500002']) {
+    const user = await memberBy(phone);
+    const [order] = await ordersOf(user);
+    assert.equal(order.imported, true, phone);
+    assert.deepEqual([order.payment.status, order.status, order.subscription.isActive], ['paid', 'active', true], phone);
+    assert.equal(order.invoice.number, null, phone);
+    const held = await h.inGym(gym, () => membershipFor(user));
+    assert.equal(held.status, 'active', phone);
+    assert.equal(String(held.orderId), String(order._id));
+  }
+  // Asking for its invoice does not make one up.
+  const movedOne = await h.inGym(gym, async () => PackageOrder.findOne({ userId: (await User.findOne({ phone: '0300 7500001' }))._id }));
+  assert.equal(await h.inGym(gym, () => h.src('services/invoiceService').ensureInvoice(movedOne)), null);
+  assert.equal(await invoiced(), invoicesBefore);
+
+  // The one that came in unpaid is an ordinary order waiting for its money:
+  // when it is paid here, that is today's takings, with an invoice.
+  const owes = await h.inGym(gym, async () => PackageOrder.findOne({ userId: (await User.findOne({ phone: '0300 7500003' }))._id }));
+  assert.equal(owes.imported, undefined);
+  assert.equal(owes.payment.status, 'pending');
+  await h.inGym(gym, () => service.markPaidAndActivate(owes, { method: 'cash' }));
+  const paidHere = await takings();
+  assert.deepEqual(paidHere.ledger, { total: 8000, payments: 2 });
+  assert.equal(paidHere.dashboard.today.base_amount, 8000);
+  assert.equal(await invoiced(), invoicesBefore + 1);
+
+  // And money taken later on an imported membership counts on its day: the
+  // discount is withdrawn, the 1000 it leaves owing is paid at the desk.
+  await h.inGym(gym, async () => {
+    const movedTwo = await PackageOrder.findOne({ userId: (await User.findOne({ phone: '0300 7500002' }))._id });
+    assert.equal(movedTwo.payment.amount, 3000);
+    const edited = await service.editTerms(movedTwo, { discountAmount: 0 });
+    assert.equal(edited.payment.balanceDue, 1000);
+    await service.recordPayment(edited, { amount: 1000, method: 'cash' });
+  });
+  const later = await takings();
+  assert.deepEqual(later.ledger, { total: 9000, payments: 3 });
+  assert.equal(later.dashboard.today.base_amount, 9000);
+});

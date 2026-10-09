@@ -613,6 +613,10 @@ function commissionOn(fee, { commissionType, commissionValue }) {
  *
  * `requestId`: the desk's id for this action. When this member already has
  * the order it made, that order is returned (isRepeat) and nothing is sold.
+ *
+ * `imported`: the member import only. A paid membership brought over from
+ * the gym's old system: marked so its payment is not counted as money taken
+ * today and no invoice is issued for it (see the order model).
  */
 async function createManualOrder({
   user,
@@ -633,7 +637,8 @@ async function createManualOrder({
   amountPaid,
   paidBy = null,
   by = null,
-  requestId
+  requestId,
+  imported = false
 }) {
   if (requestId) {
     const first = await PackageOrder.findOne({ userId: user._id, 'metadata.requestId': requestId });
@@ -764,6 +769,9 @@ async function createManualOrder({
     status: paid ? 'active' : 'pending',
     notes: notes || `Created from the admin panel by ${by || 'an administrator'}`,
     metadata: requestId ? { requestId } : undefined,
+    // Only when it came in paid: one left pending is paid here, later, and
+    // that money is real takings on the day it arrives.
+    ...(imported && paid ? { imported: true } : {}),
     createdBy: null
   });
 

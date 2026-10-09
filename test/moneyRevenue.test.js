@@ -59,7 +59,13 @@ test('the payments pipeline counts renewals as payments of their own', () => {
   assert.equal(renewals.$map.in.amount, '$$renewal.amount');
   assert.equal(renewals.$map.in.at, '$$renewal.at');
   assert.deepEqual(unwind, { $unwind: '$entries' });
-  assert.deepEqual(cut, { $match: { 'entries.at': { $gte: range.start, $lt: range.end } } });
+  // ...less the first payment of a membership imported already paid: that
+  // money was taken in the gym's old system, not on the day of the import.
+  // Its later parts and renewals stay.
+  assert.equal(project.$project.imported, 1);
+  assert.deepEqual(cut, {
+    $match: { 'entries.at': { $gte: range.start, $lt: range.end }, $nor: [{ imported: true, 'entries.kind': 'initial' }] }
+  });
   assert.equal(shape.$project.at, '$entries.at');
 });
 
