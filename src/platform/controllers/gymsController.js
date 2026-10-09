@@ -633,25 +633,43 @@ module.exports = {
     }
   },
 
-  // DELETE /api/platform/gyms/:id   { confirmSlug, dropDatabase, subscriptionCancelled }
+  // DELETE /api/platform/gyms/:id
+  //   { confirmSlug, dropDatabase, subscriptionCancelled, memberSubscriptionsAcknowledged }
   //
   // The gym's card subscription with the platform is cancelled in Stripe
   // first. When Stripe will not cancel it nothing is deleted: 409
   // `SUBSCRIPTION_NOT_CANCELLED`, with the subscription to cancel by hand
   // in `details.subscriptionId`. `subscriptionCancelled: true` is the
   // admin saying they have done that, and lets the deletion go on.
+  //
+  // A gym whose members still pay it by card on a subscription is refused
+  // too -- 409 `MEMBER_SUBSCRIPTIONS_ACTIVE`, `details.count` of them --
+  // until `memberSubscriptionsAcknowledged: true` says the admin knows
+  // those keep charging.
   remove: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
       if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
 
-      const { confirmSlug, dropDatabase, subscriptionCancelled } = req.body || {};
+      const { confirmSlug, dropDatabase, subscriptionCancelled, memberSubscriptionsAcknowledged } = req.body || {};
+      const yes = (value) => value === true || value === 'true';
       const result = await deleteGym(gym, {
         confirmSlug,
-        dropDatabase: dropDatabase === true || dropDatabase === 'true',
-        subscriptionCancelledByHand: subscriptionCancelled === true || subscriptionCancelled === 'true'
+        dropDatabase: yes(dropDatabase),
+        subscriptionCancelledByHand: yes(subscriptionCancelled),
+        memberSubscriptionsAcknowledged: yes(memberSubscriptionsAcknowledged)
       });
-      audit(req, 'gym_deleted', gym, { slug: gym.slug, databaseDropped: result.databaseDropped, billing: result.billing });
+      audit(req, 'gym_deleted', gym, {
+        slug: gym.slug,
+        databaseDropped: result.databaseDropped,
+        billing: result.billing,
+        memberSubscriptionsAcknowledged: yes(memberSubscriptionsAcknowledged),
+        memberLoginsRemoved: result.memberLoginsRemoved,
+        filesRemoved: result.filesRemoved,
+        // What the store would not give up, so there is a trail to clear it by.
+        ...(result.filesLeft ? { filesLeft: true, filesError: result.filesError } : {}),
+        ...(result.backupsLeft ? { backupsLeft: result.backupsLeft } : {})
+      });
 
       return res.json({ success: true, data: result });
     } catch (error) {

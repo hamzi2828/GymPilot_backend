@@ -11,6 +11,10 @@
 // through Stripe's further retries, comes back when paid, and its owner is
 // told once when Stripe cancels.
 //
+// Deletion: deleteGym() cancelling the gym's card, dropping its database,
+// removing its sign-in names and files -- and refusing while members still
+// pay it by card, or when the database is another gym's too.
+//
 // Provisioning: provisionGym() creating a tenant database and seeding it, and
 // rolling back on a failure part-way through seeding -- dropping a database it
 // created, never one that was already there. Email and Vercel are stand-ins.
@@ -323,4 +327,87 @@ test('a failure never drops a database that was already there', async () => {
   assert.equal(await Gym.findOne({ slug: 'careful-gym' }).lean(), null);
   assert.ok((await h.databaseNames()).includes(database));
   assert.equal(await h.rawDb(database).collection('keep_me').countDocuments(), 1);
+});
+
+test('deleting a gym stops its card, and takes its database, its sign-in names and its files with it', async () => {
+  const MemberDirectory = h.src('platform/models/memberDirectoryModel');
+  const PackageOrder = h.src('gymfolio/models/packageOrderModel');
+  const platformBilling = h.src('platform/services/platformBilling');
+  const gymFiles = h.src('platform/services/gymFiles');
+
+  const leaving = await h.createGym('leaving-gym');
+  const staying = await h.createGym('staying-gym');
+  await Gym.updateOne({ _id: leaving._id }, { $set: { 'subscription.stripeSubscriptionId': 'sub_leaving', 'subscription.stripeCustomerId': 'cus_leaving' } });
+  const member = () => new h.state.mongoose.Types.ObjectId();
+  await MemberDirectory.create([
+    { username: 'leaving.one', gymId: leaving._id, gymSlug: leaving.slug, userId: member() },
+    { username: 'leaving.two', gymId: leaving._id, gymSlug: leaving.slug, userId: member() },
+    { username: 'staying.one', gymId: staying._id, gymSlug: staying.slug, userId: member() }
+  ]);
+  // Two members on card subscriptions in the gym's own Stripe account; one
+  // already set to end, one cancelled -- neither of those charges again.
+  await h.inGym(leaving, () =>
+    PackageOrder.collection.insertMany([
+      { orderNumber: 'T-1', status: 'active', payment: { stripeSubscriptionId: 'sub_member_1' }, subscription: {} },
+      { orderNumber: 'T-2', status: 'past_due', payment: { stripeSubscriptionId: 'sub_member_2' }, subscription: {} },
+      { orderNumber: 'T-3', status: 'active', payment: { stripeSubscriptionId: 'sub_member_3' }, subscription: { cancelAtPeriodEnd: true } },
+      { orderNumber: 'T-4', status: 'cancelled', payment: { stripeSubscriptionId: 'sub_member_4' }, subscription: {} },
+      { orderNumber: 'T-5', status: 'active', payment: { stripeSubscriptionId: null }, subscription: {} }
+    ])
+  );
+
+  const cancelled = [];
+  const prefixes = [];
+  const real = { cancel: platformBilling.cancelSubscriptionNow, store: { ...gymFiles.store } };
+  platformBilling.cancelSubscriptionNow = async (id) => {
+    cancelled.push(id);
+    return { status: 'canceled', amountPaid: 0, currency: 'GBP' };
+  };
+  Object.assign(gymFiles.store, {
+    configured: () => true,
+    list: async ({ prefix }) => {
+      prefixes.push(prefix);
+      return { blobs: [{ url: `https://store.test/${prefix}members/id-scan.pdf` }], hasMore: false };
+    },
+    remove: async () => {}
+  });
+  try {
+    const doc = () => Gym.findById(leaving._id);
+
+    // The members' own subscriptions come first: nothing is touched until the admin says they know.
+    await assert.rejects(provisioning.deleteGym(await doc(), { confirmSlug: 'leaving-gym', dropDatabase: true }), (error) => error.status === 409 && error.details.code === 'MEMBER_SUBSCRIPTIONS_ACTIVE' && error.details.count === 2);
+    assert.deepEqual(cancelled, []);
+    assert.ok((await h.databaseNames()).includes(leaving.database.name));
+
+    const result = await provisioning.deleteGym(await doc(), { confirmSlug: 'leaving-gym', dropDatabase: true, memberSubscriptionsAcknowledged: true });
+    assert.equal(result.deleted, true);
+    assert.deepEqual(cancelled, ['sub_leaving']);
+    assert.equal(result.billing.cancelled, true);
+    assert.equal(await Gym.countDocuments({ _id: leaving._id }), 0);
+    assert.ok(!(await h.databaseNames()).includes(leaving.database.name), 'its database is gone');
+    assert.equal(result.memberLoginsRemoved, 2);
+    assert.equal(await MemberDirectory.countDocuments({ gymId: leaving._id }), 0);
+    assert.equal(await MemberDirectory.isTaken('leaving.one'), false, 'the username is free again');
+    assert.equal(await MemberDirectory.countDocuments({ gymId: staying._id }), 1, "another gym's sign-in names stay");
+    assert.deepEqual(prefixes, ['leaving-gym/']);
+    assert.equal(result.filesRemoved, 1);
+
+    // A database another gym is using is never created in, and never dropped.
+    await assert.rejects(
+      provisioning.provisionGym({ name: 'Squatter Gym', owner: owner('s@squatter.test'), database: { name: staying.database.name } }),
+      (error) => error.status === 409 && /already belongs to/.test(error.message)
+    );
+    assert.equal(await Gym.countDocuments({ slug: 'squatter-gym' }), 0);
+    // Two records on one database, as could be made before that check existed.
+    const twin = await Gym.create({ name: 'Twin Gym', slug: 'twin-gym', database: { name: staying.database.name }, subscription: { status: 'active' } });
+    await assert.rejects(provisioning.deleteGym(twin, { confirmSlug: 'twin-gym', dropDatabase: true }), (error) => error.status === 409 && /also the database of/.test(error.message));
+    assert.ok((await h.databaseNames()).includes(staying.database.name));
+    const kept = await provisioning.deleteGym(twin, { confirmSlug: 'twin-gym' });
+    assert.equal(kept.databaseDropped, false);
+    assert.equal(kept.filesRemoved, 0, 'files stay with a database that is kept');
+    assert.deepEqual(prefixes, ['leaving-gym/']);
+  } finally {
+    platformBilling.cancelSubscriptionNow = real.cancel;
+    Object.assign(gymFiles.store, real.store);
+  }
 });

@@ -19,8 +19,11 @@ const { dropTenantDatabase } = require('./connections');
 const { databaseNameFor, tenantDatabaseNameFor, MAX_DATABASE_NAME_LENGTH, isProtectedDatabase, tenantDatabasePrefix } = require('./dbNames');
 const { runWithTenant, siteUrlFor, inviteSiteUrlFor, isDefaultTenant, subdomainHostFor, isInsecureHost } = require('./tenantContext');
 const { invalidateTenantCache } = require('./middleware/resolveTenant');
-// Called through the module, not destructured, so a test can stand in for it.
+// Called through the modules, not destructured, so a test can stand in for them.
 const platformBilling = require('./services/platformBilling');
+const gymFiles = require('./services/gymFiles');
+const tenantStats = require('./tenantStats');
+const MemberDirectory = require('./models/memberDirectoryModel');
 
 // Tenant-side models and services. Proxies: they bind to the new gym's
 // database while runWithTenant() is active.
@@ -40,7 +43,11 @@ const COUNTRY_CODE = /^[A-Z]{2}$/;
 // gym's subdomain.
 const RESERVED_SLUGS = new Set([
   'api', 'www', 'app', 'admin', 'mail', 'platform', 'static', 'assets', 'cdn',
-  'help', 'support', 'docs', 'blog', 'status', 'login', 'checkout', 'panel'
+  'help', 'support', 'docs', 'blog', 'status', 'login', 'checkout', 'panel',
+  // A gym's files are stored under `<slug>/` and removed by that prefix when
+  // it is deleted: a gym must not share one with files that are not its own
+  // (see services/gymFiles.js).
+  ...gymFiles.SHARED_FOLDERS
 ]);
 
 class ProvisioningError extends Error {
@@ -202,6 +209,21 @@ function validateDatabaseInput(database, { allowDedicatedUri = process.env.ALLOW
     }
   }
   return { name, uri };
+}
+
+/**
+ * The gym already kept in a database, or null. Two gyms pointed at one
+ * database read and write each other's members, and deleting either with
+ * its database destroys both. A name on a gym's own cluster only clashes
+ * with the same name on that same cluster.
+ */
+async function gymUsingDatabase(database, excludeGymId = null) {
+  const name = String((database && database.name) || '').trim();
+  if (!name) return null;
+  const uri = String((database && database.uri) || '').trim();
+  const query = { 'database.name': name, 'database.uri': uri || { $in: ['', null] } };
+  if (excludeGymId) query._id = { $ne: excludeGymId };
+  return Gym.findOne(query).select('slug name').lean();
 }
 
 /**
@@ -494,6 +516,14 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
     uri: String(requested.uri || '').trim()
   };
 
+  const holder = await gymUsingDatabase(database);
+  if (holder) {
+    throw new ProvisioningError(
+      `The database "${database.name}" already belongs to ${holder.name || holder.slug} (${holder.slug}). Leave the database name empty and one is chosen for you.`,
+      409
+    );
+  }
+
   // Known before anything is written, so the rollback can tell a database it
   // created from one that was already there.
   const databaseExistedBefore = adoptExisting || database.uri ? true : await sharedDatabaseExists(database.name);
@@ -691,21 +721,55 @@ async function endPlatformBilling(gym, { cancelledByHand = false } = {}) {
  * billing alone altogether, for the one caller that removes a gym in order
  * to make it again from the same payment (signupProvisioning).
  *
+ * Members who pay the gym by card on a subscription are another matter:
+ * those live in the gym's OWN Stripe account, which is not the platform's
+ * to cancel things in, and they go on charging after the gym is gone. So a
+ * gym that still has any is refused (409 `MEMBER_SUBSCRIPTIONS_ACTIVE`, with
+ * the `count`) until the caller says it knows
+ * (`memberSubscriptionsAcknowledged`).
+ *
  * Its stored backups go either way (services/backupJobs.js
  * removeGymBackups): encrypted for this gym's id, nothing could open them
- * again, even for the same data registered anew. The answer says how many
- * went, and how many the store would not remove.
+ * again, even for the same data registered anew. So do its usernames in the
+ * phone app's sign-in directory (platform_member_logins): they point at a
+ * gym id that no longer exists, and would stay taken for ever. Its stored
+ * files (services/gymFiles.js) go with the database and stay with it: data
+ * kept to be registered again still points at them. The answer says how many
+ * of each went, and what the store would not remove.
  */
-async function deleteGym(gym, { confirmSlug, dropDatabase = false, subscriptionCancelledByHand = false, keepSubscription = false } = {}) {
+async function deleteGym(
+  gym,
+  { confirmSlug, dropDatabase = false, subscriptionCancelledByHand = false, memberSubscriptionsAcknowledged = false, keepSubscription = false } = {}
+) {
   if (confirmSlug !== gym.slug) {
     throw new ProvisioningError('Type the gym\'s slug to confirm deletion', 400);
   }
-  let target = gym;
+  // With the connection string: a gym on its own cluster is counted, and
+  // dropped, there.
+  const target = (await Gym.findByIdWithUri(gym._id)) || gym;
   if (dropDatabase) {
-    target = (await Gym.findByIdWithUri(gym._id)) || gym;
     const name = (target.database && target.database.name) || databaseNameFor(gym.slug);
     if (!(target.database && target.database.uri) && isProtectedDatabase(name)) {
       throw new ProvisioningError(`"${name}" is the platform's main database and cannot be dropped. Remove the gym without dropping its database.`, 400);
+    }
+    const sharedWith = await gymUsingDatabase({ name, uri: target.database && target.database.uri }, gym._id);
+    if (sharedWith) {
+      throw new ProvisioningError(
+        `"${name}" is also the database of ${sharedWith.name || sharedWith.slug} (${sharedWith.slug}), so it cannot be dropped. Remove the gym without dropping its database.`,
+        409
+      );
+    }
+  }
+  // A gym removed to be made again (keepSubscription) has no members yet.
+  if (!keepSubscription && !memberSubscriptionsAcknowledged) {
+    const count = await tenantStats.countCardSubscriptions(target);
+    if (count > 0) {
+      throw new ProvisioningError(
+        `${count} member${count === 1 ? ' pays' : 's pay'} this gym by card on a subscription in the gym's own Stripe account. Deleting the gym does not stop those charges. ` +
+          'Have the owner cancel them first (in the gym\'s admin, or its Stripe dashboard), or confirm that you are deleting it anyway.',
+        409,
+        { code: 'MEMBER_SUBSCRIPTIONS_ACTIVE', count }
+      );
     }
   }
   const billing = keepSubscription ? null : await endPlatformBilling(gym, { cancelledByHand: subscriptionCancelledByHand });
@@ -713,14 +777,24 @@ async function deleteGym(gym, { confirmSlug, dropDatabase = false, subscriptionC
   await Gym.deleteOne({ _id: gym._id });
   invalidateTenantCache();
   // After the gym is gone, so a deletion that fails never costs a live gym
-  // its backups.
+  // its backups, its members' sign-ins or its files. None of these throw.
   const backups = await require('../services/backupJobs').removeGymBackups(gym._id);
+  const logins = await MemberDirectory.deleteMany({ gymId: gym._id }).catch((error) => {
+    console.error(`[platform] could not remove the sign-in names of deleted gym ${gym.slug}:`, error.message);
+    return null;
+  });
+  const files = dropDatabase ? await gymFiles.removeGymFiles(gym.slug) : null;
   return {
     deleted: true,
     databaseDropped: !!dropDatabase,
     billing,
     backupsRemoved: backups.removed,
-    ...(backups.left ? { backupsLeft: backups.left, backupsError: backups.error } : {})
+    ...(backups.left ? { backupsLeft: backups.left, backupsError: backups.error } : {}),
+    memberLoginsRemoved: logins ? logins.deletedCount || 0 : 0,
+    ...(logins ? {} : { memberLoginsLeft: true }),
+    filesRemoved: files ? files.removed : 0,
+    ...(files && files.left ? { filesLeft: true, filesError: files.error } : {}),
+    ...(files && files.skipped ? { filesSkipped: files.skipped } : {})
   };
 }
 
