@@ -172,17 +172,21 @@ class GymfolioPaymentService {
     const currency = resolveCurrency(packageData.currency, settings && settings.currency).toLowerCase();
     const snapshot = membership.packageSnapshot(packageData);
     const recurring = snapshot.billing.mode === 'recurring';
-    // Charged once, with the first membership: a member coming back -- by
-    // account, or by the email a guest checkout gives -- is not charged it
-    // again (membershipService.joiningFeeDue).
-    const joiningFee = (await membership.joiningFeeDue({ userId, email: customerInfo.email })) ? round2(snapshot.joiningFee) : 0;
+    // Charged once, with the first membership: a member coming back is not
+    // charged it again (membershipService.joiningFeeDue). Who is coming back
+    // is the signed-in account, never the email typed into the form
+    // (checkoutIdentity); a guest pays it.
+    const payer = await membership.checkoutIdentity(userId);
+    const joiningFee = (await membership.joiningFeeDue(payer || {})) ? round2(snapshot.joiningFee) : 0;
 
     const { coupon, discount } = await membership.applyCoupon(options.couponCode, packageData, listPrice);
 
     // A signed-in member who is already on a subscription is sent to their
-    // account page rather than sold a second one that overlaps it.
-    if (userId) {
-      await membership.assertNoActiveSubscription({ userId, email: customerInfo.email, snapshot });
+    // account page rather than sold a second one that overlaps it. Asked
+    // about the account alone: a typed email would say whether somebody
+    // else has one.
+    if (payer) {
+      await membership.assertNoActiveSubscription({ ...payer, snapshot });
     }
 
     const orderNumber = await PackageOrder.generateOrderNumber();

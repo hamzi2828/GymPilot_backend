@@ -249,3 +249,67 @@ test('a missing or inactive package is a 404, and card being off is refused befo
     }
   });
 });
+
+/* ------------------------- who is checking out -------------------------- */
+
+test('a checkout is known by its signed-in account, never by an email typed into the form', async () => {
+  const User = require('../../src/models/user');
+  const membership = require('../../src/gymfolio/services/membershipService');
+  const accountId = new mongoose.Types.ObjectId();
+
+  await inGym('identity-gym', async () => {
+    const lookups = [];
+    const account = (found) => ({
+      findById: (id) => {
+        lookups.push(String(id));
+        return { select: () => ({ lean: async () => found }) };
+      }
+    });
+
+    let restore = stub(User, account({ _id: accountId, email: 'member@identity.test' }));
+    try {
+      // The account's own id and address: all the joining fee and the
+      // one-subscription rule are ever asked about.
+      assert.deepEqual(await membership.checkoutIdentity(accountId), { userId: accountId, email: 'member@identity.test' });
+      // A guest, or an id that is not one, is nobody -- and nothing is looked up.
+      lookups.length = 0;
+      for (const nobody of [null, undefined, '', 'guest', 'not-an-id']) assert.equal(await membership.checkoutIdentity(nobody), null);
+      assert.equal(lookups.length, 0);
+    } finally {
+      restore();
+    }
+
+    // A member with no email on file is still themselves.
+    restore = stub(User, account({ _id: accountId }));
+    try {
+      assert.deepEqual(await membership.checkoutIdentity(accountId), { userId: accountId, email: '' });
+    } finally {
+      restore();
+    }
+
+    // A token whose account is gone is a guest.
+    restore = stub(User, account(null));
+    try {
+      assert.equal(await membership.checkoutIdentity(accountId), null);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test('nobody to ask about means the joining fee is due, and no order is looked up', async () => {
+  const membership = require('../../src/gymfolio/services/membershipService');
+  await inGym('identity-gym', async () => {
+    const restore = stub(PackageOrder, {
+      exists: async () => {
+        throw new Error('a guest must not be matched against anybody');
+      }
+    });
+    try {
+      assert.equal(await membership.joiningFeeDue({}), true);
+      assert.equal(await membership.joiningFeeDue(), true);
+    } finally {
+      restore();
+    }
+  });
+});

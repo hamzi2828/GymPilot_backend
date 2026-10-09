@@ -235,6 +235,23 @@ async function joiningFeeDue({ userId, email } = {}) {
   return !joined;
 }
 
+/**
+ * Who an online checkout is from, for the rules that follow a person (the
+ * joining fee, one subscription each): the signed-in account -- its id and
+ * its own email -- or null for a guest.
+ *
+ * Never the email typed into the checkout form. Anybody can type a paying
+ * member's address there: it used to take the joining fee off for them, and
+ * answered whether that address has a subscription. A guest is nobody the
+ * gym knows yet, so a guest pays the fee; signing in is how a returning
+ * member is recognised.
+ */
+async function checkoutIdentity(userId) {
+  if (!userId || !mongoose.Types.ObjectId.isValid(String(userId))) return null;
+  const account = await User.findById(userId).select('email').lean();
+  return account ? { userId: account._id, email: account.email || '' } : null;
+}
+
 /* ------------------------------- coupons ------------------------------- */
 
 /**
@@ -2006,6 +2023,7 @@ module.exports = {
   termEnd,
   startDateFor,
   joiningFeeDue,
+  checkoutIdentity,
   applyCoupon,
   redeemCoupon,
   assertNoActiveSubscription,
