@@ -276,7 +276,9 @@ async function removeHalfMadeGym(signup, gym, subscriptionId, now = Date.now()) 
 
   const withUri = await Gym.findByIdWithUri(gym._id);
   if (!withUri || withUri.provisionedAt || (withUri.database && withUri.database.uri)) return false;
-  await provisioning.deleteGym(withUri, { confirmSlug: withUri.slug, dropDatabase: true });
+  // The subscription stays: it is the payment the gym is about to be made
+  // again from.
+  await provisioning.deleteGym(withUri, { confirmSlug: withUri.slug, dropDatabase: true, keepSubscription: true });
   PlatformAuditLog.record({
     actorId: null,
     actorEmail: 'signup',

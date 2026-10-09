@@ -54,7 +54,9 @@ function audit(req, action, gym, meta = null) {
 
 function fail(res, error) {
   if (error instanceof ProvisioningError) {
-    return res.status(error.status).json({ success: false, message: error.message, details: error.details });
+    // `code` when the panel has something to do about it (see deleteGym).
+    const code = error.details && error.details.code;
+    return res.status(error.status).json({ success: false, ...(code ? { code } : {}), message: error.message, details: error.details });
   }
   if (error && error.name === 'ValidationError') {
     return res.status(400).json({ success: false, message: error.message });
@@ -631,15 +633,25 @@ module.exports = {
     }
   },
 
-  // DELETE /api/platform/gyms/:id   { confirmSlug, dropDatabase }
+  // DELETE /api/platform/gyms/:id   { confirmSlug, dropDatabase, subscriptionCancelled }
+  //
+  // The gym's card subscription with the platform is cancelled in Stripe
+  // first. When Stripe will not cancel it nothing is deleted: 409
+  // `SUBSCRIPTION_NOT_CANCELLED`, with the subscription to cancel by hand
+  // in `details.subscriptionId`. `subscriptionCancelled: true` is the
+  // admin saying they have done that, and lets the deletion go on.
   remove: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
       if (!gym) return res.status(404).json({ success: false, message: 'Gym not found' });
 
-      const { confirmSlug, dropDatabase } = req.body || {};
-      const result = await deleteGym(gym, { confirmSlug, dropDatabase: dropDatabase === true || dropDatabase === 'true' });
-      audit(req, 'gym_deleted', gym, { slug: gym.slug, databaseDropped: result.databaseDropped });
+      const { confirmSlug, dropDatabase, subscriptionCancelled } = req.body || {};
+      const result = await deleteGym(gym, {
+        confirmSlug,
+        dropDatabase: dropDatabase === true || dropDatabase === 'true',
+        subscriptionCancelledByHand: subscriptionCancelled === true || subscriptionCancelled === 'true'
+      });
+      audit(req, 'gym_deleted', gym, { slug: gym.slug, databaseDropped: result.databaseDropped, billing: result.billing });
 
       return res.json({ success: true, data: result });
     } catch (error) {

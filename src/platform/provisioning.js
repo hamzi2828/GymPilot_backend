@@ -19,6 +19,8 @@ const { dropTenantDatabase } = require('./connections');
 const { databaseNameFor, tenantDatabaseNameFor, MAX_DATABASE_NAME_LENGTH, isProtectedDatabase, tenantDatabasePrefix } = require('./dbNames');
 const { runWithTenant, siteUrlFor, inviteSiteUrlFor, isDefaultTenant, subdomainHostFor, isInsecureHost } = require('./tenantContext');
 const { invalidateTenantCache } = require('./middleware/resolveTenant');
+// Called through the module, not destructured, so a test can stand in for it.
+const platformBilling = require('./services/platformBilling');
 
 // Tenant-side models and services. Proxies: they bind to the new gym's
 // database while runWithTenant() is active.
@@ -640,26 +642,74 @@ async function replaceDomains(gym, input) {
 }
 
 /**
+ * Stops the platform charging a gym that is about to be removed. Its Stripe
+ * subscription is cancelled at once, nothing more invoiced; one already over
+ * counts as cancelled. A payment page its Billing tab left open is closed
+ * too, so nobody can pay for a gym that is gone.
+ *
+ * When Stripe will not cancel it the gym must not be deleted -- the owner's
+ * card would be charged every cycle for nothing, with no gym left to cancel
+ * it from. That is a 409 `SUBSCRIPTION_NOT_CANCELLED`, unless the caller
+ * says it has been cancelled by hand (the keys it was made with were
+ * replaced, say, so this account cannot see it any more).
+ *
+ * @returns {Promise<null|{subscriptionId: string, cancelled: boolean, byHand?: boolean, amountPaid?: number, currency?: string, error?: string}>}
+ *          null when the gym has no Stripe subscription
+ */
+async function endPlatformBilling(gym, { cancelledByHand = false } = {}) {
+  const sub = (gym && gym.subscription) || {};
+  if (sub.checkoutSessionId) {
+    await platformBilling.closeCheckoutSession(sub.checkoutSessionId).catch((error) => {
+      console.warn(`[platform] could not close the open payment page of ${gym.slug}:`, error.message);
+    });
+  }
+  const subscriptionId = String(sub.stripeSubscriptionId || '').trim();
+  if (!subscriptionId) return null;
+  try {
+    const ended = await platformBilling.cancelSubscriptionNow(subscriptionId);
+    return { subscriptionId, cancelled: true, amountPaid: ended.amountPaid, currency: ended.currency };
+  } catch (error) {
+    if (cancelledByHand) return { subscriptionId, cancelled: false, byHand: true, error: error.message };
+    throw new ProvisioningError(
+      `Stripe would not cancel this gym's card subscription (${error.message}), so the gym was NOT deleted: its owner's card would keep being charged. ` +
+        `Cancel ${subscriptionId} in the Stripe dashboard, then delete again and tick "I have cancelled it in Stripe myself".`,
+      409,
+      { code: 'SUBSCRIPTION_NOT_CANCELLED', subscriptionId }
+    );
+  }
+}
+
+/**
  * Removes a gym from the platform. The database is kept unless asked for
  * explicitly, and even then only after the caller has typed the slug back.
+ *
+ * Its card subscription with the platform is cancelled first
+ * (endPlatformBilling) -- after everything that can refuse the deletion has
+ * had its say, and before anything is removed, so a gym is never left
+ * deleted and still being charged. `subscriptionCancelledByHand` lets the
+ * deletion go on when Stripe would not cancel it; `keepSubscription` leaves
+ * billing alone altogether, for the one caller that removes a gym in order
+ * to make it again from the same payment (signupProvisioning).
+ *
  * Its stored backups go either way (services/backupJobs.js
  * removeGymBackups): encrypted for this gym's id, nothing could open them
  * again, even for the same data registered anew. The answer says how many
  * went, and how many the store would not remove.
  */
-async function deleteGym(gym, { confirmSlug, dropDatabase = false } = {}) {
+async function deleteGym(gym, { confirmSlug, dropDatabase = false, subscriptionCancelledByHand = false, keepSubscription = false } = {}) {
   if (confirmSlug !== gym.slug) {
     throw new ProvisioningError('Type the gym\'s slug to confirm deletion', 400);
   }
+  let target = gym;
   if (dropDatabase) {
-    const withUri = await Gym.findByIdWithUri(gym._id);
-    const target = withUri || gym;
+    target = (await Gym.findByIdWithUri(gym._id)) || gym;
     const name = (target.database && target.database.name) || databaseNameFor(gym.slug);
     if (!(target.database && target.database.uri) && isProtectedDatabase(name)) {
       throw new ProvisioningError(`"${name}" is the platform's main database and cannot be dropped. Remove the gym without dropping its database.`, 400);
     }
-    await dropTenantDatabase(target);
   }
+  const billing = keepSubscription ? null : await endPlatformBilling(gym, { cancelledByHand: subscriptionCancelledByHand });
+  if (dropDatabase) await dropTenantDatabase(target);
   await Gym.deleteOne({ _id: gym._id });
   invalidateTenantCache();
   // After the gym is gone, so a deletion that fails never costs a live gym
@@ -668,6 +718,7 @@ async function deleteGym(gym, { confirmSlug, dropDatabase = false } = {}) {
   return {
     deleted: true,
     databaseDropped: !!dropDatabase,
+    billing,
     backupsRemoved: backups.removed,
     ...(backups.left ? { backupsLeft: backups.left, backupsError: backups.error } : {})
   };
