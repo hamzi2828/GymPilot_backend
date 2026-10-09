@@ -271,3 +271,32 @@ test('a price change Stripe cannot make is refused, and nothing is sent', async 
   // Not billed through Stripe at all: nothing to do.
   assert.equal((await syncStripeSubscription({ gym: { subscription: {} }, plan, next: before })).synced, false);
 });
+
+test('a timezone the server cannot keep time in is refused before the gym is made', async () => {
+  const { validTimezone } = require('../../src/platform/provisioning');
+  assert.equal(validTimezone('Asia/Karachi'), 'Asia/Karachi');
+  assert.equal(validTimezone(' Europe/London '), 'Europe/London');
+  // Nothing given: UTC, as before.
+  assert.equal(validTimezone(''), 'UTC');
+  assert.equal(validTimezone(undefined), 'UTC');
+  for (const bad of ['PKT', 'Karachi', 'Asia/Lahore', 'GMT+5:00:00']) {
+    assert.throws(() => validTimezone(bad), (e) => e instanceof ProvisioningError && e.status === 400 && /not a timezone this server knows/.test(e.message), bad);
+  }
+
+  // Saved on a gym, "PKT" would make every attendance call it serves throw.
+  let created = 0;
+  const create = Gym.create;
+  Gym.create = async () => {
+    created += 1;
+    throw new Error('must not be reached');
+  };
+  try {
+    await assert.rejects(
+      provisionGym({ name: 'Iron Works', owner: { email: 'owner@ironworks.com', password: 'a strong password' }, locale: { timezone: 'PKT', currency: 'PKR' } }),
+      (e) => e instanceof ProvisioningError && e.status === 400 && /"PKT" is not a timezone/.test(e.message)
+    );
+    assert.equal(created, 0);
+  } finally {
+    Gym.create = create;
+  }
+});

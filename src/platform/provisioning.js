@@ -407,6 +407,23 @@ function validateOwner(owner, { required }) {
 }
 
 /**
+ * The gym's timezone as it will be stored: what was given when this server
+ * can keep time in it, UTC when nothing was. Anything else is refused now --
+ * "PKT" or "Karachi" saved on the gym would make every attendance call it
+ * ever serves throw, since each one asks the clock for the gym's local day.
+ */
+function validTimezone(value) {
+  const timezone = String(value || '').trim();
+  if (!timezone) return 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: timezone });
+  } catch {
+    throw new ProvisioningError(`"${timezone}" is not a timezone this server knows. Use a name like Asia/Karachi.`);
+  }
+  return timezone;
+}
+
+/**
  * Whether a database of that name exists on the shared cluster right now.
  * Null when it could not be told (no listDatabases privilege, say) -- the
  * caller treats "unknown" as "leave it alone".
@@ -492,6 +509,7 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
   }
 
   const owner = validateOwner(input.owner, { required: !adoptExisting });
+  const timezone = validTimezone(input.locale && input.locale.timezone);
 
   let plan = null;
   if (input.planId) {
@@ -547,7 +565,7 @@ async function provisionGym(input, { createdBy = null, enforceDatabasePolicy = f
     plan: plan ? plan._id : null,
     subscription,
     locale: {
-      timezone: (input.locale && input.locale.timezone) || 'UTC',
+      timezone,
       currency: String((input.locale && input.locale.currency) || 'USD').toUpperCase(),
       country: (input.locale && input.locale.country) || ''
     },
@@ -809,6 +827,7 @@ module.exports = {
   provisionGym,
   replaceDomains,
   deleteGym,
+  validTimezone,
   seedTenantDefaults,
   connectDomainsToWebsite,
   normalizeDomains,

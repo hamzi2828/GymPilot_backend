@@ -267,7 +267,10 @@ module.exports = {
 
       const admin = await SuperAdmin.findById(req.superAdmin._id).select('+password');
       if (!admin || !(await bcrypt.compare(currentPassword, admin.password))) {
-        return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+        // 400, not 401: the session is fine, it is the form that is wrong.
+        // The panel treats a 401 as "signed out" and would send the admin
+        // to the sign-in page for a typo.
+        return res.status(400).json({ success: false, code: 'WRONG_PASSWORD', message: 'The current password is not right. Nothing was changed.' });
       }
 
       admin.password = await bcrypt.hash(newPassword, await bcrypt.genSalt(10));

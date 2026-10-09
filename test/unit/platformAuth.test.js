@@ -246,3 +246,20 @@ test('a reset link is built on PLATFORM_ADMIN_ORIGIN and nowhere else, whatever 
     restore();
   }
 });
+
+test('a mistyped current password is a mistake in the form, not the end of the session', async () => {
+  const admin = await adminDoc();
+  const restore = accountIs(admin);
+  try {
+    const token = signPlatformToken(admin);
+    const res = await call(controller.changePassword, { superAdmin: admin, body: { currentPassword: 'not the password', newPassword: 'a brand new password' } });
+    // Never 401: the panel takes a 401 to mean "signed out" and leaves the page.
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.code, 'WRONG_PASSWORD');
+    assert.match(res.body.message, /current password is not right/);
+    assert.equal(admin.saves, 0, 'nothing changed');
+    assert.equal(await present(token), 'next', 'still signed in');
+  } finally {
+    restore();
+  }
+});
