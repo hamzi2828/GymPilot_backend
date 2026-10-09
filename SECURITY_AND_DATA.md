@@ -7,7 +7,8 @@ Gym JWTs last 7 days on the website, 30 days with **Remember me** ticked and
 `tv` (the account's `tokenVersion`). `src/middleware/auth.js` checks both on
 every request, re-reading the account at most every 30 seconds per process:
 
-* a token from one gym is refused on another gym's site;
+* a token from one gym is refused on another gym's site, and so is one that
+  names no gym or no account at all;
 * a deactivated account is out within 30 seconds;
 * bumping `tokenVersion` ends every session at once — `POST /user/logout-all`
   (the member, from **Security & privacy** on their account page), a
@@ -19,16 +20,52 @@ every request, re-reading the account at most every 30 seconds per process:
   from staff). A token names the role it was signed in with, so a demoted
   manager signs in again rather than keeping "manager" for weeks.
 
-Google sign-in finds an account by email. Sign-up does not verify the email,
-so the first time Google (which has) links into a password account that was
-not made through Google, that password is cleared and its sessions end: a
-stranger who pre-registered the address is shut out, and the owner can set a
-password with **Forgot password**, which also works for accounts that have
-only ever used Google. Google sign-in gets the same two-factor step as a
-password.
+Google sign-in finds an account by email. Anyone can sign up with any
+address (it is confirmed afterwards, see *Email confirmation*), so the first
+time Google — which has checked the address — links into a password account
+that was not made through Google, that password is cleared and its sessions
+end: a stranger who pre-registered the address is shut out, and the owner
+can set a password with **Forgot password**, which also works for accounts
+that have only ever used Google. The address then counts as confirmed.
+Google sign-in gets the same two-factor step as a password.
 
 Platform (super admin) tokens have their own secret and are refused by every
-gym endpoint.
+gym endpoint. They carry the admin's own `tokenVersion` (`tv`), checked on
+every request (`src/platform/middleware/platformAuth.js`): signing out ends
+that admin's sessions on the server, not only in the browser, a password
+reset ends them all, and a password change ends every one but the one that
+made it.
+
+## Email confirmation — `src/services/emailVerification.js`
+
+A sign-up takes any address, and a member may change theirs, so an address
+on an account proves nothing until somebody has shown it is theirs
+(`user.emailVerified`; only `false` means "not yet" — accounts from before
+the flag count as confirmed, so nobody was cut off when it arrived).
+
+What confirms an address: the link in the "confirm your email" message (7
+days, single use, only its hash stored; the link opens a page with a button,
+so a mail scanner opening it confirms nothing); a Google sign-in; a right
+sign-in code or a password reset that was emailed to it; staff making or
+importing the account, or vouching for a member at the desk
+(`POST /admin/users/:id/verify-email`, users · manage). A self-service
+sign-up, or a member changing their own address, starts unconfirmed and is
+sent the link; `POST /user/verify-email/send` sends a fresh one. The old
+address is told when it is replaced or removed.
+
+What waits on it — and nothing else does; the account signs in, books and
+pays as before, and everything filed under its own id is untouched:
+
+* **a guest's purchases.** Somebody who paid before making an account is
+  known by the address on the order. An account claims those orders — at the
+  door, in the booking screen, in its data export — only once its address is
+  confirmed. Before that, anyone could register a guest buyer's address and
+  walk in on what they paid for;
+* **what follows from having joined.** The same orders are what take the
+  joining fee off, let a new term start when the current one ends, and
+  refuse a second card subscription (BILLING.md → *Who has joined*): an
+  unconfirmed address gets none of that, at checkout, by bank transfer or at
+  the desk.
 
 ## Who may act on whose account
 
@@ -43,6 +80,39 @@ is yours to change). Only an administrator touches an administrator.
 Signing in with a name nobody has costs the same bcrypt work as a real
 account (`src/services/passwordCheck.js`), so the time an answer takes does
 not say which usernames or addresses exist.
+
+## Wrong passwords — `src/services/signInLock.js`
+
+An account gets **10 password tries**; after ten wrong in a row its password
+is not checked again for **15 minutes**. The count is kept on the account,
+in the database, so it holds across servers and addresses alike (the request
+limits under *Rate limits* are per address and in memory), and each try is
+counted before the password is compared, so guesses sent all at once still
+share the ten. It counts wherever the password is typed: the website, the
+phone app, the front-desk app's sign-in, and the "current password" checks
+below.
+
+It cannot shut somebody out for good: it clears itself after the 15 minutes,
+a right password clears the count, and a new password — a reset link,
+"change password", staff setting one — opens the account at once. It pauses
+only the password: Google sign-in, an emailed reset and sessions already
+open are untouched. A refused sign-in reads the same whether the password
+was wrong, the name unknown or the account paused, and always says that
+ten wrong tries pause sign-in for 15 minutes.
+
+## Type your current password
+
+A session can be stolen (a shared computer, a copied token) without the
+password being known. So two changes that decide who can get back into an
+account need the current password typed again
+(`passwordCheck.currentPasswordRefusal`): **changing or removing your own
+email address** (`PUT /update/user` with `currentPassword`) and **switching
+two-factor sign-in off** (`PUT /user/two-factor { enabled: false,
+currentPassword }`; switching it on needs nothing more). Without it: `400`
+with `code` `PASSWORD_REQUIRED`, `PASSWORD_INCORRECT` (wrong, or the
+password is paused) or `PASSWORD_NOT_SET` (an account that only ever used
+Google: **Forgot password** emails its address a link to set one, which is
+the proof this check stands for). Wrong tries here use the same ten.
 
 ## Staff pay
 
@@ -199,8 +269,9 @@ downloaded. Administrators only, every step in the audit log:
    password reset after a stolen token). Every account's `tokenVersion`
    becomes one above any a token could carry (above the highest before and
    after, and above the time in seconds, for accounts deleted since the
-   backup); pending reset links and sign-in codes are cleared; every desk
-   sign-in is revoked; the session cache is dropped. The answer says
+   backup); pending reset links, email-confirmation links and sign-in codes
+   are cleared, and so is any count of wrong passwords or pause the backup
+   held; every desk sign-in is revoked; the session cache is dropped. The answer says
    everyone, the admin included, must sign in again (`signedOut: true`).
 8. The phone app's usernames (`platform_member_logins`, not in a gym's
    backup) are rebuilt from the restored accounts. A username another gym's
@@ -249,6 +320,23 @@ page load, so a mail scanner opening the link changes nothing. Rotating
 
 ## Uploads
 
+**The store is public by URL.** Whoever has a file's address can open it —
+Vercel Blob as installed has no private files, and files kept on local disk
+are served from `/uploads` the same way — and that goes for a member's ID
+scan or medical letter as much as for a class photo. So the address is the
+secret: every stored name carries 128 random bits from the system's random
+source (`helper/blobUpload.js`, `helper/upload.js`), where the older names
+(a timestamp and a small random number) could be worked out. Treat a
+document's link as the document. Files stored before this keep their old
+names.
+
+**Files go with the account.** Deleting an account removes what was uploaded
+for it — its photo and its documents — along with its fingerprints, push
+registrations, desk sign-ins and phone-app username
+(`userController.releaseAccount`); removing one document or replacing a
+photo deletes that file. Only files under the gym's own folder are ever
+deleted.
+
 Images are JPEG, PNG, WebP or GIF — SVG is refused, since it can carry
 script — and a stored file is named for the type that was checked, not the
 name it arrived with. Limits: images 5 MB (`UPLOAD_MAX_FILE_SIZE_MB`), hero
@@ -267,4 +355,5 @@ the same order, as the handler behind the route reads it -- so a decoy in
 another field buys no fresh count), with a looser ceiling per address, so
 members sharing a gym's Wi-Fi do not lock each other out. The desk app
 counts its failures per account, whether it was named by email or by
-username. A sign-in name of spaces alone is refused (400), never looked up.
+username, and its sign-in also uses the account's ten password tries (see
+*Wrong passwords*). A sign-in name of spaces alone is refused (400), never looked up.

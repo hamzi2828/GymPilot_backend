@@ -12,12 +12,37 @@ Packages**.
 |---|---|
 | `kind` | `membership` · `session_pack` · `day_pass` · `trial` · `pt_pack` |
 | `price` / `priceAmount` | display string the site shows / numeric mirror kept in step on save |
-| `period` | label for one-off packages ("month", "3 months", "year") |
+| `period` | label for one-off packages ("month", "3 months", "year"), and — with no `durationDays` — how long one term lasts (see below) |
 | `durationDays` | explicit validity in days; 0 = derive from `period` |
 | `billing.mode` | `one_time` (a term paid up front) or `recurring` (Stripe subscription) |
 | `billing.interval` / `intervalCount` / `trialDays` | what Stripe bills on, for recurring |
 | `sessions` | sessions on a pack (packs expire when used up or when `durationDays` passes) |
 | `joiningFee` | charged once, on top of a member's first membership: not to anyone who has had a paid (or refunded) membership before, and never on a renewal or a package change (`membershipService.joiningFeeDue`) |
+
+**How long a term lasts** (`membershipService.termEnd`): `durationDays` when
+it is set; else the billing interval of a recurring package; else what the
+`period` label names (`periodLength`). The label is read for the first unit
+it names — day, week, fortnight (or bi-weekly), month, quarter, half year
+(or semi-annual), year — with a count in front in digits or in words up to
+twelve: "month", "3 months", "six weeks", "12 Months Membership",
+"quarterly". A one-off package with no `durationDays` whose label names no
+length ("Custom", "Lifetime"), or one that reads two ways ("bi-monthly",
+"biannual"), is refused when it is saved: `400 { code:
+'PERIOD_NOT_UNDERSTOOD', message }`, the message saying what to write, or to
+set the days instead. Only a package already stored that way, saved with its
+label untouched, is let through; it still sells as 30 days, as it always
+did, until it is put right.
+
+**Who has joined** (the joining fee, and a new term starting when the
+current one ends) is decided by the account, never by an email typed into a
+form. Online, that is the signed-in account (`membershipService.checkoutIdentity`):
+**a guest always pays the joining fee**, whatever address they type, and
+`GET /api/gymfolio/membership/joining-fee-due` answers for the caller's own
+account only (`due: true` signed out). A guest's earlier orders count for an
+account only through the account's own email, and only once that email is
+confirmed (SECURITY_AND_DATA.md → *Email confirmation*): until then the
+account is new. An order paid online starts after the terms of the account
+it was bought under; a guest order starts when it is paid.
 
 A package members still hold cannot be deleted: `DELETE /packages/:id`
 answers `409 { code: 'PACKAGE_IN_USE', live, renewable }` while any order
@@ -49,7 +74,8 @@ screen offers that on the refusal.
   startAfterDays?, discountAmount?, discountNote?, amountOverride? (or
   amount), waiveJoiningFee?, trainerId?, trainerFee?,
   trainerCommissionType? ('percent' | 'amount'), trainerCommissionValue?,
-  notes? }` → `201 { success, message, data: order }`. `startDate` (a bare
+  notes?, requestId? }` → `201 { success, message, data: order }`
+  (`requestId`: see *Sent twice* below). `startDate` (a bare
   `YYYY-MM-DD` is the start of that day at the gym) or `startAfterDays`
   (0–365: the start of that day from today; 0 = now) — not both — lets a
   member register today and start later; the end date is worked out from
@@ -65,6 +91,24 @@ screen offers that on the refusal.
   `POST /api/admin/members/register { ...member, membership: { packageId,
   ...the terms above } }` (FEATURES.md → *Adding a member at the desk*):
   the same sale, and the account is removed again when the sale fails.
+
+**Sent twice — `requestId`.** A desk request whose answer never arrived (a
+timeout, a dropped connection) gets sent again, and used to sell a second
+term or record the same money twice. Assign, renew, a part payment
+(`POST /package-orders/:id/payments`) and Add member each take an optional
+`requestId`: any id the screen makes up for that one action — 8 to 100
+letters, digits, hyphens or underscores, a UUID will do; anything else is
+`400 INVALID_TERMS` — sent again unchanged on a retry. A request whose id is
+already recorded answers with the first result plus `repeated: true` and
+changes nothing; a repeated sale or renewal sends no second confirmation
+email. Without one every request is new, as before. Where it is kept: `metadata.requestId` on the order a
+sale or renewal made (matched per member), `metadata.lastPaymentRequestId`
+for an order's latest part payment, and `registrationRequestId` on the
+account Add member made (unique per gym). Add member takes it at the top
+level or as `membership.requestId`; its repeat answers `{ success, repeated:
+true, message, member, order, credentials: null, emailed: false }` with no
+`password` — that was shown or emailed once and only its hash is kept — and
+a message saying to set one from the member's profile if it was missed.
 
 `payment.method` is one of `src/services/paymentMethods.js`: `stripe` (Card
 (Stripe)), `card` (Card — the desk terminal), `bank_transfer`, `cash`,
@@ -102,9 +146,9 @@ issues the invoice number, redeems the coupon and activates the order.
   immediately. `/resume` undoes a pending cancellation.
 * **Renew** — `POST /package-orders/:id/renew` (staff) `{ paymentMethod?,
   markPaid?, months?, notes?, force?, startDate?, discountAmount?,
-  discountNote?, amountOverride? }`: a fresh term of the same package,
-  starting when the current one ends (or on `startDate`), priced like a
-  sale. Never a joining fee; no trainer (400).
+  discountNote?, amountOverride?, amountPaid?, requestId? }`: a fresh term
+  of the same package, starting when the current one ends (or on
+  `startDate`), priced like a sale. Never a joining fee; no trainer (400).
 * **Edit terms** — `PATCH /package-orders/:id/terms { startDate?, endDate?,
   discountAmount?, discountNote?, note? }` (package-orders · manage) → `{
   success, message, data: order }`. Moves the dates (a bare date is the
@@ -122,12 +166,22 @@ issues the invoice number, redeems the coupon and activates the order.
   price), on the price of any card payment, and on a closed order (`409
   ORDER_CLOSED`: refunded, failed or cancelled); `409 TERMS_CHANGED` when the
   order moved on while it was being saved.
-* **Change package** — `POST /package-orders/:id/change-package {packageId}`
-  (staff): the unused days of the old package are credited pro rata against
-  the new price -- the membership money received only: the admission fee and
-  the trainer's fee inside the total were charged once and are not credited
-  back. On a Stripe subscription the subscription item is switched and
-  Stripe prorates.
+* **Change package** — `POST /package-orders/:id/change-package {packageId,
+  paymentMethod?, markPaid?, notes?, forfeitCredit?}` (staff): the unused
+  days of the old package are credited pro rata against the new price -- the
+  membership money received only: the admission fee and the trainer's fee
+  inside the total were charged once and are not credited back. A credit
+  worth more than the new package (a year paid, six months left, moved to a
+  monthly) cannot all come off its price, and the rest would be money the
+  member paid for nothing: the change is refused with `409 { code:
+  'CREDIT_EXCEEDS_PRICE', details: { credit, price, creditUnused, currency } }`
+  and a message saying to refund first — or to confirm. Sent again with
+  `forfeitCredit: true` it goes ahead. The answer is `201 { success, message,
+  data: new order, previous, credit, creditUnused }`: what came off the new
+  price, and what was given up (0 when nothing was). On a Stripe subscription
+  the subscription item is switched and Stripe prorates (`credit` and
+  `creditUnused` are `null`); a subscription cannot be moved onto a package
+  that is not billed by subscription (`409 NOT_A_SUBSCRIPTION_PACKAGE`).
 * **Session packs** — `POST /package-orders/:id/use-session` (staff). The desk
   receipt shows sessions left; an exhausted pack reads as expired.
 * **Billing portal** — `POST /package-orders/:id/billing-portal` returns a
@@ -181,6 +235,19 @@ package change is a new order whose first payment is `initial`, and the row's
 `renewedFrom` (the order it renewed or replaced; `null` for none) is what
 tells it apart — Daily sales files those under renewals.
 
+**Imported memberships are not takings.** A membership the member import
+brings in already paid is marked `imported: true` on the order: the money
+was taken in the gym's old system, before it moved here. The membership is
+whole — dates, the desk, bookings — but its first payment is left out of
+`membershipPaymentStages`, and so out of the dashboard, Accounts (overview
+and sales), Daily sales, the P&L, the reports and the platform's gym stats;
+importing 300 members does not put 300 payments into today's revenue. It is
+given no invoice number (`GET /package-orders/:id/invoice.pdf` answers `404
+NO_INVOICE` for it), and the orders export has an **Imported** column.
+Money taken on it later — a balance paid off after its terms are edited —
+counts on the day it arrives, and a row imported as not paid is an ordinary
+pending order, whose payment and invoice are today's when it is paid.
+
 ### Paying in parts
 
 A membership sold at the desk may be paid for over time. `amountPaid` on
@@ -199,7 +266,7 @@ fee, then membership. An order paid in full at once keeps none.
 
 | Route | Permission | Answer |
 |---|---|---|
-| `POST /package-orders/:id/payments { amount, method?, note? }` | package-orders · manage | `{ success, message, data: order }` — money received against the balance, recorded as an installment (the fees still owed first; `method` defaults to the order's). An order paid in part at once gets that first payment as its opening installment. Refused: `400 INVALID_PAYMENT` (not above 0), `400 OVERPAYMENT` (more than the balance), `422 PAYMENT_METHOD_INVALID`, `409 STRIPE_BILLED` (the order goes through Stripe), `409 NOT_PAID` (pending or refunded), `409 NO_BALANCE`, `409 REFUND_IN_PROGRESS` (a refund of the order is under way: it gives back what had come in when it started and clears the balance, so a payment taken meanwhile would be neither refunded nor owed), `409 BALANCE_CHANGED` (somebody recorded a payment at the same moment: one conditional write on the balance it started from). |
+| `POST /package-orders/:id/payments { amount, method?, note?, requestId? }` | package-orders · manage | `{ success, message, data: order }` (`repeated: true` when the same `requestId` was already recorded — see *Sent twice*) — money received against the balance, recorded as an installment (the fees still owed first; `method` defaults to the order's). An order paid in part at once gets that first payment as its opening installment. Refused: `400 INVALID_PAYMENT` (not above 0), `400 OVERPAYMENT` (more than the balance), `422 PAYMENT_METHOD_INVALID`, `409 STRIPE_BILLED` (the order goes through Stripe), `409 NOT_PAID` (pending or refunded), `409 NO_BALANCE`, `409 REFUND_IN_PROGRESS` (a refund of the order is under way: it gives back what had come in when it started and clears the balance, so a payment taken meanwhile would be neither refunded nor owed), `409 BALANCE_CHANGED` (somebody recorded a payment at the same moment: one conditional write on the balance it started from). |
 | `GET /package-orders/dues?search=&page=&limit=` | package-orders · view | `{ success, data: [{ memberId, name, phone, email, gender, memberCode, currency, balanceDue, orders: [{ orderId, orderNumber, packageName, status, amount, amountPaid, balanceDue, startDate, endDate, lastPaidAt }] }], totals: [{ currency, balanceDue, members, orders }], pagination: { page, limit, total, pages } }` — one row per member and currency with money still owed on a granted order, largest balance first; `limit` at most 200 (default 50). Member fields come from the member's record, else the order's own copy (a guest). |
 | `GET /package-orders?hasDues=1` | package-orders · view | the orders list, only those with a balance due |
 
@@ -329,6 +396,43 @@ see below).
   reactivate the gym, then reloads. Suspended and unknown gyms get no
   exception.
 
+## Suspending and deleting a gym
+
+**Suspend pauses collection.** `PATCH /api/platform/gyms/:id/status { status:
+'active' | 'suspended' }`: a suspended gym that pays by card is not charged
+while it is off — Stripe stops collecting on its subscription
+(`pause_collection`, each invoice that falls due voided, nothing owed for
+the time paused) and starts again when the gym is reactivated. The switch
+itself never waits on Stripe: when Stripe refuses, the status still changes
+and the answer's `warnings` say what to pause or resume by hand. `billing`
+is `{ subscriptionId, paused }` when Stripe took it.
+
+**Deleting a gym cancels its platform subscription.** `DELETE
+/api/platform/gyms/:id { confirmSlug, dropDatabase?, subscriptionCancelled?,
+memberSubscriptionsAcknowledged? }` cancels the gym's Stripe subscription
+with the platform at once, with nothing more invoiced, before anything is
+removed (and closes a payment page its Billing tab left open). When Stripe
+will not cancel it nothing is deleted: `409 { code:
+'SUBSCRIPTION_NOT_CANCELLED', details: { subscriptionId } }` — cancel it in
+the Stripe dashboard, then delete again with `subscriptionCancelled: true`.
+A gym whose members still pay it by card subscription is refused too (`409
+{ code: 'MEMBER_SUBSCRIPTIONS_ACTIVE', details: { count } }`) until
+`memberSubscriptionsAcknowledged: true`: those are in the gym's own Stripe
+account, not the platform's to cancel, and go on charging.
+
+## Paying outside Stripe — `src/platform/services/manualPayments.js`
+
+A gym that pays the platform by bank transfer, JazzCash, Easypaisa or cash
+has each payment recorded by hand from the platform panel:
+
+| Route (super admin) | Answer |
+|---|---|
+| `GET /api/platform/gyms/:id/payments` | `{ success, data: [payment], next }` — the payments recorded for the gym, newest first, and `next`: whether another can be recorded (`canRecord`, with the `reason` when not) and what the form starts from — `amount`, `currency`, `billingCycle`, `paidFrom`, `paidUntil`, `methods`. |
+| `POST /api/platform/gyms/:id/payments { amount, method, receivedAt?, reference?, note?, paidUntil?, requestId }` | `201 { success, data: payment, duplicate: false, gym, warnings }`. `method` is `bank_transfer`, `jazzcash`, `easypaisa`, `cash` or `other`; the first three need a `reference` (the transaction id). The payment is kept in the gym's history, its paid-until date (`subscription.currentPeriodEnd`) moves to `paidUntil` — by default one billing cycle on from the later of today and the date already paid until — and the subscription becomes `active` whatever it was, so a gym cut off for not paying is served again at once. The form's `requestId` (at least 8 characters) makes a second click the same payment: `200` with `duplicate: true` and nothing moved. Refused: `400 INVALID_PAYMENT` (the first problem found, in words), `409 DUPLICATE_REFERENCE` (that reference is already on record for the gym), `409 STRIPE_BILLED` (the gym pays by card; Stripe records its payments and moves its dates itself). A suspended gym stays suspended, and `warnings` says so. |
+
+The daily roll-over needs nothing more: a gym with no Stripe subscription
+goes past due when `currentPeriodEnd` passes, and this is what moves it.
+
 ## Paying by card — `src/platform/services/platformBilling.js`
 
 Tenant-side routes (`src/platform/routes/billingRoutes.js`, mounted at
@@ -357,7 +461,10 @@ less left, or a payment is overdue.
 `contactEmail` is `PLATFORM_CONTACT_EMAIL`. The checkout builds inline prices
 (`line_items[].price_data`, `recurring.interval` month/year,
 `product_data.name` "<Plan> (GymPilot)", `unit_amount` in minor units via
-`helper/money.toMinorUnits` — zero-decimal currencies handled) from the
+`helper/money.toMinorUnits` — zero-decimal currencies as they are, and the
+three-decimal ones (BHD, JOD, KWD, OMR, TND) in thousandths, rounded to the
+hundredth as Stripe requires; what Stripe reports is read back the same way
+with `fromMinorUnits`, so a dinar is not read as ten) from the
 gym's agreed plan price and one line per paid add-on, in the plan's currency.
 `customer` is the existing `stripeCustomerId`, else `customer_email` is the
 owner's; `client_reference_id` is the gym id and `metadata` /
@@ -426,18 +533,25 @@ Public routes (`src/platform/routes/platformRoutes.js`, no session):
   `<slug>.<root>`, and provisioning refuses a gym with none (`requireSite`);
 * the platform's Stripe secret key is saved and charging is switched on
   (panel → System → Stripe);
+* `PLATFORM_ADMIN_ORIGIN` is set — Stripe sends the buyer back to it, and in
+  production nothing stands in for it (only a developer's machine falls back
+  to `http://localhost:3001`);
 * a webhook signing secret is saved there too, or no payment could ever
   create its gym;
-* `SMTP_HOST`, `SMTP_USER` and `SMTP_PASS` are all set — a gym made a moment
-  ago has no email settings of its own, so its owner's set-password link
-  goes out through the env SMTP, and without it the buyer would pay and
-  never get into their gym.
+* `SMTP_HOST`, `SMTP_USER` and `SMTP_PASS` are all set **and the mail server
+  accepts them** — a gym made a moment ago has no email settings of its own,
+  so its owner's set-password link goes out through the env SMTP, and
+  without it the buyer would pay and never get into their gym. Filled in is
+  not enough (a wrong password is filled in too), so the server is asked for
+  a connection and a login (`platformEmail.verifyPlatformEmail`, the answer
+  remembered for a couple of minutes). Asked last: it is the one check that
+  leaves the building.
 
-`PLATFORM_ADMIN_ORIGIN` is not checked, but Stripe sends the buyer back to it:
-`<origin>/checkout/success?signup=<id>`, or `<origin>/checkout?plan=…&cycle=…&cancelled=1`
-— the request's own `Origin` when it is one of the listed origins, else the
-first one listed (`http://localhost:3001` when unset). The platform webhook
-must be registered with `checkout.session.completed` (DEPLOYMENT.md §2).
+Stripe sends the buyer back to `<origin>/checkout/success?signup=<id>`, or
+`<origin>/checkout?plan=…&cycle=…&cancelled=1` — the request's own `Origin`
+when it is one of the origins `PLATFORM_ADMIN_ORIGIN` lists, else the first
+one listed. The platform webhook must be registered with
+`checkout.session.completed` (DEPLOYMENT.md §2).
 
 **Before anyone pays** the selection is priced on the server
 (`priceSelection`, as for a checkout request) and the web address is checked
