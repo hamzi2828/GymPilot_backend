@@ -288,10 +288,11 @@ module.exports = {
       });
       // Whether a confirmation can go out at all. The emails below are sent
       // after the response, so nobody can wait on their result -- but a
-      // platform with no sender configured will certainly send nothing, and
-      // the page must not promise an email that cannot arrive.
-      const { platformEmailConfigured } = require('./signupController');
-      const emailed = platformEmailConfigured();
+      // platform whose mail server is not set up, or refuses its login, will
+      // certainly send nothing, and the page must not promise an email that
+      // cannot arrive. Asked of the server itself, and remembered for a
+      // couple of minutes (services/platformEmail.js).
+      const emailed = (await require('../services/platformEmail').verifyPlatformEmail()).ok;
 
       if (recent) {
         // Somebody going back to fix a typo or change their mind: everything

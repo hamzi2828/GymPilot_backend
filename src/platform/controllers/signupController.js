@@ -25,6 +25,7 @@ const { platformBillingAvailable, platformStripeConfig, PlatformStripeNotConfigu
 // Called through the modules, not destructured, so a test can stand in for them.
 const platformBilling = require('../services/platformBilling');
 const signupProvisioning = require('../services/signupProvisioning');
+const platformEmail = require('../services/platformEmail');
 const { afterResponse } = require('../../services/afterResponse');
 
 const { PlatformBillingError } = platformBilling;
@@ -63,15 +64,9 @@ function text(value, max) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
 
-/**
- * Whether the platform can send email of its own. A gym made a moment ago
- * has nothing under Settings → Email yet, so its owner's set-password link
- * goes out through the env SMTP (services/emailService.js falls back to it)
- * -- and that email is the only way into the gym they have just paid for.
- */
-function platformEmailConfigured(env = process.env) {
-  return ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'].every((key) => String(env[key] || '').trim() !== '');
-}
+// Whether the platform's email settings are there at all (services/
+// platformEmail.js, which also asks the mail server whether they work).
+const { platformEmailConfigured } = platformEmail;
 
 /**
  * Whether checkout may take payment and build the gym itself. Everything
@@ -81,8 +76,14 @@ function platformEmailConfigured(env = process.env) {
  *   * the platform's Stripe keys saved and charging switched on;
  *   * a webhook signing secret, or every event is refused and the gym is
  *     never made after the buyer has paid;
- *   * the platform's own email (platformEmailConfigured), or the owner of a
- *     gym just made never gets the link to set their password.
+ *   * the platform's own email, and working: a gym made a moment ago has
+ *     nothing under Settings → Email yet, so its owner's set-password link
+ *     goes out through the env SMTP -- and that email is the only way into
+ *     the gym they have just paid for. The settings being filled in is not
+ *     enough (a wrong password is filled in too), so the mail server is
+ *     asked whether it accepts the connection and login
+ *     (platformEmail.verifyPlatformEmail, remembered for a couple of
+ *     minutes). Asked last: it is the one check that leaves the building.
  * PLATFORM_SELF_SERVE_SIGNUP=off turns it off whatever else is true, for an
  * operator who wants every new gym to go through the panel.
  *
@@ -100,6 +101,10 @@ async function selfServeAvailable() {
   if (!billing.available) return billing;
   const { webhookSecret } = await platformStripeConfig();
   if (!webhookSecret) return { available: false, reason: 'The platform has no Stripe webhook signing secret, so a payment could never create its gym' };
+  const email = await platformEmail.verifyPlatformEmail();
+  if (!email.ok) {
+    return { available: false, reason: `The platform's mail server (SMTP_HOST) would not accept a connection and login (${email.error}), so the owner of a new gym would never get the link to set their password` };
+  }
   return { available: true, reason: '' };
 }
 

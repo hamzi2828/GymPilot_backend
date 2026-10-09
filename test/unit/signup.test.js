@@ -22,6 +22,7 @@ const DemoRequest = require('../../src/platform/models/demoRequestModel');
 const PlatformPlan = require('../../src/platform/models/platformPlanModel');
 const PlatformSettings = require('../../src/platform/models/platformSettingsModel');
 const platformBilling = require('../../src/platform/services/platformBilling');
+const platformEmail = require('../../src/platform/services/platformEmail');
 const controller = require('../../src/platform/controllers/signupController');
 const { signupDecision, localeFor, recoveryDue } = require('../../src/platform/services/signupProvisioning');
 
@@ -317,8 +318,15 @@ const PLAN = {
 
 /** Everything start() touches, stubbed; `state` changes what each answers. */
 function startStubs(state = {}) {
-  const calls = { created: [], updated: [], sessions: [], closed: [] };
+  const calls = { created: [], updated: [], sessions: [], closed: [], mailChecks: 0 };
   const restore = [
+    // The mail server, asked whether it takes the platform's login.
+    stub(platformEmail, {
+      verifyPlatformEmail: async () => {
+        calls.mailChecks += 1;
+        return state.mailRefused ? { ok: false, error: state.mailRefused } : { ok: true, error: '' };
+      }
+    }),
     stub(PlatformSettings, { getSettings: async () => ({ stripe: { secretKey: 'sk_test_unit', enabled: true, webhookSecret: state.noWebhookSecret ? '' : 'whsec_unit' } }) }),
     stub(PlatformPlan, { findOne: () => ({ ...PLAN, lean: async () => PLAN }) }),
     stub(Gym, { findOne: () => query(state.slugTaken ? { _id: 'g1' } : null), find: () => query(state.slugTaken ? [{ slug: 'iron-works' }] : []) }),
@@ -378,6 +386,97 @@ test('with no platform email nobody pays for a gym whose set-password link could
     });
   } finally {
     restore();
+  }
+});
+
+test('a mail server that refuses the login means nobody is sent to pay: the form becomes a request instead', async () => {
+  // Three variables that are filled in and wrong: the card would be charged,
+  // the gym built, and the email with the way in never sent.
+  const { calls, restore } = startStubs({ mailRefused: 'Invalid login: 535 Authentication failed' });
+  try {
+    await withEnv(SIGNUP_ENV, async () => {
+      const availability = await controller.selfServeAvailable();
+      assert.equal(availability.available, false);
+      assert.match(availability.reason, /would not accept a connection and login .Invalid login: 535 Authentication failed./);
+      const res = fakeRes();
+      await controller.start(req(FORM), res);
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.body.code, 'SELF_SERVE_UNAVAILABLE');
+      // Nothing about why reaches the public.
+      assert.doesNotMatch(JSON.stringify(res.body), /535|login/i);
+      assert.equal(calls.created.length, 0);
+      assert.equal(calls.sessions.length, 0, 'Stripe was never asked for a payment page');
+    });
+  } finally {
+    restore();
+  }
+
+  // The mail server is the last thing asked: not at all when Stripe is not ready.
+  const noStripe = startStubs({ noWebhookSecret: true });
+  try {
+    await withEnv(SIGNUP_ENV, async () => {
+      assert.equal((await controller.selfServeAvailable()).available, false);
+      assert.equal(noStripe.calls.mailChecks, 0);
+    });
+  } finally {
+    noStripe.restore();
+  }
+});
+
+test('the mail server is asked for a connection and login, briefly, and the answer is remembered for a while', async () => {
+  const SMTP = { SMTP_HOST: 'smtp.gympilot.test', SMTP_PORT: '465', SMTP_USER: 'noreply@gympilot.test', SMTP_PASS: 'unit-smtp-pass' };
+  const made = [];
+  let answer = async () => true;
+  const restore = stub(platformEmail.mailer, {
+    createTransport: (options) => {
+      made.push(options);
+      return { verify: () => answer(), close: () => {} };
+    }
+  });
+  const t0 = Date.parse('2026-10-09T09:00:00Z');
+  try {
+    platformEmail.forgetPlatformEmailCheck();
+    // Not set up at all: no question to ask.
+    assert.equal((await platformEmail.verifyPlatformEmail({ env: {}, now: t0 })).ok, false);
+    assert.equal(made.length, 0);
+
+    assert.deepEqual(await platformEmail.verifyPlatformEmail({ env: SMTP, now: t0 }), { ok: true, error: '' });
+    assert.equal(made.length, 1);
+    // The transport emailService would build from the same settings, with short timeouts.
+    assert.equal(made[0].host, 'smtp.gympilot.test');
+    assert.equal(made[0].port, 465);
+    assert.equal(made[0].secure, true);
+    assert.deepEqual(made[0].auth, { user: 'noreply@gympilot.test', pass: 'unit-smtp-pass' });
+    assert.ok(made[0].connectionTimeout <= 5000 && made[0].greetingTimeout <= 5000 && made[0].socketTimeout <= 5000);
+
+    // Remembered: the public config endpoint does not knock on the mail server every time.
+    await platformEmail.verifyPlatformEmail({ env: SMTP, now: t0 + 60 * 1000 });
+    assert.equal(made.length, 1);
+    // ...but not for long,
+    answer = async () => {
+      throw new Error('Invalid login: 535 Authentication failed');
+    };
+    assert.deepEqual(await platformEmail.verifyPlatformEmail({ env: SMTP, now: t0 + platformEmail.OK_TTL_MS + 1 }), { ok: false, error: 'Invalid login: 535 Authentication failed' });
+    assert.equal(made.length, 2);
+    // a failure for less long still,
+    const t1 = t0 + platformEmail.OK_TTL_MS + 1;
+    await platformEmail.verifyPlatformEmail({ env: SMTP, now: t1 + platformEmail.FAILED_TTL_MS - 1 });
+    assert.equal(made.length, 2);
+    answer = async () => true;
+    assert.equal((await platformEmail.verifyPlatformEmail({ env: SMTP, now: t1 + platformEmail.FAILED_TTL_MS + 1 })).ok, true);
+    assert.equal(made.length, 3);
+    // and never across a change of settings.
+    await platformEmail.verifyPlatformEmail({ env: { ...SMTP, SMTP_PASS: 'a new password' }, now: t1 + platformEmail.FAILED_TTL_MS + 2 });
+    assert.equal(made.length, 4);
+
+    // Several askers at once share one question.
+    platformEmail.forgetPlatformEmailCheck();
+    const results = await Promise.all([1, 2, 3].map(() => platformEmail.verifyPlatformEmail({ env: SMTP, now: t0 })));
+    assert.equal(made.length, 5);
+    assert.ok(results.every((r) => r.ok));
+  } finally {
+    restore();
+    platformEmail.forgetPlatformEmailCheck();
   }
 });
 
