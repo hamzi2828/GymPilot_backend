@@ -134,3 +134,42 @@ test('checkout keeps first and last name apart and still fills in the single nam
   assert.equal(demo.data.name, 'Bilal Ahmed');
   assert.equal(demo.data.firstName, '');
 });
+
+test('in production nothing falls back to localhost: a gym with no address gets no address, and admin emails no panel link', () => {
+  const { localFallback } = require('../../src/platform/tenantContext');
+  const { panelUrl, panelLink } = require('../../src/platform/controllers/demoRequestsController');
+  const bare = { slug: 'ironworks', domains: [] };
+  const nothing = { PLATFORM_ROOT_DOMAIN: undefined, FRONTEND_ORIGIN: undefined, DEFAULT_TENANT_SLUG: undefined, PLATFORM_ADMIN_ORIGIN: undefined };
+
+  assert.equal(localFallback('http://localhost:3000', { NODE_ENV: 'production' }), null);
+  assert.equal(localFallback('http://localhost:3000', { NODE_ENV: 'development' }), 'http://localhost:3000');
+  assert.equal(localFallback('http://localhost:3000', {}), 'http://localhost:3000');
+
+  const error = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    withEnv({ ...nothing, NODE_ENV: 'production' }, () => {
+      assert.equal(siteUrlFor(bare), '');
+      assert.equal(siteUrlFor(bare), '');
+      assert.equal(logged.filter((line) => /ironworks has no web address/.test(line)).length, 1, 'said once');
+      assert.equal(panelUrl(), '');
+      assert.equal(panelLink('See it in the panel: '), '');
+      assert.ok(logged.some((line) => /PLATFORM_ADMIN_ORIGIN is not set/.test(line)));
+    });
+    // What is configured is still used, in production as anywhere.
+    withEnv({ ...nothing, NODE_ENV: 'production', PLATFORM_ROOT_DOMAIN: 'gympilot.app', PLATFORM_ADMIN_ORIGIN: 'https://gympilot.app, https://www.gympilot.app' }, () => {
+      assert.equal(siteUrlFor(bare), 'https://ironworks.gympilot.app');
+      assert.equal(siteUrlFor({ slug: 'ironworks', domains: [{ host: 'ironworks.com', isPrimary: true }] }), 'https://ironworks.com');
+      assert.equal(panelUrl(), 'https://gympilot.app/super-admin/demo-requests');
+      assert.match(panelLink('See it in the panel: '), /See it in the panel: <a href="https:\/\/gympilot\.app\/super-admin\/demo-requests">/);
+    });
+    // On a developer's machine, localhost as before.
+    withEnv({ ...nothing, NODE_ENV: undefined }, () => {
+      assert.equal(siteUrlFor(bare), 'http://localhost:3000');
+      assert.equal(panelUrl(), 'http://localhost:3001/super-admin/demo-requests');
+    });
+  } finally {
+    console.error = error;
+  }
+});

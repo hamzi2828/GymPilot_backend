@@ -221,13 +221,15 @@ test('a reset link is built on PLATFORM_ADMIN_ORIGIN and nowhere else, whatever 
   // A gym's own domain: a registered, trusted origin for everything else.
   const fromGymSite = { headers: { origin: 'https://ironworks.example' }, body: { email: admin.email } };
   try {
-    assert.equal(controller.panelOrigin({}), null);
+    // Nothing set: null in production, the panel's local address on a developer's machine.
+    assert.equal(controller.panelOrigin({ NODE_ENV: 'production' }), null);
+    assert.equal(controller.panelOrigin({}), 'http://localhost:3001');
     assert.equal(controller.panelOrigin({ PLATFORM_ADMIN_ORIGIN: ' https://gympilot.app/ , https://www.gympilot.app' }), 'https://gympilot.app');
-    assert.equal(controller.panelOrigin({ PLATFORM_ADMIN_ORIGIN: 'gympilot.app' }), null, 'not an origin');
+    assert.equal(controller.panelOrigin({ PLATFORM_ADMIN_ORIGIN: 'gympilot.app', NODE_ENV: 'production' }), null, 'not an origin');
 
     // Not set: no link, no token, and the answer says so whoever asked.
     emails.length = 0;
-    await withEnv({ PLATFORM_ADMIN_ORIGIN: undefined, FRONTEND_ORIGIN: 'https://ironworks.example' }, async () => {
+    await withEnv({ NODE_ENV: 'production', PLATFORM_ADMIN_ORIGIN: undefined, FRONTEND_ORIGIN: 'https://ironworks.example' }, async () => {
       const res = await call(controller.forgotPassword, fromGymSite);
       assert.equal(res.statusCode, 503);
       assert.match(res.body.message, /not set up on this server/);

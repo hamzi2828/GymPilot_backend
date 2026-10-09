@@ -186,6 +186,27 @@ test('Stripe sends the buyer back to a configured origin, never one the request 
   await withEnv({ PLATFORM_ADMIN_ORIGIN: undefined }, () => {
     assert.equal(controller.marketingOrigin({ headers: { origin: 'https://evil.example' } }), 'http://localhost:3001');
   });
+  // Localhost stands in on a developer's machine only.
+  await withEnv({ PLATFORM_ADMIN_ORIGIN: undefined, NODE_ENV: 'production' }, () => {
+    assert.equal(controller.marketingOrigin({ headers: { origin: 'https://evil.example' } }), null);
+  });
+});
+
+test('in production, with nowhere configured for Stripe to send the buyer back to, nobody is sent to pay', async () => {
+  const { calls, restore } = startStubs();
+  try {
+    await withEnv({ ...SIGNUP_ENV, PLATFORM_ADMIN_ORIGIN: undefined, NODE_ENV: 'production' }, async () => {
+      const availability = await controller.selfServeAvailable();
+      assert.equal(availability.available, false);
+      assert.match(availability.reason, /PLATFORM_ADMIN_ORIGIN/);
+      const res = fakeRes();
+      await controller.start(req(FORM), res);
+      assert.equal(res.body.code, 'SELF_SERVE_UNAVAILABLE');
+      assert.equal(calls.sessions.length, 0);
+    });
+  } finally {
+    restore();
+  }
 });
 
 /* ----------------------------- the status page ---------------------------- */

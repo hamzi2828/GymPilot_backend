@@ -13,6 +13,7 @@ const PlatformAuditLog = require('../models/platformAuditLogModel');
 const { sendEmail } = require('../../services/emailService');
 const { afterResponse } = require('../../services/afterResponse');
 const { shell, paragraph, detailTable, escapeHtml } = require('../../templates/gymEmails');
+const { localFallback } = require('../tenantContext');
 
 const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -128,10 +129,26 @@ function validateDemoRequest(body) {
   return { spam: false, errors, data };
 }
 
+/**
+ * Where the panel's Demo requests page is, or '' when this server has not
+ * been told where its panel lives (PLATFORM_ADMIN_ORIGIN). Localhost stands
+ * in on a developer's machine only -- never in an email sent from production.
+ */
 function panelUrl() {
   // PLATFORM_ADMIN_ORIGIN may list several origins for CORS; links use the first.
-  const origin = (process.env.PLATFORM_ADMIN_ORIGIN || process.env.FRONTEND_ORIGIN || 'http://localhost:3001').split(',')[0].trim().replace(/\/+$/, '');
+  const origin = (process.env.PLATFORM_ADMIN_ORIGIN || process.env.FRONTEND_ORIGIN || localFallback('http://localhost:3001') || '').split(',')[0].trim().replace(/\/+$/, '');
+  if (!origin) {
+    if (!panelUrl.warned) console.error('[platform] PLATFORM_ADMIN_ORIGIN is not set, so emails to the platform admins carry no link to the panel');
+    panelUrl.warned = true;
+    return '';
+  }
   return `${origin}/super-admin/demo-requests`;
+}
+
+/** The panel link as a line of an admin email (after `lead`, if any), or nothing when there is no panel address to link to. */
+function panelLink(lead = '') {
+  const url = panelUrl();
+  return url ? paragraph(`${lead}<a href="${url}">${url}</a>`) : '';
 }
 
 /**
@@ -172,7 +189,7 @@ async function notifyAdmins(request) {
       : '',
     (request.warnings || []).length ? paragraph(`Note: ${escapeHtml(request.warnings.join(' '))}`) : '',
     request.message ? paragraph(`“${escapeHtml(request.message)}”`) : '',
-    paragraph(`Record where it goes in the panel: <a href="${panelUrl()}">${panelUrl()}</a>`)
+    panelLink('Record where it goes in the panel: ')
   ].join('');
   const subject = `${request.kind === 'trial' ? 'New trial signup' : 'New demo request'}: ${request.gymName || request.name}`;
   await emailAdmins(subject, 'New demo request', body);
@@ -269,6 +286,7 @@ module.exports = {
   priceSelection,
   emailAdmins,
   panelUrl,
+  panelLink,
 
   // POST /api/platform/public/demo-requests
   submit: async (req, res) => {

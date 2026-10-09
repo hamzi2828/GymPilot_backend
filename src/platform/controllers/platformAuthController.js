@@ -12,6 +12,7 @@ const { signPlatformToken, ensureBootstrapSuperAdmin, tokenVersionOf } = require
 const { sendEmail } = require('../../services/emailService');
 const { passwordMatches } = require('../../services/passwordCheck');
 const { shell, paragraph, button, escapeHtml } = require('../../templates/gymEmails');
+const { localFallback } = require('../tenantContext');
 
 const MIN_PASSWORD_LENGTH = 10;
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -53,14 +54,15 @@ function maskEmail(email) {
  * says, and nothing else. Never the request's Origin header, however
  * trusted that origin is for other things -- a gym's own domain is a
  * registered origin, and a reset link built on it would hand the super
- * admin's token to whoever runs that site. Null when the variable is not
- * set: no link is better than one that points somewhere else.
+ * admin's token to whoever runs that site. When the variable is not set, a
+ * developer's machine gets the panel's local address and production gets
+ * null: no link is better than one that points somewhere else.
  */
 function panelOrigin(env = process.env) {
   // May be a comma-separated list (www and apex, for CORS); the first entry
   // is the one links point at.
   const first = String(env.PLATFORM_ADMIN_ORIGIN || '').split(',')[0].trim().replace(/\/+$/, '');
-  return /^https?:\/\/\S+$/i.test(first) ? first : null;
+  return /^https?:\/\/\S+$/i.test(first) ? first : localFallback('http://localhost:3001', env);
 }
 
 async function startChallenge(admin) {

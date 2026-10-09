@@ -20,7 +20,7 @@ const PlatformPlan = require('../models/platformPlanModel');
 const { validateDemoRequest, priceSelection } = require('./demoRequestsController');
 const { resolveAddons } = require('./addonsController');
 const { slugify, isReservedSlug, freeSlugFrom } = require('../provisioning');
-const { subdomainHostFor } = require('../tenantContext');
+const { subdomainHostFor, localFallback } = require('../tenantContext');
 const { platformBillingAvailable, platformStripeConfig, PlatformStripeNotConfiguredError } = require('../services/platformStripe');
 // Called through the modules, not destructured, so a test can stand in for them.
 const platformBilling = require('../services/platformBilling');
@@ -94,6 +94,7 @@ async function selfServeAvailable() {
     return { available: false, reason: 'Switched off by PLATFORM_SELF_SERVE_SIGNUP' };
   }
   if (!subdomainHostFor('gym')) return { available: false, reason: 'PLATFORM_ROOT_DOMAIN is not set, so a new gym would have no web address' };
+  if (!marketingOrigin()) return { available: false, reason: 'PLATFORM_ADMIN_ORIGIN is not set, so Stripe would have nowhere to send the buyer back to after paying' };
   if (!platformEmailConfigured()) {
     return { available: false, reason: 'SMTP_HOST, SMTP_USER and SMTP_PASS are not all set, so the owner of a new gym would never get the link to set their password' };
   }
@@ -179,7 +180,10 @@ async function webAddressProblem(slug, email, now = Date.now()) {
  * The marketing site, for Stripe to send the buyer back to. The origin the
  * request came from when it is one PLATFORM_ADMIN_ORIGIN names (the www and
  * the bare domain can both be listed), otherwise the first listed. Never an
- * origin nobody configured.
+ * origin nobody configured: with none listed, a developer's machine gets
+ * the site's local address and production gets null -- and no sign-up is
+ * sent to pay (selfServeAvailable), since Stripe would have nowhere to send
+ * the buyer back to.
  */
 function marketingOrigin(req) {
   const listed = String(process.env.PLATFORM_ADMIN_ORIGIN || '')
@@ -188,7 +192,7 @@ function marketingOrigin(req) {
     .filter(Boolean);
   const origin = String((req && req.headers && req.headers.origin) || '').trim().replace(/\/+$/, '');
   const match = origin && listed.find((o) => o.toLowerCase() === origin.toLowerCase());
-  return match || listed[0] || 'http://localhost:3001';
+  return match || listed[0] || localFallback('http://localhost:3001');
 }
 
 function statusView(doc) {
