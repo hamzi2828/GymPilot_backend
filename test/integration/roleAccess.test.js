@@ -123,6 +123,36 @@ test('the member role holds no tabs, whoever asks, and the system roles cannot b
   }
 });
 
+test('a member role that was given tabs before the editor refused them grants nothing, saved again or not', async () => {
+  // As a gym's database may still hold it: written straight to the document.
+  await inGym(async () => {
+    await Role.collection.updateOne({ slug: 'user' }, { $set: { permissions: { users: 'manage', dashboard: 'view', accounts: 'manage' } } });
+    roleService.invalidate();
+  });
+  try {
+    assert.equal(await levelOf('user', 'users'), 'manage', 'the stored document still says so');
+    await inGym(async () => {
+      const held = await roleService.permissionsFor('user');
+      assert.deepEqual([...new Set(Object.values(held))], ['none']);
+      for (const [tab, level] of [['users', 'view'], ['users', 'manage'], ['dashboard', 'view'], ['accounts', 'manage']]) {
+        assert.equal(await roleService.can('user', tab, level), false, `${tab}: ${level}`);
+      }
+      // A staff role is still read from its document.
+      assert.equal(await roleService.can('office', 'users', 'manage'), true);
+    });
+    // And the Roles screen shows what is true, not what is stored.
+    const listed = await inGym(() => h.call(roles.list, as(admin)));
+    assert.equal(listed.statusCode, 200, JSON.stringify(listed.body));
+    const shown = listed.body.roles.find((role) => role.slug === 'user');
+    assert.deepEqual([...new Set(Object.values(shown.permissions))], ['none']);
+  } finally {
+    await inGym(async () => {
+      await Role.collection.updateOne({ slug: 'user' }, { $set: { permissions: {} } });
+      roleService.invalidate();
+    });
+  }
+});
+
 // ---- reaching into another account ----------------------------------------
 
 const signOut = (actor, target) => inGym(() => h.call(security.forceLogout, { ...as(actor), params: { id: String(target._id) } }));

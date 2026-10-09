@@ -191,6 +191,11 @@ async function ensureDefaultRoles() {
 // nothing rather than falling back to something permissive.
 async function permissionsFor(slug) {
   if (slug === ADMIN_SLUG) return allowAll();
+  // The member role is every member's role: it holds no admin tabs, whatever
+  // its document says. The role editor saves it with none, but a gym whose
+  // member role was given tabs before that would keep them until its next
+  // save -- so this is decided here, in code, as the admin slug is.
+  if (slug === MEMBER_SLUG) return fullPermissionMap();
 
   const roles = await loadRoles();
   const role = roles.get(slug);

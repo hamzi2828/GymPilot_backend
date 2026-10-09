@@ -49,7 +49,9 @@ function slugify(text) {
 }
 
 function shapeRole(role, memberCount = 0) {
-  const permissions = fullPermissionMap(role.permissions);
+  // What the role really grants: the member role none, whatever is stored
+  // (roleService.permissionsFor).
+  const permissions = fullPermissionMap(role.slug === MEMBER_SLUG ? undefined : role.permissions);
   const granted = Object.values(permissions).filter((level) => level !== 'none').length;
 
   return {
