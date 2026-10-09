@@ -1418,6 +1418,21 @@ async function renew(
 }
 
 /**
+ * The inline price for a subscription item. Unlike a Checkout line, which
+ * may create its product as it goes (product_data), a subscription item's
+ * price_data must name a product that already exists: Stripe refuses
+ * product_data there (platform/services/subscriptionSync.js does the same).
+ */
+function subscriptionPriceData({ currency, product, amount, billing }) {
+  return {
+    currency,
+    product,
+    unit_amount: toMinorUnits(amount, currency),
+    recurring: { interval: billing.interval, interval_count: billing.intervalCount }
+  };
+}
+
+/**
  * How a credit for unused days meets the new package's price: `applied`
  * comes off it, and `unused` is what the price was too small to take.
  */
@@ -1479,27 +1494,43 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   const credit = round2(membershipPaid * (remainingDays / totalDays));
 
   if (order.payment.stripeSubscriptionId) {
-    const stripe = await getStripe();
-    const sub = await stripe.subscriptions.retrieve(order.payment.stripeSubscriptionId);
-    const item = sub.items.data[0];
     const snapshot = packageSnapshot(pkg);
-    const { toMinorUnits } = require('../../helper/money');
+    const listPrice = parseAmount(pkg.price);
+    // Stripe charges a subscription on an interval, and a one-off package
+    // has none of its own: moved onto one, its whole price would be charged
+    // every month.
+    if (snapshot.billing.mode !== 'recurring' || listPrice === null || listPrice <= 0) {
+      throw new MembershipError(
+        `${pkg.name} is not paid by card subscription, so this subscription cannot be moved onto it. Cancel the subscription, then assign ${pkg.name} at the desk.`,
+        409,
+        'NOT_A_SUBSCRIPTION_PACKAGE'
+      );
+    }
+    const stripe = await getStripe();
+    const sub = await stripe.subscriptions.retrieve(order.payment.stripeSubscriptionId, { expand: ['items.data.price.product'] });
+    const item = sub.items && sub.items.data && sub.items.data[0];
+    if (!item) throw new MembershipError('Stripe shows nothing being billed on this subscription, so it was not changed. Check it in the Stripe dashboard.', 409, 'STRIPE_SUBSCRIPTION_EMPTY');
     const settings = await Settings.getSettings().catch(() => null);
     const currency = resolveCurrency(pkg.currency, settings && settings.currency).toLowerCase();
-    const updated = await stripe.subscriptions.update(sub.id, {
-      items: [
-        {
-          id: item.id,
-          price_data: {
-            currency,
-            product_data: { name: `${pkg.name} Package` },
-            unit_amount: toMinorUnits(parseAmount(pkg.price), currency),
-            recurring: { interval: snapshot.billing.interval, interval_count: snapshot.billing.intervalCount }
-          }
-        }
-      ],
-      proration_behavior: 'create_prorations'
-    });
+    let updated;
+    try {
+      // The subscription's own product when it already carries this name,
+      // else a new one: a subscription item is priced against a product
+      // that exists (see subscriptionPriceData).
+      const name = `${pkg.name} Package`;
+      const current = item.price && item.price.product;
+      const reusable = current && typeof current === 'object' && !current.deleted && current.active !== false && current.name === name;
+      const product = reusable ? current.id : (await stripe.products.create({ name, metadata: { packageId: String(pkg._id) } })).id;
+      updated = await stripe.subscriptions.update(sub.id, {
+        items: [{ id: item.id, price_data: subscriptionPriceData({ currency, product, amount: listPrice, billing: snapshot.billing }) }],
+        proration_behavior: 'create_prorations'
+      });
+    } catch (error) {
+      // Stripe unreachable is a gateway problem; anything else is Stripe
+      // saying no (another currency, a declined card).
+      const unreachable = error && (error.type === 'StripeConnectionError' || error.type === 'StripeAPIError');
+      throw new MembershipError(`Stripe did not accept the change, so the membership is as it was: ${error.message}`, unreachable ? 502 : 409, 'STRIPE_CHANGE_FAILED');
+    }
     order.packageId = pkg._id;
     // The new price lives in the snapshot, and Stripe charges it from here
     // on; each of those charges is recorded as a renewal with its own amount.
@@ -1919,6 +1950,7 @@ module.exports = {
   resume,
   renew,
   creditAgainst,
+  subscriptionPriceData,
   changePackage,
   consumeSession,
   refundSession,

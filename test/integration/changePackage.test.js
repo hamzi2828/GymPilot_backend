@@ -131,3 +131,123 @@ test('the old membership is ended in the same request, with who changed it -- ne
     assert.match(res.body.data.notes, /^Changed from PKG\d+ \(Yearly\)$/);
   });
 });
+
+/* --------------------------- card subscriptions --------------------------- */
+
+const recurring = { mode: 'recurring', interval: 'month', intervalCount: 1 };
+
+// A member on a monthly card subscription, and a Stripe that records what
+// it is asked. `product` is the product behind the subscription's one item.
+async function cardSubscriber({ product = { id: 'prod_old', name: 'Flex Package', active: true } } = {}) {
+  seq += 1;
+  const member = await User.create({ firstName: 'Card', lastName: `Sub${seq}`, email: `card${seq}@change.test`, role: 'user' });
+  const flex = await Package.create({ name: `Flex ${seq}`, price: '30', currency: 'GBP', period: 'month', features: ['Gym floor'], billing: recurring });
+  const sold = await service.createManualOrder({ user: member, pkg: flex, chargeJoiningFee: false });
+  await PackageOrder.updateOne(
+    { _id: sold._id },
+    { $set: { 'payment.method': 'stripe', 'payment.stripeSubscriptionId': `sub_change_${seq}`, 'subscription.autoRenew': true } }
+  );
+
+  const asked = { retrieve: [], products: [], update: [] };
+  const periodEnd = Math.floor(Date.now() / 1000) + 20 * 86400;
+  const stripe = {
+    subscriptions: {
+      retrieve: async (id, options) => {
+        asked.retrieve.push({ id, options });
+        return { id, status: 'active', items: { data: [{ id: 'si_1', price: { id: 'price_old', product } }] } };
+      },
+      update: async (id, params) => {
+        asked.update.push({ id, params });
+        // What Stripe answers when a subscription item is given a product to create.
+        if (params.items.some((item) => item.price_data && item.price_data.product_data)) {
+          throw Object.assign(new Error('Received unknown parameter: items[0][price_data][product_data]'), { type: 'StripeInvalidRequestError' });
+        }
+        return { id, status: 'active', current_period_end: periodEnd };
+      }
+    },
+    products: {
+      create: async (params) => {
+        asked.products.push(params);
+        return { id: `prod_new_${asked.products.length}`, ...params };
+      }
+    }
+  };
+  return { order: await PackageOrder.findById(sold._id), asked, stripe, periodEnd };
+}
+
+test('a card subscription is switched with a price Stripe accepts: against a product id, never a product to create', async () => {
+  const { order, asked, stripe, periodEnd } = await h.inGym(gym, () => cardSubscriber());
+  h.setStripe(stripe);
+  try {
+    await h.inGym(gym, async () => {
+      const premium = await Package.create({ name: 'Premium', price: '55', currency: 'GBP', period: 'month', features: ['Everything'], billing: recurring });
+      const res = await change(order, { packageId: String(premium._id) });
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      assert.equal(res.body.message, 'Subscription switched; Stripe will prorate the difference.');
+      assert.equal(res.body.credit, null);
+
+      // The product is read with the subscription, and a new one made for the new package.
+      assert.deepEqual(asked.retrieve[0].options, { expand: ['items.data.price.product'] });
+      assert.deepEqual(asked.products, [{ name: 'Premium Package', metadata: { packageId: String(premium._id) } }]);
+      assert.deepEqual(asked.update[0].params, {
+        items: [{ id: 'si_1', price_data: { currency: 'gbp', product: 'prod_new_1', unit_amount: 5500, recurring: { interval: 'month', interval_count: 1 } } }],
+        proration_behavior: 'create_prorations'
+      });
+
+      const row = await PackageOrder.findById(order._id).lean();
+      assert.equal(String(row.packageId), String(premium._id));
+      assert.equal(row.packageDetails.name, 'Premium');
+      assert.equal(row.subscription.endDate.getTime(), periodEnd * 1000);
+      // What was paid at the start is not rewritten.
+      assert.equal(row.payment.amount, 30);
+    });
+  } finally {
+    h.setStripe(null);
+  }
+});
+
+test('a product the subscription already has under the same name is reused', async () => {
+  const { order, asked, stripe } = await h.inGym(gym, () => cardSubscriber({ product: { id: 'prod_same', name: 'Renamed Package', active: true } }));
+  h.setStripe(stripe);
+  try {
+    await h.inGym(gym, async () => {
+      const renamed = await Package.create({ name: 'Renamed', price: '45', currency: 'GBP', period: 'month', features: ['x'], billing: recurring });
+      const res = await change(order, { packageId: String(renamed._id) });
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      assert.equal(asked.products.length, 0);
+      assert.equal(asked.update[0].params.items[0].price_data.product, 'prod_same');
+    });
+  } finally {
+    h.setStripe(null);
+  }
+});
+
+test('a card subscription is not moved onto a package that is paid once, and Stripe saying no changes nothing', async () => {
+  const { order, asked, stripe } = await h.inGym(gym, () => cardSubscriber());
+  h.setStripe(stripe);
+  try {
+    await h.inGym(gym, async () => {
+      // Yearly is a one-off: on a subscription its 1200 would be charged every month.
+      const refused = await change(order, { packageId: String(yearly._id) });
+      assert.equal(refused.statusCode, 409);
+      assert.equal(refused.body.code, 'NOT_A_SUBSCRIPTION_PACKAGE');
+      assert.match(refused.body.message, /Yearly is not paid by card subscription/);
+      assert.match(refused.body.message, /Cancel the subscription, then assign Yearly at the desk/);
+      assert.equal(asked.update.length, 0);
+
+      const dollars = await Package.create({ name: 'Premium USD', price: '55', currency: 'USD', period: 'month', features: ['x'], billing: recurring });
+      stripe.subscriptions.update = async () => {
+        throw Object.assign(new Error('The price currency usd does not match the subscription currency gbp'), { type: 'StripeInvalidRequestError' });
+      };
+      const failed = await change(order, { packageId: String(dollars._id) });
+      assert.equal(failed.statusCode, 409);
+      assert.equal(failed.body.code, 'STRIPE_CHANGE_FAILED');
+      assert.match(failed.body.message, /^Stripe did not accept the change, so the membership is as it was: The price currency/);
+      const row = await PackageOrder.findById(order._id).lean();
+      assert.equal(String(row.packageId), String(order.packageId));
+      assert.equal(row.packageDetails.name, order.packageDetails.name);
+    });
+  } finally {
+    h.setStripe(null);
+  }
+});

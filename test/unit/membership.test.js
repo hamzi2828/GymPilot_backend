@@ -8,7 +8,15 @@ require('mongoose').set('bufferCommands', false);
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { packageSnapshot, termEnd, periodLength, periodProblem, creditAgainst, MembershipError } = require('../../src/gymfolio/services/membershipService');
+const {
+  packageSnapshot,
+  termEnd,
+  periodLength,
+  periodProblem,
+  creditAgainst,
+  subscriptionPriceData,
+  MembershipError
+} = require('../../src/gymfolio/services/membershipService');
 
 const start = new Date('2026-01-31T10:00:00Z');
 
@@ -112,4 +120,12 @@ test('a package-change credit comes off the new price and no further; the rest i
   assert.deepEqual(creditAgainst(75.5, 0), { applied: 0, unused: 75.5 });
   // A price that cannot be read is refused further on; nothing is called lost here.
   assert.deepEqual(creditAgainst(75.5, null), { applied: 75.5, unused: 0 });
+});
+
+test('a subscription item is priced against a product id: Stripe refuses a product to create there', () => {
+  const price = subscriptionPriceData({ currency: 'gbp', product: 'prod_123', amount: 55, billing: { interval: 'month', intervalCount: 3 } });
+  assert.deepEqual(price, { currency: 'gbp', product: 'prod_123', unit_amount: 5500, recurring: { interval: 'month', interval_count: 3 } });
+  assert.equal('product_data' in price, false);
+  // Minor units follow the currency.
+  assert.equal(subscriptionPriceData({ currency: 'jpy', product: 'p', amount: 5500, billing: { interval: 'year', intervalCount: 1 } }).unit_amount, 5500);
 });
