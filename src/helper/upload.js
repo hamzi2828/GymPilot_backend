@@ -1,6 +1,7 @@
 // src/helper/upload.js
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const multer = require('multer');
 const { currentTenant } = require('../platform/tenantContext');
 
@@ -142,7 +143,9 @@ const storage = USE_BLOB_STORAGE
       },
       filename: (req, file, cb) => {
         const timestamp = Date.now();
-        const rand = Math.round(Math.random() * 1e9);
+        // Unguessable, like the names helper/blobUpload.js gives the store:
+        // these files are served by URL alone.
+        const rand = crypto.randomBytes(16).toString('hex');
         const original = path.extname(file.originalname || '');
         const ext = EXTENSION_FOR_MIME[file.mimetype] || original.toLowerCase();
         const base = path.basename((file.originalname || 'file').replace(/\s+/g, '-'), original);
