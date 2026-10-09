@@ -303,7 +303,8 @@ module.exports = {
         markPaid: body.markPaid !== false && body.markPaid !== 'false',
         notes: body.notes,
         forfeitCredit: body.forfeitCredit === true || body.forfeitCredit === 'true',
-        by: req.user && req.user.email
+        by: req.user && req.user.email,
+        changedBy: userId(req)
       });
       if (result.order.payment.status === 'paid' && result.previous) tell('membershipConfirmed', result.order);
       const currency = String(result.order.payment.currency || '').toUpperCase();

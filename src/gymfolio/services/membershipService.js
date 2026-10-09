@@ -1438,8 +1438,11 @@ function creditAgainst(credit, listPrice) {
  * CREDIT_EXCEEDS_PRICE, with the figures on `details`) unless the desk sends
  * `forfeitCredit`: then it goes ahead, and the answer says what was credited
  * (`credit`) and what was given up (`creditUnused`).
+ *
+ * `by` names who did it, for the notes; `changedBy` is their account id,
+ * recorded on the old order's cancellation.
  */
-async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by, forfeitCredit = false } = {}) {
+async function changePackage(order, { packageId, paymentMethod = 'cash', markPaid = true, notes, by, changedBy = null, forfeitCredit = false } = {}) {
   assertActive(order);
   // The credit is for days already paid for; with money still owed it
   // would be worked out on money that never came in.
@@ -1547,7 +1550,10 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   order.cancellation = {
     cancelledAt: now,
     reason: `Changed to ${pkg.name} (${replacement.orderNumber})${givenUp ? `; ${givenUp}` : ''}`,
-    by,
+    // An account id or nothing: `by` is a name (the desk's email), and
+    // writing that here failed the save -- after the new order was made,
+    // leaving the member with both.
+    by: changedBy && mongoose.Types.ObjectId.isValid(String(changedBy)) ? changedBy : null,
     source: 'staff',
     immediate: true
   };

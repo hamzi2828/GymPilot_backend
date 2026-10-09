@@ -51,8 +51,12 @@ async function halfUsedYear() {
   return order;
 }
 
-const change = (order, body) =>
-  h.call(controller.changePackage, { params: { id: String(order._id) }, body, user: { id: 'staff' } });
+// Signed in as real staff are: the token carries their account id and email.
+let staff;
+const change = async (order, body) => {
+  staff = staff || (await User.create({ firstName: 'Desk', lastName: 'Staff', email: 'desk@change.test', role: 'admin' }));
+  return h.call(controller.changePackage, { params: { id: String(order._id) }, body, user: { id: String(staff._id), email: staff.email } });
+};
 
 test('a credit worth more than the new package is not thrown away: the desk is told the amount and what to do', async () => {
   await h.inGym(gym, async () => {
@@ -109,5 +113,21 @@ test('a credit the new package can take in full needs no confirmation, and the m
     assert.equal(res.body.data.payment.discountAmount, 600);
     assert.doesNotMatch(res.body.data.payment.discountNote, /given up/);
     assert.equal((await PackageOrder.findById(order._id).lean()).cancellation.reason, `Changed to Two years (${res.body.data.orderNumber})`);
+  });
+});
+
+test('the old membership is ended in the same request, with who changed it -- never left running beside the new one', async () => {
+  await h.inGym(gym, async () => {
+    const order = await halfUsedYear();
+    const res = await change(order, { packageId: String(twoYear._id) });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+
+    const old = await PackageOrder.findById(order._id).lean();
+    assert.equal(old.status, 'cancelled');
+    assert.equal(old.subscription.isActive, false);
+    assert.equal(String(old.cancellation.by), String(staff._id));
+    // One live membership, not two.
+    assert.equal(await PackageOrder.countDocuments({ userId: order.userId, status: 'active' }), 1);
+    assert.match(res.body.data.notes, /^Changed from PKG\d+ \(Yearly\)$/);
   });
 });
