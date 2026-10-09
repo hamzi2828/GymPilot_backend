@@ -27,7 +27,13 @@ async function storePhoto(file) {
 // Pay terms never reach the public site: what a trainer is on is between
 // them and the gym. The salary is `select: false` on the model; the
 // commission is left out of every public read here.
-const PUBLIC_HIDDEN = '-commissionPercent -commissionType -commissionValue';
+//
+// Nor does how to reach or identify the person behind the profile: their
+// own email and phone, the staff account they sign in with and the code they
+// are looked up by at the desk. The public endpoints need no sign-in, so
+// these would otherwise be a list anyone can collect; a visitor contacts the
+// gym, and staff read them from the admin list.
+const PUBLIC_HIDDEN = '-commissionPercent -commissionType -commissionValue -email -phone -userId -staffCode';
 // The admin screen reads the salary on top of the default fields.
 const WITH_PAY = '+salary +salaryCycle';
 
