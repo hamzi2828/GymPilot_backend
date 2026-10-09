@@ -20,7 +20,7 @@ const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const Package = require('../gymfolio/models/packageModel');
 const Settings = require('../models/settings');
 const User = require('../models/user');
-const { parseAmount, resolveCurrency, toMinorUnits } = require('../helper/money');
+const { parseAmount, resolveCurrency, toMinorUnits, fromMinorUnits } = require('../helper/money');
 const { frontendOrigin, currentTenantSlug } = require('../platform/tenantContext');
 const { getStripe, assertCardPaymentsAvailable } = require('./stripeClient');
 const membership = require('../gymfolio/services/membershipService');
@@ -30,15 +30,9 @@ const { idOf, subscriptionIdOf, periodOf, invoicePeriodOf } = require('../gymfol
 const claim = require('../gymfolio/services/activationClaim');
 
 const SESSION_TYPE = 'gymfolio_package_subscription';
-const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf']);
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
-}
-
-function fromMinorUnits(amount, currency) {
-  const n = Number(amount) || 0;
-  return ZERO_DECIMAL.has(String(currency || '').toLowerCase()) ? n : round2(n / 100);
 }
 
 // A free trial charges nothing at checkout (at most the joining fee); the

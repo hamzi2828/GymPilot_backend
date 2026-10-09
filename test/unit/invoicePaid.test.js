@@ -159,6 +159,19 @@ test('a charged invoice is still a renewal, whatever its billing reason', async 
   }
 });
 
+test('a renewal in a three-decimal currency is recorded as what was charged, not ten times it', async () => {
+  const endSec = nowSec() + 2 * DAY;
+  const order = paidOrder({ endSec });
+  order.payment.currency = 'kwd';
+  // 12.500 KWD, as Stripe reports it: 12500 fils.
+  const event = invoicePaid('in_paid_kwd', { amount: 12500, reason: 'subscription_cycle', start: endSec, end: endSec + 30 * DAY });
+  event.data.object.currency = 'kwd';
+  const seen = await withOrder(order, () => payments.handleWebhook(event));
+  assert.equal(seen.writes.length, 1);
+  assert.equal(seen.writes[0].update.$push['subscription.renewals'].amount, 12.5);
+  assert.equal(seen.writes[0].update.$push['subscription.renewals'].currency, 'KWD');
+});
+
 test('the first invoice, and one already recorded, change nothing', async () => {
   const endSec = nowSec() + 20 * DAY;
   const order = paidOrder({ endSec });

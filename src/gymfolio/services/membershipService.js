@@ -13,7 +13,7 @@ const Coupon = require('../models/couponModel');
 const Trainer = require('../models/trainerModel');
 const User = require('../../models/user');
 const Settings = require('../../models/settings');
-const { parseAmount, resolveCurrency, toMinorUnits } = require('../../helper/money');
+const { parseAmount, resolveCurrency, toMinorUnits, fromMinorUnits } = require('../../helper/money');
 const { getStripe } = require('../../services/stripeClient');
 const { idOf, periodOf, paymentIntentOf } = require('./stripeShapes');
 const { readDeskMethod } = require('../../services/paymentMethods');
@@ -1798,13 +1798,6 @@ async function refundSession(order) {
 }
 
 /* -------------------------------- refunds ------------------------------ */
-
-function fromMinorUnits(amount, currency) {
-  // toMinorUnits(1) is 100 for a two-decimal currency and 1 for a
-  // zero-decimal one, which is exactly the scale to divide by.
-  const scale = toMinorUnits(1, currency) || 100;
-  return round2((Number(amount) || 0) / scale);
-}
 
 // The PaymentIntent that took the money for this order, found wherever the
 // order's Stripe trail leads: the intent itself for a one-off sale; the
