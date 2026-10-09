@@ -219,3 +219,38 @@ test('a push campaign leaves out members with no device and reaches the ones beh
     assert.equal(requests.length, 3);
   });
 });
+
+test('the audience preview counts who a send would reach: a real number to text, a device to push to', async () => {
+  const controller = h.src('controller/messagingController');
+  const everyone = LOCAL_PHONES + OTHER_PHONES.length + NO_PHONE;
+  const audienceOf = (channel, where = textGym) =>
+    h.inGym(where, async () => {
+      const campaign = await Campaign.create({ title: `Preview ${channel}`, channel, subject: 'Preview', body: 'Hello.', status: 'draft' });
+      const res = await h.call(controller.campaignAudience, { params: { id: String(campaign._id) } });
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      return res.body.data;
+    });
+
+  // Text: "n/a" in the phone cell is nobody to text, and numbers are shown
+  // as they will be sent.
+  for (const channel of ['sms', 'whatsapp']) {
+    const data = await audienceOf(channel);
+    assert.equal(data.total, everyone, channel);
+    assert.equal(data.reachable, LOCAL_PHONES + OTHER_PHONES.length, channel);
+    assert.equal(data.preview.length, 10);
+    assert.ok(data.preview.every((row) => /^\+92\d{10}$/.test(row.address)), JSON.stringify(data.preview));
+  }
+
+  // Push: only the three members with the app (the push test above), not
+  // every member with an account.
+  const push = await audienceOf('push');
+  assert.equal(push.total, everyone);
+  assert.equal(push.reachable, 3);
+  assert.deepEqual(push.preview.map((row) => row.name).sort(), ['Ask Desk', 'Mail Only', 'Other3 Member']);
+
+  // Email is as it was: everyone with an address.
+  const email = await audienceOf('email', gym);
+  assert.equal(email.total, WITHOUT_EMAIL + WITH_EMAIL);
+  assert.equal(email.reachable, WITH_EMAIL);
+  assert.ok(email.preview.every((row) => /@campaign-gym\.test$/.test(row.address)));
+});

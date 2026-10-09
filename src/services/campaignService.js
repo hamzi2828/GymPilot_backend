@@ -112,6 +112,19 @@ function logAddress(recipient, channel, { defaultCountryCode = '', devices = nul
   return messaging.normalizePhone(address, defaultCountryCode);
 }
 
+/**
+ * What logAddress needs to know about a channel before it can say who is
+ * reachable on it: who has a device, for push; the gym's country code, for a
+ * phone number. Read once per batch, and once for the audience preview, so
+ * the preview counts exactly the people a send would reach.
+ */
+async function reachFor(channel) {
+  const reach = {};
+  if (channel === 'push') reach.devices = await messaging.usersWithDevices();
+  else if (channel !== 'email') reach.defaultCountryCode = (await messaging.messagingConfig()).defaultCountryCode;
+  return reach;
+}
+
 function campaignVars(recipient, b) {
   return {
     firstName: recipient.firstName || 'there',
@@ -139,9 +152,7 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
   const b = await notify.brand();
   const channel = campaign.channel || 'email';
   const recipients = await resolveAudience(campaign.audience);
-  const reach = {};
-  if (channel === 'push') reach.devices = await messaging.usersWithDevices();
-  else if (channel !== 'email') reach.defaultCountryCode = (await messaging.messagingConfig()).defaultCountryCode;
+  const reach = await reachFor(channel);
 
   // Done: everyone reached, plus everyone this pass already tried and could
   // not reach. Failures from before the pass started are retried.
@@ -220,4 +231,4 @@ async function sendBatch(campaign, { limit = 50, actorId = null, since = null } 
   return { done: remaining <= 0, remaining, targeted: recipients.length, sent, failed, skipped };
 }
 
-module.exports = { resolveAudience, sendBatch, addressFor, logAddress };
+module.exports = { resolveAudience, sendBatch, addressFor, logAddress, reachFor };

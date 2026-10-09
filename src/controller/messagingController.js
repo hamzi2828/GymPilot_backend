@@ -333,13 +333,21 @@ module.exports = {
       const doc = await Campaign.findById(req.params.id).lean();
       if (!doc) return fail(res, 404, 'Campaign not found');
       const recipients = await campaigns.resolveAudience(doc.audience);
-      const withAddress = recipients.filter((r) => campaigns.addressFor(r, doc.channel));
+      // Reachable as the send itself judges it (campaignService.logAddress):
+      // a phone cell with no number in it is nobody to text, and a member
+      // with no device is nobody to push to. Counted from the raw address,
+      // the preview promised more people than the campaign then reached.
+      const channel = doc.channel || 'email';
+      const reach = await campaigns.reachFor(channel);
+      const reachable = recipients
+        .map((r) => ({ name: [r.firstName, r.lastName].filter(Boolean).join(' '), address: campaigns.logAddress(r, channel, reach) }))
+        .filter((r) => r.address);
       return res.json({
         success: true,
         data: {
           total: recipients.length,
-          reachable: withAddress.length,
-          preview: withAddress.slice(0, 10).map((r) => ({ name: [r.firstName, r.lastName].filter(Boolean).join(' '), address: campaigns.addressFor(r, doc.channel) }))
+          reachable: reachable.length,
+          preview: reachable.slice(0, 10)
         }
       });
     } catch (error) {
