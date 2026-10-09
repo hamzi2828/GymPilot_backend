@@ -5,6 +5,10 @@
 // gym's own database inside a tenant context, the way every request does.
 
 const { runWithTenant } = require('./tenantContext');
+const { rawTenantDatabase } = require('./connections');
+
+// Where a gym's membership orders are kept (gymfolio/models/packageOrderModel.js).
+const PACKAGE_ORDERS_COLLECTION = 'packageorders';
 
 // A member's card subscription in the gym's OWN Stripe account that will
 // charge again: live (frozen and past due included -- Stripe still holds
@@ -20,10 +24,15 @@ const CARD_SUBSCRIPTION_FILTER = {
  * running. The platform cannot see or stop those from outside the gym, so a
  * gym deleted with any left keeps charging its members with nothing left to
  * cancel them from. Null when the gym's database could not be read.
+ *
+ * Asked through the driver, not the model: this runs just before a gym is
+ * deleted, and nothing may be compiled on a database about to be dropped
+ * (see connections.rawTenantDatabase).
  */
 async function countCardSubscriptions(gym) {
   try {
-    return await runWithTenant(gym, () => require('../gymfolio/models/packageOrderModel').countDocuments(CARD_SUBSCRIPTION_FILTER));
+    const db = await rawTenantDatabase(gym);
+    return await db.collection(PACKAGE_ORDERS_COLLECTION).countDocuments(CARD_SUBSCRIPTION_FILTER);
   } catch (error) {
     console.error(`[platform] card subscriptions of ${gym && gym.slug} could not be counted:`, error.message);
     return null;
@@ -91,4 +100,4 @@ async function collectGymStats(gym) {
   }
 }
 
-module.exports = { collectGymStats, countCardSubscriptions, CARD_SUBSCRIPTION_FILTER };
+module.exports = { collectGymStats, countCardSubscriptions, CARD_SUBSCRIPTION_FILTER, PACKAGE_ORDERS_COLLECTION };

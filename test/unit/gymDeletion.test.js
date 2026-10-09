@@ -342,3 +342,14 @@ test("a Stripe event about a deleted gym never lands on the gym that took its sl
     restore();
   }
 });
+
+test("members' card subscriptions are counted where the gym's orders are actually kept", async () => {
+  const { runWithTenant } = require('../../src/platform/tenantContext');
+  const PackageOrder = require('../../src/gymfolio/models/packageOrderModel');
+  // The count goes through the driver by collection name (nothing may be
+  // compiled on a database about to be dropped), so the name must not drift.
+  await runWithTenant({ _id: '000000000000000000000001', slug: 'a', database: { name: 'gympilot_unit_a' } }, () => {
+    assert.equal(PackageOrder.collection.name, tenantStats.PACKAGE_ORDERS_COLLECTION);
+    for (const path of Object.keys(tenantStats.CARD_SUBSCRIPTION_FILTER)) assert.ok(PackageOrder.schema.path(path), path);
+  });
+});
