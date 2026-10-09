@@ -553,6 +553,13 @@ const userController = {
                 return res.status(400).json({ message: 'Passwords do not match' });
             }
 
+            // The same rule a reset or a change of password is held to
+            // (services/adminPasswords.js): a length, nothing else.
+            const problem = passwordProblem(password);
+            if (problem) {
+                return res.status(400).json({ message: problem });
+            }
+
             // Check if user already exists
             const existing = await User.findOne({ email: email.toLowerCase().trim() });
             if (existing) {
