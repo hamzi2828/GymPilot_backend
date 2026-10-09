@@ -8,6 +8,20 @@ const app = express();
 const port = process.env.PORT || 4000;
 const allRoutes = require('./src/routes/allRoutes');
 
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// Every session token is signed with JWT_SECRET, so a short one can be
+// guessed offline from a single token. Said loudly at boot, without the
+// value -- and only said: refusing to start would take a working site down
+// over a setting that has to be changed with care (changing it signs
+// everybody out).
+if (IS_PRODUCTION && String(process.env.JWT_SECRET || '').length < 32) {
+  console.warn(
+    '[security] WARNING: JWT_SECRET is shorter than 32 characters. Session tokens signed with it can be forged by guessing it. ' +
+      'Set a long random value (for example `openssl rand -hex 32`); everyone will have to sign in again.'
+  );
+}
+
 // Vercel puts a proxy in front of this, so the client address arrives in
 // X-Forwarded-For rather than on the socket. Without this, express reports
 // the proxy's address as req.ip and every request in the world shares one
@@ -45,6 +59,23 @@ app.use(
 );
 
 // ---------------------------------------------------------------------------
+// Search engines
+//
+// This is an API: JSON for the gyms' websites and apps, nothing a person
+// should land on from a search result. Crawlers are told so twice -- in
+// robots.txt, and on every response for the ones that fetch a URL anyway.
+// Done here rather than in vercel.json so it holds wherever this runs.
+// ---------------------------------------------------------------------------
+app.use((req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+});
+
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain').send('User-agent: *\nDisallow: /\n');
+});
+
+// ---------------------------------------------------------------------------
 // CORS
 //
 // Every gym on the platform has its own website on its own domain, and all
@@ -52,9 +83,17 @@ app.use(
 // an origin is allowed when it is one of the static ones below OR the domain
 // of a registered gym (or a `<slug>.PLATFORM_ROOT_DOMAIN` subdomain). The
 // lookup is the same cached one the tenant resolver uses.
+//
+// A developer's own machine (localhost:3000 the website, :3001 the panel) is
+// allowed everywhere except production: there, any page served from
+// localhost on a visitor's computer could otherwise call this API with that
+// visitor's session, and an unset FRONTEND_ORIGIN must not quietly mean
+// localhost. A localhost origin that really must reach production goes in
+// EXTRA_CORS_ORIGINS, on purpose.
 // ---------------------------------------------------------------------------
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
-const GYMFOLIO_URL = process.env.GYMFOLIO_URL || 'http://localhost:3000';
+const LOCAL_ORIGINS = IS_PRODUCTION ? [] : ['http://localhost:3000', 'http://localhost:3001'];
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || LOCAL_ORIGINS[0] || '';
+const GYMFOLIO_URL = process.env.GYMFOLIO_URL || LOCAL_ORIGINS[0] || '';
 //
 // EXTRA_CORS_ORIGINS is a comma-separated list for anything else that has to
 // reach this API from a browser -- the member app's web build, which Expo
@@ -76,8 +115,7 @@ const STATIC_ORIGINS = new Set(
     FRONTEND_ORIGIN,
     GYMFOLIO_URL,
     ...originList(process.env.PLATFORM_ADMIN_ORIGIN),
-    'http://localhost:3000',
-    'http://localhost:3001',
+    ...LOCAL_ORIGINS,
     ...originList(process.env.EXTRA_CORS_ORIGINS)
   ]
     .map(normalizeOrigin)
@@ -118,7 +156,15 @@ app.use(cors({
 // longer exists. The gymfolio webhook that replaced it was NOT skipped, so it
 // was handed a parsed object and constructEvent() rejected every event it ever
 // received.
+//
+// The size limit is for what the API is actually sent as JSON or a form:
+// records, settings, a page of text. Nothing larger travels that way --
+// files are multipart and have their own limits (helper/upload.js), a CSV
+// import is a file, and a backup to restore goes straight to the store and
+// arrives here as a URL. The old 50 MB applied to every route, signed in or
+// not, so anyone could make the server parse 50 MB at a time.
 // ---------------------------------------------------------------------------
+const BODY_LIMIT = '1mb';
 const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
 // The platform's own webhook (GymPilot charging gyms) needs the same
 // untouched body as a gym's does.
@@ -130,12 +176,12 @@ app.use((req, res, next) => {
   if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/') || path === PLATFORM_WEBHOOK_PATH) {
     next();
   } else {
-    express.json({ limit: '50mb' })(req, res, next);
+    express.json({ limit: BODY_LIMIT })(req, res, next);
   }
 });
 
 // Also add urlencoded parser for form data
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 
 // ---------------------------------------------------------------------------
 // Uploaded files
@@ -508,10 +554,28 @@ app.post('/api/jobs/reminders', runRemindersRoute);
 app.get('/api/jobs/reminders', runRemindersRoute);
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+//
+// On a serverless instance that has just started, the database connection is
+// still being opened when the first request arrives -- and a monitor's check
+// is often that first request. Answering from the connection state alone
+// said "unhealthy" on every cold start, so a monitor flapped all day. This
+// waits for the connection (opening it if nobody has yet), but only briefly:
+// a database that is really down still gets its 503, a few seconds later.
+const HEALTH_CONNECT_TIMEOUT_MS = 5000;
+
+function connectedWithin(ms) {
+  if (mongoose.connection.readyState === 1) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    ensureConnection()
+      .then(() => resolve(mongoose.connection.readyState === 1), () => resolve(false))
+      .finally(() => clearTimeout(timer));
+  });
+}
+
+app.get('/health', async (req, res) => {
   try {
-    const mongoose = require('mongoose');
-    const isDbConnected = mongoose.connection.readyState === 1;
+    const isDbConnected = await connectedWithin(HEALTH_CONNECT_TIMEOUT_MS);
 
     res.status(isDbConnected ? 200 : 503).json({
       status: isDbConnected ? 'healthy' : 'unhealthy',
@@ -543,6 +607,13 @@ app.use('/', async (req, res, next) => {
     });
   }
 }, allRoutes);
+
+// Nothing above answered: no such endpoint. Said in the shape every other
+// refusal has, where Express's own answer is an HTML page ("Cannot GET
+// /...") that an app expecting JSON cannot read.
+app.use((req, res) => {
+  res.status(404).json({ success: false, error: 'Not found', message: 'There is nothing at this address.' });
+});
 
 // Global error handler for Multer and other errors
 app.use((error, req, res, next) => {
@@ -581,6 +652,12 @@ app.use((error, req, res, next) => {
   }
   if (error && error.type === 'entity.too.large') {
     return res.status(413).json({ success: false, error: 'Payload too large', message: 'The request body is too large.' });
+  }
+
+  // So is a value the database cannot read as what the field holds -- nearly
+  // always a malformed id in the address ("/gym-classes/not-an-id").
+  if (error && error.name === 'CastError') {
+    return res.status(400).json({ success: false, error: 'Invalid value', message: 'That id or value is not valid.' });
   }
 
   // Default error handler. Only something nobody wrote a message for reaches

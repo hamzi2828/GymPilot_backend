@@ -22,45 +22,45 @@ const SECTION_KEYS = [
   'blogs',
 ];
 
-// Default copy — matches what the homepage shipped with, so a fresh database
-// renders the same site the static version did. Headings support `*word*`
-// markers, which the frontend renders in the accent colour.
+// Default copy: what a new gym's website says until its owner writes their
+// own. So it must be true of any gym -- no member counts, opening hours,
+// facilities or claims about staff that this particular gym never made. A
+// figure nobody has supplied is left out (the stats band ships switched off
+// and empty, the about section has no progress bars) rather than invented.
+// Headings support `*word*` markers, which the frontend renders in the
+// accent colour.
 const DEFAULT_SECTIONS = [
   {
     key: 'about',
     order: 1,
     content: {
       badge: 'About Us',
-      heading: 'The best fitness gym in town',
+      heading: 'Welcome to our gym',
       description:
-        'A full strength and conditioning floor, a dedicated studio for group classes, and coaches who actually watch your form. Whether you are lifting for the first time or chasing a personal best, you get a plan built around your goal, not a generic programme handed to everyone who walks in.',
+        'A place to train, whatever your starting point. Whether you are lifting for the first time or chasing a personal best, come in, look around and find what suits your goal.',
       bullets: [
-        'Open 7 days, with 24/7 access for members',
-        'Certified coaches on the floor at all times',
-        'Programmes tracked and reviewed every month',
+        'For beginners and regulars alike',
+        'Train at your own pace',
+        'Membership options to suit you',
       ],
       ctaText: "Let's Start",
       ctaLink: '/packages',
       image: '/images/gym-couple.png',
-      secondHeading: 'Strength that shows',
+      secondHeading: 'Train for the long run',
       secondDescription:
-        'Strength work is the fastest route to a body that performs as well as it looks. Our coaches build progressive lifting blocks around squat, hinge, push and pull, then track your numbers week to week so the progress is something you can see rather than something you hope for.',
-      progress: [
-        { label: 'Strength & Conditioning', value: 85 },
-        { label: 'Muscle Tone', value: 90 },
-      ],
+        'Regular training builds strength, stamina and confidence that carry into everyday life. Start where you are, keep showing up, and let the results build over time.',
+      // Percentage bars ({ label, value }) the gym adds for itself.
+      progress: [],
     },
   },
   {
     key: 'stats',
     order: 2,
+    // Ships hidden with no figures: the band appears once the admin enters
+    // the gym's own numbers in /admin/homepage and enables it.
+    enabled: false,
     content: {
-      items: [
-        { value: '1200', suffix: '+', label: 'Active members' },
-        { value: '15', suffix: '+', label: 'Certified coaches' },
-        { value: '40', suffix: '+', label: 'Classes every week' },
-        { value: '10', suffix: 'yrs', label: 'Coaching experience' },
-      ],
+      items: [],
     },
   },
   {
@@ -69,8 +69,7 @@ const DEFAULT_SECTIONS = [
     content: {
       badge: 'Classes',
       heading: 'What we do in our classes',
-      description:
-        'Classes run from sunrise to late evening and are capped so nobody trains unwatched. Strength, conditioning, mobility and recovery sessions, each with a scaled option so beginners and regulars can share the same floor.',
+      description: 'Take a look at the classes on offer and pick the ones that fit your week.',
     },
   },
   {
@@ -128,8 +127,7 @@ const DEFAULT_SECTIONS = [
     content: {
       badge: 'Videos',
       heading: 'See the floor in *action*',
-      description:
-        'Walk the gym before you ever set foot in it — classes mid-session, coaching on the floor and the community that keeps people coming back.',
+      description: 'Take a look around before your first visit.',
       videos: [],
     },
   },
@@ -138,9 +136,8 @@ const DEFAULT_SECTIONS = [
     order: 6,
     content: {
       badge: 'Our Trainers',
-      heading: 'Coaches who train you like an athlete',
-      description:
-        'Every coach on the floor is certified, insured and has come up through the same programmes they now teach. Book an intro session and you will be paired with the one whose speciality matches what you are training for.',
+      heading: 'Meet our trainers',
+      description: 'The people you will be training with.',
       limit: 4,
     },
   },
@@ -150,8 +147,7 @@ const DEFAULT_SECTIONS = [
     content: {
       badge: 'Testimonials',
       heading: 'What our members say',
-      description:
-        'Real progress, told by the people who made it. Every review below comes from a member training on this floor right now.',
+      description: 'In the words of the people who train with us.',
     },
   },
   {
@@ -160,8 +156,7 @@ const DEFAULT_SECTIONS = [
     content: {
       badge: 'Contact Form',
       heading: 'Believe in yourself be *fit* & *healthier*',
-      description:
-        'Tell us what you are training for and we will point you at the right membership, class or coach. No hard sell, and no obligation to sign up on the spot.',
+      description: 'Have a question, or want to come and see the gym? Send us a message and we will get back to you.',
       formTitle: 'Registration Form',
       buttonText: 'Contact Us',
     },

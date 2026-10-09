@@ -12,7 +12,7 @@
       "headers": [
         {
           "key": "x-robots-tag",
-          "value": "index, follow"
+          "value": "noindex, nofollow"
         },
         {
           "key": "Content-Security-Policy",
@@ -22,10 +22,6 @@
     }
   ],
   "routes": [
-    {
-      "src": "/robots.txt",
-      "dest": "/robots.txt"
-    },
     {
       "src": "/(.*)",
       "dest": "/index.js"

@@ -6,16 +6,18 @@
 // half from the portal; staff see and edit all of it from Users → Profile.
 
 const mongoose = require('mongoose');
-const fs = require('fs');
 const User = require('../models/user');
 const Settings = require('../models/settings');
-const { toPublicPath, localUploadPath } = require('../helper/upload');
+const { toPublicPath } = require('../helper/upload');
 const { membershipFor } = require('../attendance/services/peopleDirectory');
 const Attendance = require('../attendance/models/attendanceModel');
 const { primaryAddress, oneLine } = require('../services/memberFields');
+const guards = require('../services/roleGuards');
+const { actorAccess, permissionsFor } = require('../services/roleService');
 
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
-const blobUpload = USE_BLOB_STORAGE ? require('../helper/blobUpload') : null;
+const blobUpload = require('../helper/blobUpload');
+const { deleteStoredFile } = blobUpload;
 
 const PARQ_QUESTIONS = [
   'Has your doctor ever said that you have a heart condition and that you should only do physical activity recommended by a doctor?',
@@ -37,6 +39,22 @@ function fail(res, code, message) {
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+}
+
+// Who may change whose record. `users: manage` opens these screens, but it
+// is the line the Users tab already holds on deleting an account or setting
+// its password (services/roleGuards.js) that decides which accounts: an
+// administrator's only by an administrator, and nobody's whose role reaches
+// further than the actor's own. Your own record is yours to edit.
+// Resolves to the sentence to refuse with, or null.
+async function reachRefusal(req, target) {
+  const actor = await actorAccess(req);
+  if (actor.actorId && String(actor.actorId) === String(target._id)) return null;
+  if (guards.isAdmin(actor.actorRole)) return null;
+  if (guards.isAdmin(target.role)) return "Only an administrator can change an administrator's profile.";
+  const wider = guards.widerTab(actor.actorPermissions, await permissionsFor(target.role));
+  if (wider) return `This account has more access than yours (${wider}), so ask an administrator to change its profile.`;
+  return null;
 }
 
 async function waiverSettings() {
@@ -96,24 +114,10 @@ function applyParq(user, input) {
 }
 
 async function storeUpload(file, folder) {
-  if (USE_BLOB_STORAGE && blobUpload) {
+  if (USE_BLOB_STORAGE) {
     return blobUpload.uploadToBlob(file.buffer, file.originalname, file.mimetype, folder);
   }
   return toPublicPath(file.filename);
-}
-
-async function removeStored(url) {
-  if (!url) return;
-  try {
-    if (USE_BLOB_STORAGE && blobUpload && /^https?:\/\//.test(url)) {
-      await blobUpload.deleteFromBlob(url);
-    } else {
-      const local = localUploadPath(url);
-      if (local) await fs.promises.unlink(local).catch(() => {});
-    }
-  } catch {
-    /* an orphaned file is not worth failing the request */
-  }
 }
 
 async function setPhoto(user, file) {
@@ -121,7 +125,9 @@ async function setPhoto(user, file) {
   const old = user.avatarUrl;
   user.avatarUrl = url;
   await user.save();
-  if (old && old.startsWith('/uploads/')) await removeStored(old);
+  // The photo it replaces goes too, wherever it was stored. One that is not
+  // this gym's own upload (a Google picture) is left alone by the helper.
+  if (old && old !== url) await deleteStoredFile(old, 'members');
   return url;
 }
 
@@ -280,6 +286,8 @@ module.exports = {
       // Health details are merged field by field, so they must be loaded.
       const user = await User.findById(req.params.id).select('+medical +staffNotes');
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const body = req.body || {};
 
       for (const key of ['firstName', 'lastName']) {
@@ -326,6 +334,8 @@ module.exports = {
       if (!req.file) return fail(res, 400, 'Choose an image');
       const user = await User.findById(req.params.id);
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const url = await setPhoto(user, req.file);
       return res.json({ success: true, message: 'Photo updated.', data: { avatarUrl: url } });
     } catch (error) {
@@ -342,6 +352,8 @@ module.exports = {
       // The list is appended to, so it has to be loaded (`select: false`).
       const user = await User.findById(req.params.id).select('+documents');
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       if ((user.documents || []).length >= 50) return fail(res, 409, 'This member already has 50 documents');
       const url = await storeUpload(req.file, 'member-documents');
       user.documents = user.documents || [];
@@ -368,12 +380,14 @@ module.exports = {
       if (!isId(req.params.id) || !isId(req.params.docId)) return fail(res, 404, 'Document not found');
       const user = await User.findById(req.params.id).select('+documents');
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const doc = (user.documents || []).find((d) => String(d._id) === String(req.params.docId));
       if (!doc) return fail(res, 404, 'Document not found');
       const url = doc.url;
       user.documents = user.documents.filter((d) => String(d._id) !== String(req.params.docId));
       await user.save();
-      await removeStored(url);
+      await deleteStoredFile(url, 'member-documents');
       return res.json({ success: true, message: 'Document removed.' });
     } catch (error) {
       console.error('[profile] remove document failed:', error);
@@ -387,6 +401,8 @@ module.exports = {
       if (!isId(req.params.id)) return fail(res, 404, 'Member not found');
       const user = await User.findById(req.params.id);
       if (!user) return fail(res, 404, 'Member not found');
+      const refusal = await reachRefusal(req, user);
+      if (refusal) return fail(res, 403, refusal);
       const config = await waiverSettings();
       const name = text((req.body || {}).signature, 120) || [user.firstName, user.lastName].filter(Boolean).join(' ');
       user.waiver = { signedAt: new Date(), version: config.version, signature: name, source: 'desk', ip: clientIp(req), recordedBy: actorId(req) };

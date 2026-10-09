@@ -1,7 +1,10 @@
 // src/helper/blobUpload.js
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { put, del } = require('@vercel/blob');
 const { currentTenant } = require('../platform/tenantContext');
-const { EXTENSION_FOR_MIME } = require('./upload');
+const { EXTENSION_FOR_MIME, UPLOADS_DIR, localUploadPath } = require('./upload');
 
 // Every gym's files sit under their own prefix in the store, named by the
 // gym's slug, so listings and clean-ups can be scoped to one customer.
@@ -12,6 +15,14 @@ function folderFor(slug, folder) {
 function tenantFolder(folder) {
   const gym = currentTenant();
   return folderFor(gym && gym.slug, folder);
+}
+
+// The store is public: whoever has a file's URL can open it, and an ID scan
+// or a medical letter has nothing else in front of it. So the URL has to be
+// the secret -- 128 bits from the system's random source in every stored
+// name, where a timestamp and Math.random() could be worked out.
+function unguessable() {
+  return crypto.randomBytes(16).toString('hex');
 }
 
 // Where the store serves public files from: <store id> + this suffix.
@@ -117,10 +128,9 @@ async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads', opti
   // not the name the file arrived with ("logo.svg" sent as image/png is
   // stored as .png).
   const timestamp = Date.now();
-  const rand = Math.round(Math.random() * 1e9);
   const ext = (EXTENSION_FOR_MIME[mimetype] || '').slice(1) || filename.split('.').pop()?.toLowerCase() || 'jpg';
   const baseName = filename.replace(/\.[^/.]+$/, '').replace(/\s+/g, '-');
-  const uniqueFilename = `${tenantFolder(folder)}/${timestamp}-${rand}-${baseName}.${ext}`;
+  const uniqueFilename = `${tenantFolder(folder)}/${timestamp}-${unguessable()}-${baseName}.${ext}`;
 
   // Upload to Vercel Blob
   const { url } = await put(uniqueFilename, buffer, {
@@ -194,30 +204,49 @@ async function processUploadedFiles(files, folder = 'uploads') {
 }
 
 /**
+ * Delete one stored file of the gym this request is for: a Blob URL or a
+ * local '/uploads/...' path. Nothing outside the gym's own folder is ever
+ * touched -- another gym's file, an avatar hosted by Google, a path that
+ * climbs out of the uploads directory are all left alone -- and a file that
+ * is already gone is not an error. Never throws: a file left behind must not
+ * fail the request that no longer needs it.
+ * @param {string} url - the URL or '/uploads/...' path as stored
+ * @param {string} [folder] - the folder it was stored in ('member-documents').
+ *   In the Blob store the file must be under `<slug>/<folder>/`; local files
+ *   are not kept in folders, so there it only has to be the gym's.
+ * @returns {Promise<boolean>} whether a file of this gym was removed (or was
+ *   already gone)
+ */
+async function deleteStoredFile(url, folder = '') {
+  const gym = currentTenant();
+  const slug = gym && gym.slug ? String(gym.slug) : '';
+  if (typeof url !== 'string' || !url || !slug) return false;
+
+  try {
+    if (url.startsWith('/uploads/')) {
+      const local = localUploadPath(url);
+      if (!local || !local.startsWith(path.join(UPLOADS_DIR, slug) + path.sep)) return false;
+      await fs.promises.unlink(local);
+      return true;
+    }
+    // With no folder named, anywhere under the gym's own prefix will do.
+    const own = folder ? ownBlobUrl(url, slug, folder) : ownBlobUrl(url, '', slug);
+    if (!own) return false;
+    await del(own);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return true;
+    console.error('Failed to delete a stored file:', error.message);
+    return false;
+  }
+}
+
+/**
  * Delete a file (works for both blob and local)
  * @param {string} url - URL or path of file to delete
  */
 async function deleteFile(url) {
-  if (!url) return;
-
-  // If it's a blob URL, use deleteFromBlob
-  if (url.includes('blob.vercel-storage.com')) {
-    await deleteFromBlob(url);
-  } else {
-    // Local file - try to delete
-    const fs = require('fs');
-    const path = require('path');
-    try {
-      const localPath = url.startsWith('/uploads')
-        ? path.join(__dirname, '../../..', url)
-        : url;
-      if (fs.existsSync(localPath)) {
-        fs.unlinkSync(localPath);
-      }
-    } catch (error) {
-      console.error('Failed to delete local file:', error);
-    }
-  }
+  await deleteStoredFile(url);
 }
 
 /**
@@ -325,10 +354,9 @@ async function uploadScreenshot(buffer, filename, mimetype) {
 
   // Generate unique filename
   const timestamp = Date.now();
-  const rand = Math.round(Math.random() * 1e9);
   const ext = filename.split('.').pop()?.toLowerCase() || 'jpg';
   const baseName = filename.replace(/\.[^/.]+$/, '').replace(/\s+/g, '-');
-  const uniqueFilename = `${tenantFolder('screenshots')}/${timestamp}-${rand}-${baseName}.${ext}`;
+  const uniqueFilename = `${tenantFolder('screenshots')}/${timestamp}-${unguessable()}-${baseName}.${ext}`;
 
   // Upload to Vercel Blob
   const { url } = await put(uniqueFilename, buffer, {
@@ -344,6 +372,7 @@ module.exports = {
   uploadMultipleToBlob,
   deleteFromBlob,
   deleteFile,
+  deleteStoredFile,
   processProductFiles,
   processUploadedFiles,
   uploadScreenshot,

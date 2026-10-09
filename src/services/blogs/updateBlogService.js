@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 // The same form helpers the create path uses, so an edit form is read the
 // same way as a create form.
 const { normaliseCategoryId, readBoolean, urlOrNull, storeUpload } = require('./createBlogService');
+const { cleanBlogHtml, cleanExcerpt, readMetaSchema, writeMetaSchema } = require('./blogHtml');
 
 /**
  * Update an existing blog post
@@ -29,7 +30,6 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
 
     const {
       title,
-      content,
       authorId, // Add authorId
       status,
       slug,
@@ -40,6 +40,13 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
       metaKeywords,
       metaSchema
     } = updateData;
+    // The body is stored as the article markup it may contain and nothing
+    // else (services/blogs/blogHtml.js). A post cannot be saved with a body
+    // that has nothing left in it.
+    const content = updateData.content === undefined ? undefined : cleanBlogHtml(updateData.content);
+    if (content === '') {
+      throw new Error('Invalid content: the post has nothing in it to show');
+    }
     // An edit form hands the category back as the populated object it was
     // given; only the id is wanted.
     const categoryId = normaliseCategoryId(updateData.categoryId);
@@ -79,17 +86,9 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
       parsedTags = tags.split(',').map(tag => tag.trim()).filter(tag => tag);
     }
 
-    // Validate JSON-LD schema if provided
-    if (metaSchema) {
-      try {
-        const schema = JSON.parse(metaSchema);
-        if (!schema['@context'] || !schema['@type']) {
-          throw new Error('JSON-LD schema must include @context and @type');
-        }
-      } catch (e) {
-        throw new Error(`Invalid JSON-LD schema: ${e.message}`);
-      }
-    }
+    // Validate JSON-LD schema if provided: a JSON object, stored
+    // re-serialised. An empty value clears it.
+    const storedSchema = metaSchema ? readMetaSchema(metaSchema) : metaSchema;
 
     // Check for duplicate slug if slug is being changed
     if (slug && slug !== existingBlog.slug) {
@@ -107,14 +106,14 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
     
     // Core fields
     if (title !== undefined) updateObject.title = String(title).trim();
-    if (content !== undefined) updateObject.content = String(content).trim();
+    if (content !== undefined) updateObject.content = content;
     if (categoryId) updateObject.categoryId = new mongoose.Types.ObjectId(categoryId);
     if (authorId !== undefined) updateObject.author = authorId ? new mongoose.Types.ObjectId(authorId) : null;
     if (status !== undefined) updateObject.status = status;
     if (slug !== undefined) updateObject.slug = slug;
     if (parsedTags !== undefined) updateObject.tags = parsedTags;
     if (featuredInput !== undefined) updateObject.featured = readBoolean(featuredInput);
-    if (excerpt !== undefined) updateObject.excerpt = typeof excerpt === 'string' ? excerpt.trim().slice(0, 500) : '';
+    if (excerpt !== undefined) updateObject.excerpt = cleanExcerpt(excerpt);
 
     // File uploads. Without a file, a URL string (from the generic media
     // upload, or the existing value echoed back) is accepted for either.
@@ -142,7 +141,7 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
       updateObject.metaKeywords = metaKeywords;
     }
     if (metaSchema !== undefined) {
-      updateObject.metaSchema = metaSchema;
+      updateObject.metaSchema = storedSchema;
     }
 
     // Update modified date in schema if content changed
@@ -152,7 +151,7 @@ const updateBlogService = async (blogId, updateData, files = {}) => {
         schema.dateModified = new Date().toISOString();
         if (title) schema.headline = title;
         if (content) schema.description = stripHtml(content).slice(0, 155);
-        updateObject.metaSchema = JSON.stringify(schema);
+        updateObject.metaSchema = writeMetaSchema(schema);
       } catch (e) {
         // If existing schema is invalid, ignore
       }

@@ -74,6 +74,16 @@ async function releaseAccount(user) {
     } catch (error) {
         console.error('[users] could not delete push registrations of', String(id), '-', error.message);
     }
+    // Nor may what was uploaded for the account outlive it: its photo and its
+    // documents (ID scans, medical letters). `documents` is `select: false`,
+    // so only a caller that loaded it has them removed.
+    try {
+        const { deleteStoredFile } = require('../helper/blobUpload');
+        await deleteStoredFile(user.avatarUrl, 'members');
+        for (const doc of user.documents || []) await deleteStoredFile(doc && doc.url, 'member-documents');
+    } catch (error) {
+        console.error('[users] could not delete stored files of', String(id), '-', error.message);
+    }
     forgetSession(id);
 }
 
