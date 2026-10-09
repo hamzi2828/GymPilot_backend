@@ -15,6 +15,9 @@ const {
   periodProblem,
   creditAgainst,
   subscriptionPriceData,
+  readRequestId,
+  readDeskTerms,
+  isRepeat,
   MembershipError
 } = require('../../src/gymfolio/services/membershipService');
 
@@ -128,4 +131,22 @@ test('a subscription item is priced against a product id: Stripe refuses a produ
   assert.equal('product_data' in price, false);
   // Minor units follow the currency.
   assert.equal(subscriptionPriceData({ currency: 'jpy', product: 'p', amount: 5500, billing: { interval: 'year', intervalCount: 1 } }).unit_amount, 5500);
+});
+
+test('requestId is optional: left out it is nothing, sent it must be an id, and it rides with the desk terms', () => {
+  for (const none of [undefined, null, '']) assert.equal(readRequestId(none), undefined);
+  assert.equal(readRequestId('3f2b8c1e-5d47-4a9e-b1c6-0a1b2c3d4e5f'), '3f2b8c1e-5d47-4a9e-b1c6-0a1b2c3d4e5f');
+  assert.equal(readRequestId('  desk_42-renewal  '), 'desk_42-renewal');
+  for (const bad of ['short', 'has spaces in it', 'a.dotted.id.value', '$where-12345', 'x'.repeat(101), 12]) {
+    assert.throws(() => readRequestId(bad), (error) => error.name === 'MembershipError' && error.status === 400 && error.code === 'INVALID_TERMS' && /^requestId must be/.test(error.message), String(bad));
+  }
+
+  assert.equal(readDeskTerms({ requestId: 'sale-00000001' }).requestId, 'sale-00000001');
+  assert.equal('requestId' in readDeskTerms({ paymentMethod: 'cash' }), false);
+  assert.throws(() => readDeskTerms({ requestId: 'no' }), /requestId must be/);
+});
+
+test('an order handed back for a repeated request says so, and any other does not', () => {
+  assert.equal(isRepeat({ $locals: { repeated: true } }), true);
+  for (const order of [{ $locals: {} }, {}, null, undefined]) assert.equal(isRepeat(order), false);
 });

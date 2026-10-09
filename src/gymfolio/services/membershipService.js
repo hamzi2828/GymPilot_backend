@@ -409,6 +409,51 @@ function money(value, field) {
   return round2(amount);
 }
 
+/* ---------------------------- desk repeats ----------------------------- */
+//
+// A desk request sent again because its answer never arrived -- a timeout, a
+// dropped connection -- must not sell a second term or record a second
+// instalment. The desk may send `requestId` with a sale, a renewal or a part
+// payment: any id it makes up for that one action (a UUID will do), sent
+// again unchanged when it retries. A request whose id is already recorded
+// is answered with the first result and changes nothing. Left out, every
+// request is new, as before.
+//
+// The id is kept in the order's `metadata`: `requestId` on the order a sale
+// or renewal made, `lastPaymentRequestId` for the latest part payment. This
+// covers the retry after a lost reply; two requests with one id arriving at
+// the very same moment are not told apart (that needs a unique index).
+
+const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
+
+/** The `requestId` a desk request carries, or undefined when it has none. */
+function readRequestId(value) {
+  if (!present(value)) return undefined;
+  const id = String(value).trim();
+  if (!REQUEST_ID.test(id)) {
+    throw new MembershipError('requestId must be 8 to 100 letters, digits, hyphens or underscores (a UUID will do)', 400, 'INVALID_TERMS');
+  }
+  return id;
+}
+
+/** What an order's metadata holds under `key` (a Map on a loaded order). */
+function metadataOf(order, key) {
+  const metadata = order && order.metadata;
+  if (!metadata) return undefined;
+  return typeof metadata.get === 'function' ? metadata.get(key) : metadata[key];
+}
+
+/** Marks an order handed back as the first result of a request sent again. */
+function asRepeat(order) {
+  if (order.$locals) order.$locals.repeated = true;
+  return order;
+}
+
+/** Whether an order was handed back as the answer to a repeated request. */
+function isRepeat(order) {
+  return !!(order && order.$locals && order.$locals.repeated);
+}
+
 /**
  * A date the desk sent. A bare 'YYYY-MM-DD' (a date input) names a whole
  * day at the gym: its first moment for a start, its last for an end (a
@@ -459,6 +504,8 @@ function readStartDate(value, now = new Date()) {
  *   trainerCommissionType,       not renewals): 'percent' of the fee, or a
  *   trainerCommissionValue       fixed 'amount'
  *   notes
+ *   requestId                    this action's own id, so that sending it
+ *                                again makes no second order (desk repeats)
  *
  * @param {object} body
  * @param {{ trainer?: boolean, now?: Date }} [options] trainer: whether
@@ -493,6 +540,8 @@ function readDeskTerms(body = {}, { trainer: allowTrainer = true, now = new Date
   if (truthy(body.waiveJoiningFee)) terms.chargeJoiningFee = false;
   if (present(body.paymentMethod)) terms.paymentMethod = body.paymentMethod;
   if (present(body.notes)) terms.notes = String(body.notes).trim().slice(0, 1000);
+  const requestId = readRequestId(body.requestId);
+  if (requestId) terms.requestId = requestId;
 
   const trainerFields = ['trainerId', 'trainerFee', 'trainerCommissionType', 'trainerCommissionValue'].filter((key) => present(body[key]));
   if (trainerFields.length) {
@@ -541,6 +590,9 @@ function commissionOn(fee, { commissionType, commissionValue }) {
  * membership is granted all the same (paid, active) with the rest as
  * payment.balanceDue, and what was taken is the order's first installment,
  * recorded as received by `paidBy` (a staff account id).
+ *
+ * `requestId`: the desk's id for this action. When this member already has
+ * the order it made, that order is returned (isRepeat) and nothing is sold.
  */
 async function createManualOrder({
   user,
@@ -560,8 +612,13 @@ async function createManualOrder({
   trainer = null,
   amountPaid,
   paidBy = null,
-  by = null
+  by = null,
+  requestId
 }) {
+  if (requestId) {
+    const first = await PackageOrder.findOne({ userId: user._id, 'metadata.requestId': requestId });
+    if (first) return asRepeat(first);
+  }
   const settings = await Settings.getSettings().catch(() => null);
   const listPrice = parseAmount(pkg.price);
   if (listPrice === null) {
@@ -686,6 +743,7 @@ async function createManualOrder({
     renewedFrom,
     status: paid ? 'active' : 'pending',
     notes: notes || `Created from the admin panel by ${by || 'an administrator'}`,
+    metadata: requestId ? { requestId } : undefined,
     createdBy: null
   });
 
@@ -741,11 +799,17 @@ function refundInProgress() {
  * people recording the same payment at once take it off once, and the
  * second is told the balance moved.
  *
+ * `requestId`: the desk's id for this payment. Sent again, the order is
+ * returned as the payment left it (isRepeat) and nothing more is recorded.
+ *
  * @throws {MembershipError} 409 STRIPE_BILLED / NOT_PAID / NO_BALANCE /
  *   REFUND_IN_PROGRESS / BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
  *   than the balance); 422 PAYMENT_METHOD_INVALID
  */
-async function recordPayment(order, { amount, method, note = '', by = null, now = new Date() } = {}) {
+async function recordPayment(order, { amount, method, note = '', by = null, now = new Date(), requestId } = {}) {
+  // First of all: the payment may have settled the balance, and the repeat
+  // would otherwise be told nothing is owed.
+  if (requestId && metadataOf(order, 'lastPaymentRequestId') === requestId) return asRepeat(order);
   if (stripeBilled(order)) {
     throw new MembershipError('This membership is paid by card through Stripe; there is no balance to take at the desk.', 409, 'STRIPE_BILLED');
   }
@@ -793,7 +857,8 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
         'payment.installments': parts,
         'payment.amountPaid': round2(paidSoFar(order.payment) + paying),
         'payment.balanceDue': round2(balance - paying),
-        'payment.lastPaidAt': now
+        'payment.lastPaidAt': now,
+        ...(requestId ? { 'metadata.lastPaymentRequestId': requestId } : {})
       }
     },
     { new: true }
@@ -1487,7 +1552,7 @@ async function resume(order, { by = null } = {}) {
  */
 async function renew(
   order,
-  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride, amountPaid, paidBy } = {}
+  { paymentMethod = 'cash', markPaid = true, months, notes, by, startDate, discountAmount, discountNote, amountOverride, amountPaid, paidBy, requestId } = {}
 ) {
   const [user, pkg] = await Promise.all([User.findById(order.userId), Package.findById(order.packageId)]);
   if (!user) throw new MembershipError('The member account no longer exists', 404);
@@ -1513,7 +1578,8 @@ async function renew(
     renewedFrom: order._id,
     // A renewal is not joining: the fee was taken with the first term.
     chargeJoiningFee: false,
-    by
+    by,
+    requestId
   });
 }
 
@@ -2021,6 +2087,8 @@ module.exports = {
   redeemCoupon,
   assertNoActiveSubscription,
   markPaidAndActivate,
+  readRequestId,
+  isRepeat,
   readDeskTerms,
   commissionOn,
   createManualOrder,

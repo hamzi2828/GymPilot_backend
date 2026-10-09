@@ -239,7 +239,11 @@ module.exports = {
 
   // POST /api/gymfolio/package-orders/:id/renew  (staff)
   //   { paymentMethod, markPaid, months, notes, force,
-  //     startDate, discountAmount, discountNote, amountOverride, amountPaid }
+  //     startDate, discountAmount, discountNote, amountOverride, amountPaid, requestId }
+  //
+  // `requestId` (optional): the desk's own id for this renewal. Sent again
+  // after a lost reply, the answer is the renewal already made (`repeated:
+  // true`), not a second term over it.
   //
   // The pricing and start fields are read as on a sale (readDeskTerms; no
   // trainer on a renewal). Left out, the term starts when the current one
@@ -277,10 +281,17 @@ module.exports = {
         amountOverride: terms.amountOverride,
         amountPaid: terms.amountPaid,
         paidBy: userId(req),
-        by: req.user && req.user.email
+        by: req.user && req.user.email,
+        requestId: terms.requestId
       });
-      if (renewal.payment.status === 'paid') tell('membershipConfirmed', renewal);
-      return res.status(201).json({ success: true, message: `Renewed: ${renewal.orderNumber} runs until ${new Date(renewal.subscription.endDate).toDateString()}.`, data: renewal });
+      const repeated = service.isRepeat(renewal);
+      if (renewal.payment.status === 'paid' && !repeated) tell('membershipConfirmed', renewal);
+      return res.status(201).json({
+        success: true,
+        message: `Renewed: ${renewal.orderNumber} runs until ${new Date(renewal.subscription.endDate).toDateString()}.`,
+        data: renewal,
+        repeated: repeated || undefined
+      });
     } catch (error) {
       return fail(res, error);
     }
@@ -330,23 +341,32 @@ module.exports = {
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/payments  (staff)  { amount, method?, note? }
+  // POST /api/gymfolio/package-orders/:id/payments  (staff)  { amount, method?, note?, requestId? }
   //
   // Money received at the desk against an order's balance due; see
-  // membershipService.recordPayment for what is refused and why.
+  // membershipService.recordPayment for what is refused and why. `requestId`
+  // (optional) is the desk's own id for this payment: sent again after a
+  // lost reply, the answer is the same and no second payment is recorded.
   recordPayment: async (req, res) => {
     try {
       if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       const body = req.body || {};
-      const updated = await service.recordPayment(order, { amount: body.amount, method: body.method, note: body.note, by: userId(req) });
+      const updated = await service.recordPayment(order, {
+        amount: body.amount,
+        method: body.method,
+        note: body.note,
+        by: userId(req),
+        requestId: service.readRequestId(body.requestId)
+      });
       const currency = String(updated.payment.currency || '').toUpperCase();
       const due = Number(updated.payment.balanceDue || 0);
       return res.json({
         success: true,
         message: due > 0 ? `Payment recorded. ${currency} ${due.toFixed(2)} still due.` : 'Payment recorded. Paid in full.',
-        data: updated
+        data: updated,
+        repeated: service.isRepeat(updated) || undefined
       });
     } catch (error) {
       return fail(res, error);
