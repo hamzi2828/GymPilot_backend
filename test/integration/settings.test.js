@@ -139,3 +139,31 @@ test('a link carrying markup is stored as the encoded address, never as the text
     for (const key of ['twitterUrl', 'instagramUrl']) assert.doesNotMatch(data[key], /[<>"]/, key);
   });
 });
+
+test('a gym that never uploaded a logo has none: no placeholder picture on the site, in the app or on a receipt', async () => {
+  const Settings = h.src('models/settings');
+  const { branding } = h.src('services/branding');
+  await h.inGym(gym, async () => {
+    // As a new gym's settings are written (platform/provisioning.js): its
+    // own name, and nothing said about a logo.
+    assert.equal((await Settings.findOne({ isActive: true }).lean()).logoUrl, '');
+    const shown = await h.call(settings.getPublicSettings, req());
+    assert.equal(shown.statusCode, 200, JSON.stringify(shown.body));
+    assert.equal(shown.body.data.logoUrl, '');
+    assert.equal((await branding('https://api.settings.test')).logoUrl, '');
+
+    // A row from when the default was the bundled "LOGO" picture still holds
+    // its path: the app and the receipts read that as no logo too.
+    await Settings.collection.updateOne({ isActive: true }, { $set: { logoUrl: '/images/logo.png' } });
+    assert.equal((await branding('https://api.settings.test')).logoUrl, '');
+
+    // A logo of the gym's own is passed on, and removing it leaves none.
+    await Settings.collection.updateOne({ isActive: true }, { $set: { logoUrl: 'https://blob.example/settings/own-logo.png' } });
+    assert.equal((await branding('https://api.settings.test')).logoUrl, 'https://blob.example/settings/own-logo.png');
+    const removed = await h.call(settings.removeLogo, req());
+    assert.equal(removed.statusCode, 200, JSON.stringify(removed.body));
+    assert.equal(removed.body.data.logoUrl, '');
+    assert.match(removed.body.message, /Logo removed/);
+    assert.equal((await Settings.findOne({ isActive: true }).lean()).logoUrl, '');
+  });
+});

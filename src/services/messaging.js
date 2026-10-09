@@ -316,7 +316,9 @@ async function sendPush(userId, payload, meta = {}) {
       title: payload.title || '',
       body: payload.body || '',
       url: payload.url || '/',
-      icon: payload.icon || '/images/logo.png'
+      // None of its own: the website's service worker then shows the app's
+      // icon (it used to be sent the bundled "LOGO" placeholder picture).
+      icon: payload.icon || ''
     });
 
     for (const sub of subs) {

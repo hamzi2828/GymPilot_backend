@@ -911,19 +911,18 @@ const settingsController = {
     }
   },
 
-  // DELETE /settings/logo - Remove logo (reset to default)
+  // DELETE /settings/logo - Remove logo: the gym then has none, and its
+  // name is shown in its place.
   removeLogo: async (req, res) => {
     try {
       // Get current settings
       const currentSettings = await Settings.getSettings();
       const currentLogoUrl = currentSettings.logoUrl;
 
-      // Reset to default logo
-      const defaultLogoUrl = '/images/logo.png';
-      const updatedSettings = await Settings.updateSettings({ logoUrl: defaultLogoUrl });
+      const updatedSettings = await Settings.updateSettings({ logoUrl: '' });
 
-      // Remove current logo file if it's uploaded (not default)
-      if (currentLogoUrl && currentLogoUrl !== defaultLogoUrl && currentLogoUrl.startsWith('/uploads/')) {
+      // Remove current logo file if it's uploaded
+      if (currentLogoUrl && currentLogoUrl.startsWith('/uploads/')) {
         try {
           const logoPath = localUploadPath(currentLogoUrl);
           if (!logoPath) throw new Error('not inside the uploads directory');
@@ -938,7 +937,7 @@ const settingsController = {
 
       return res.status(200).json({
         success: true,
-        message: 'Logo reset to default successfully',
+        message: 'Logo removed. Your gym\'s name is shown in its place.',
         data: sanitizeSettings(updatedSettings)
       });
     } catch (error) {
@@ -958,11 +957,13 @@ const settingsController = {
       const currentSettings = await Settings.getSettings();
       const currentLogoUrl = currentSettings.logoUrl;
 
-      // Create default settings
+      // Create default settings: the gym's own name (as it was registered),
+      // and no logo -- never the platform's name or a placeholder picture.
+      const gym = require('../platform/tenantContext').currentTenant();
       const defaultSettings = {
-        siteName: 'GymPilot',
+        siteName: (gym && gym.name) || currentSettings.siteName || 'GymPilot',
         siteUrl: '',
-        logoUrl: '/images/logo.png',
+        logoUrl: '',
         timezone: 'UTC+05:00',
         dateFormat: 'MM/DD/YYYY',
         emailNotifications: true,

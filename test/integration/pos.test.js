@@ -165,7 +165,8 @@ test('receipt settings: the gym details, sensible defaults, and only valid value
     assert.equal(g.tax_label, 'VAT');
     assert.equal(g.tax_number, 'GB123');
     assert.equal(g.footer_note, 'Thanks for training with us');
-    assert.match(g.logo_url, /\/images\/logo\.png$/);
+    // No logo of its own: none on the receipt, never a placeholder picture.
+    assert.equal(g.logo_url, '');
 
     const saved = await h.call(pos.updateReceiptSettings, as({ body: { paperWidth: '58mm', showLogo: false, footerText: '  No refunds after 7 days  ' } }));
     assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));

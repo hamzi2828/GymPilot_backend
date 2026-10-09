@@ -9,12 +9,24 @@ const Settings = require('../models/settings');
 const { themeFor } = require('../config/themes');
 const { currentTenant, frontendOrigin } = require('../platform/tenantContext');
 
+// What a settings row made before logos defaulted to none holds for a gym
+// that never uploaded one: a bundled picture of the word "LOGO" on the
+// website. It is not the gym's, so it counts as no logo -- the app and the
+// receipts then show the gym's name, as they do for an empty one.
+const PLACEHOLDER_LOGO = '/images/logo.png';
+
+/** The gym's own logo, or '' when it has none. */
+function ownLogo(url) {
+  const value = String(url || '').trim();
+  return value === PLACEHOLDER_LOGO ? '' : value;
+}
+
 /**
  * A logo path that a phone can actually load.
  *
  * Uploaded logos already live on blob storage and are absolute, so they pass
- * straight through. A relative path -- the default '/images/logo.png', and
- * anything else typed into Settings -- is served by the gym's OWN website and
+ * straight through. A relative path -- anything typed into Settings -- is
+ * served by the gym's OWN website and
  * not by this API, so it is resolved against the first origin offered that is
  * actually set: the gym's registered domain, then whatever siteUrl Settings
  * carries, and only then this API. The registered domain leads because it is
@@ -72,7 +84,7 @@ async function branding(apiOrigin = '') {
     // it: buying or changing a plan, invoices, the password reset link. The
     // registered domain first; failing that, whatever Settings says.
     siteUrl: site || String(settings.siteUrl || '').trim().replace(/\/+$/, ''),
-    logoUrl: absoluteAsset(settings.logoUrl, site, settings.siteUrl, apiOrigin),
+    logoUrl: absoluteAsset(ownLogo(settings.logoUrl), site, settings.siteUrl, apiOrigin),
     logoWidth: settings.logoWidth || 160,
     logoHeight: settings.logoHeight || 56,
     theme: theme.key,
@@ -95,4 +107,4 @@ async function branding(apiOrigin = '') {
   };
 }
 
-module.exports = { branding, absoluteAsset };
+module.exports = { branding, absoluteAsset, ownLogo, PLACEHOLDER_LOGO };

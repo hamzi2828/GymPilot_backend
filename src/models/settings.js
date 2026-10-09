@@ -36,9 +36,13 @@ const settingsSchema = new mongoose.Schema(
       trim: true, 
       default: '' 
     },
+    // Empty until the gym uploads its own. It used to default to
+    // '/images/logo.png', a bundled picture of the word "LOGO": rows from
+    // then still hold that path, and it is read as no logo
+    // (services/branding.js ownLogo).
     logoUrl: {
       type: String,
-      default: '/images/logo.png',
+      default: '',
       trim: true
     },
     logoWidth: {
@@ -457,7 +461,7 @@ settingsSchema.statics.getSettings = async function() {
     const defaults = {
       siteName: 'GymPilot',
       siteUrl: '',
-      logoUrl: '/images/logo.png',
+      logoUrl: '',
       timezone: 'UTC+05:00',
       dateFormat: 'MM/DD/YYYY',
       emailNotifications: true,
