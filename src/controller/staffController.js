@@ -33,6 +33,7 @@ const { payChangeProblem } = require('../services/payGuards');
 const { gymSiteName } = require('../services/gymName');
 const { forgetSession } = require('../middleware/auth');
 const { initialPassword, setPasswordHandler } = require('../services/adminPasswords');
+const { escapeHtml } = require('../templates/gymEmails');
 
 // The live role requirePermission just read, never the token's claim.
 const actorRole = (req) => req.roleSlug || (req.user && req.user.role) || '';
@@ -44,23 +45,27 @@ const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'intern', 'casua
 const PAY_CYCLES = ['monthly', 'biweekly', 'weekly'];
 const STAFF_PREFIX = 'TR-';
 
+// Every value is typed by somebody -- the name and role by whoever adds the
+// staff member, the gym's name by its owner -- and goes into the email as
+// text, never as markup (templates/gymEmails.js escapeHtml), as the member
+// welcome email does.
 function staffWelcomeEmail({ firstName, email, username, password, roleName, siteName, loginUrl }) {
   return `
   <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;color:#1f2937">
-    <h2 style="margin:0 0 8px">Welcome to ${siteName}, ${firstName}</h2>
+    <h2 style="margin:0 0 8px">Welcome to ${escapeHtml(siteName)}, ${escapeHtml(firstName)}</h2>
     <p style="margin:0 0 16px;color:#4b5563">
-      An account has been created for you as <strong>${roleName}</strong>.
+      An account has been created for you as <strong>${escapeHtml(roleName)}</strong>.
     </p>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin:0 0 16px">
-      <p style="margin:0 0 6px"><strong>Email:</strong> ${email}</p>
-      ${username ? `<p style="margin:0 0 6px"><strong>Username:</strong> ${username} <span style="color:#6b7280">(signs in instead of the email)</span></p>` : ''}
-      <p style="margin:0"><strong>Temporary password:</strong> ${password}</p>
+      <p style="margin:0 0 6px"><strong>Email:</strong> ${escapeHtml(email)}</p>
+      ${username ? `<p style="margin:0 0 6px"><strong>Username:</strong> ${escapeHtml(username)} <span style="color:#6b7280">(signs in instead of the email)</span></p>` : ''}
+      <p style="margin:0"><strong>Temporary password:</strong> ${escapeHtml(password)}</p>
     </div>
     <p style="margin:0 0 16px;color:#4b5563">
       Please sign in and change this password. Your fingerprint can be enrolled at the front desk
       so you can clock in and out on the reader.
     </p>
-    <a href="${loginUrl}" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px">Sign in</a>
+    <a href="${escapeHtml(loginUrl)}" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px">Sign in</a>
   </div>`;
 }
 
@@ -773,3 +778,6 @@ module.exports = {
     }
   }
 };
+
+// For the unit tests: the email built in this file.
+module.exports.emailTemplates = { staffWelcomeEmail };

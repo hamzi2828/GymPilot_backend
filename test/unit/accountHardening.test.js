@@ -82,6 +82,27 @@ test('the reset and welcome emails carry a name as text, never as markup', () =>
   assert.ok(welcome.includes('p&lt;w&gt;&amp;&quot;&#39;'), 'a password with symbols reads back exactly');
 });
 
+test('the staff welcome email carries what staff typed as text too', () => {
+  const { staffWelcomeEmail } = require('../../src/controller/staffController').emailTemplates;
+  const hostile = '<a href="https://evil.test/login">Click here to keep your account</a>';
+  const html = staffWelcomeEmail({
+    firstName: hostile,
+    email: 'sam@b.test',
+    username: 'sam<i>123',
+    password: 'p<w>&"\'',
+    roleName: 'Night <u>Duty</u> Manager',
+    siteName: 'Iron <b>Works</b>',
+    loginUrl: 'https://gym.test/authentication?next=a&b=1'
+  });
+  // The gym's own sign-in link is the only one.
+  assert.equal(html.match(/<a /g).length, 1);
+  assert.ok(html.includes('href="https://gym.test/authentication?next=a&amp;b=1"'));
+  for (const raw of ['evil.test/login">', '<b>', '<i>', '<u>', '<w>']) assert.equal(html.includes(raw), false, raw);
+  assert.ok(html.includes('&lt;a href=&quot;https://evil.test/login&quot;&gt;'), 'the name is shown as it was typed');
+  assert.ok(html.includes('Night &lt;u&gt;Duty&lt;/u&gt; Manager'));
+  assert.ok(html.includes('p&lt;w&gt;&amp;&quot;&#39;'), 'a password with symbols reads back exactly');
+});
+
 // ---- "is this address really theirs?" (services/emailVerification.js) ------
 
 const verification = require('../../src/services/emailVerification');
