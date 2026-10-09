@@ -135,23 +135,89 @@ function parseDate(value, at = 'noon') {
   const text = String(value || '').trim();
   if (!text) return null;
 
-  // ISO first (a spreadsheet's "2026-09-30 00:00:00" is a date too); then
-  // dd/mm/yyyy and dd-mm-yyyy, which spreadsheets love.
-  let key = null;
-  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ]00:00(?::00(?:\.0+)?)?Z?)?$/);
-  const local = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
-  if (iso) key = dateKeyOf(Number(iso[1]), Number(iso[2]), Number(iso[3]));
-  else if (local) key = dateKeyOf(Number(local[3]), Number(local[2]), Number(local[1]));
-  else if (/^\d{4}-\d{2}-\d{2}[T ]/.test(text)) {
-    // A timestamp with a real time of day names its own instant.
-    const d = new Date(text);
+  // A timestamp that names its own zone is an instant -- except midnight
+  // UTC, which is how a plain date comes out of many exports.
+  if (ZONED_TIMESTAMP.test(text) && !/[T ]00:00(?::00(?:\.0+)?)?Z$/i.test(text)) {
+    const d = new Date(text.replace(' ', 'T'));
     return Number.isNaN(d.getTime()) ? null : d;
   }
+
+  const key = dateKeyFrom(text);
   if (!key) return null;
 
   if (at === 'start') return T.startOfLocalDay(key);
   if (at === 'end') return T.lastMomentOfLocalDay(key);
   return T.localInstant(key, 12, 0);
+}
+
+const ZONED_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+// Between the parts of a date written with the month's name: "30 Sep 2026",
+// "30-Sep-2026", "Sep 30, 2026".
+const GAP = '[\\s,./-]+';
+const DAY_THEN_MONTH = new RegExp(`^(\\d{1,2})(?:st|nd|rd|th)?${GAP}([a-z]{3,9})${GAP}(\\d{4})$`, 'i');
+const MONTH_THEN_DAY = new RegExp(`^([a-z]{3,9})${GAP}(\\d{1,2})(?:st|nd|rd|th)?${GAP}(\\d{4})$`, 'i');
+
+/** 1-12 for "Sep", "Sept" or "September" in any case; 0 for anything else. */
+function monthNumber(word) {
+  const w = String(word || '').toLowerCase();
+  return MONTH_NAMES.findIndex((name) => name === w || name.slice(0, 3) === w || (w === 'sept' && name === 'september')) + 1;
+}
+
+/**
+ * The calendar day a cell names, as 'YYYY-MM-DD', or null when it cannot be
+ * read for certain. Only what has one reading is accepted:
+ *
+ *   2026-09-30, 2026/09/30     year first, with a time of day after it or not
+ *                              (a time with no zone is the gym's own clock,
+ *                              so the day is the day written)
+ *   30/09/2026, 30-9-2026      DAY first, as the template says. 09/30/2026
+ *                              is not a date read this way and is refused,
+ *                              never quietly turned round.
+ *   30 Sep 2026, Sep 30, 2026  the month by name
+ *   46295                      a spreadsheet's serial number for the day,
+ *                              which is what a date cell exports as when its
+ *                              column is not formatted as a date
+ *
+ * A two-digit year (30/09/26) is refused: it does not say which century, and
+ * a date of birth can be in either.
+ */
+function dateKeyFrom(text) {
+  let m = text.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?)?$/i);
+  if (m) return dateKeyOf(Number(m[1]), Number(m[2]), Number(m[3]));
+
+  m = text.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+  if (m) return dateKeyOf(Number(m[3]), Number(m[2]), Number(m[1]));
+
+  m = text.match(DAY_THEN_MONTH);
+  if (m) return monthNumber(m[2]) ? dateKeyOf(Number(m[3]), monthNumber(m[2]), Number(m[1])) : null;
+  m = text.match(MONTH_THEN_DAY);
+  if (m) return monthNumber(m[1]) ? dateKeyOf(Number(m[3]), monthNumber(m[1]), Number(m[2])) : null;
+
+  // Day 1 of a spreadsheet is 1 January 1900; five digits covers 1927 to 2173.
+  m = text.match(/^(\d{5})(?:\.\d+)?$/);
+  if (m) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Number(m[1]) * 86400000);
+    return dateKeyOf(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+  }
+  return null;
+}
+
+/**
+ * What to tell staff about a date cell that could not be read: which cell,
+ * what was in it, and how to write it so that it can be. The caller ends the
+ * sentence with what happened to the row.
+ */
+function dateProblem(label, value) {
+  const text = String(value || '').trim();
+  const parts = text.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/);
+  let why = 'Write dates as 2026-09-30 or 30/09/2026 (day first)';
+  if (parts && parts[3].length === 2) {
+    why = 'Write the year in full, like 30/09/2026 or 2026-09-30';
+  } else if (parts && Number(parts[1]) <= 12 && Number(parts[2]) > 12) {
+    why = `It looks like month/day/year, and dates are read day first: write it as ${parts[2]}/${parts[1]}/${parts[3]}`;
+  }
+  return `Could not read the ${label} "${text}". ${why}`;
 }
 
 function truthy(value, fallback = true) {
@@ -308,7 +374,7 @@ module.exports = {
           const joinedCell = cell(row, 'joinedAt');
           const joinedAt = joinedCell ? parseDate(joinedCell, 'start') : null;
           if (joinedCell && !joinedAt) {
-            report.errors.push({ line, email, name, reason: `Could not read the joining date "${joinedCell}" — today is used` });
+            report.errors.push({ line, email, name, reason: `${dateProblem('joining date', joinedCell)} — today is used` });
           }
 
           const discountCell = cell(row, 'discount');
@@ -321,6 +387,31 @@ module.exports = {
           const pkg = packageName ? packageByName.get(packageName.toLowerCase()) : null;
           if (packageName && !pkg) {
             report.errors.push({ line, email, name, reason: `No package called "${packageName}" — the member is created without a membership` });
+          }
+
+          // The membership's dates, when there is one to make: access from
+          // the start of the first day to the end of the last. A date that
+          // cannot be read stops the row. Left to default, it became "today
+          // plus the package's term", paid and active -- a fresh term for a
+          // member whose real one ran out last month, and nothing to say so.
+          const startCell = pkg ? cell(row, 'startDate') : '';
+          const endCell = pkg ? cell(row, 'endDate') : '';
+          const start = parseDate(startCell, 'start');
+          const end = parseDate(endCell, 'end');
+          if ((startCell && !start) || (endCell && !end)) {
+            const problem = startCell && !start ? dateProblem('membership start date', startCell) : dateProblem('membership end date', endCell);
+            report.skipped.push({ line, email, name, reason: `${problem}, then upload the file again.` });
+            continue;
+          }
+          if (start && end && end < start) {
+            report.skipped.push({ line, email, name, reason: `The membership ends (${endCell}) before it starts (${startCell}). Correct the dates, then upload the file again.` });
+            continue;
+          }
+
+          const dobCell = cell(row, 'dateOfBirth');
+          const dob = parseDate(dobCell);
+          if (dobCell && !dob) {
+            report.errors.push({ line, email, name, reason: `${dateProblem('date of birth', dobCell)} — left blank` });
           }
 
           const limit = await checkLimit('members');
@@ -343,7 +434,6 @@ module.exports = {
             report.errors.push({ line, email, name, reason: `Member code ${memberCode} is already in use — a new one will be assigned` });
           }
 
-          const dob = parseDate(cell(row, 'dateOfBirth'));
           // A quoted cell can hold line breaks; the desk's address is one line.
           const address = oneLine(cell(row, 'address')).slice(0, 300);
           const hashed = await bcrypt.hash(randomPassword(), await bcrypt.genSalt(10));
@@ -373,9 +463,6 @@ module.exports = {
           if (!active) report.inactive += 1;
 
           if (pkg) {
-            // Access from the start of the first day to the end of the last.
-            const start = parseDate(cell(row, 'startDate'), 'start');
-            const end = parseDate(cell(row, 'endDate'), 'end');
             const amount = cell(row, 'amount');
             await createManualOrder({
               user,
@@ -418,5 +505,6 @@ module.exports = {
 module.exports.parseCsv = parseCsv;
 module.exports.mapHeaders = mapHeaders;
 module.exports.parseDate = parseDate;
+module.exports.dateProblem = dateProblem;
 module.exports.parseActive = parseActive;
 module.exports.splitFullName = splitFullName;
