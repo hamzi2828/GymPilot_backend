@@ -198,6 +198,12 @@ const gymfolioPaymentController = {
       await gymfolioPaymentService.handleWebhook(event);
       return res.json({ received: true });
     } catch (error) {
+      // Another request is recording this very payment: nothing failed, but
+      // the event is not applied either. Anything but a 2xx has Stripe send
+      // it again later (gymfolioPaymentService waitOutClaim).
+      if (error && error.code === 'ACTIVATION_IN_PROGRESS') {
+        return res.status(409).json({ received: false, inProgress: true, message: error.message });
+      }
       console.error('❌ Error handling webhook:', error);
       return res.status(500).json({ success: false, message: 'Webhook handler failed' });
     }

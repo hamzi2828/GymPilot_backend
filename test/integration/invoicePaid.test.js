@@ -176,3 +176,65 @@ test('a payment reported on a refunded order is ignored, and the log names the o
     console.warn = warn;
   }
 });
+
+/* --------------------------- invoice.payment_failed --------------------------- */
+
+function paymentFailed(invoiceId, order, created) {
+  return {
+    type: 'invoice.payment_failed',
+    created,
+    data: { object: { id: invoiceId, object: 'invoice', subscription: order.payment.stripeSubscriptionId, customer: 'cus_ivy' } }
+  };
+}
+
+const failedNotices = (order) =>
+  h.calls.notifications.filter((n) => n.name === 'paymentFailed' && n.args[0] && n.args[0].orderNumber === order.orderNumber).length;
+
+// Notices go out after the handler returns; give them a moment.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+test('a failed attempt redelivered after the payment that settled it leaves the member paid up, not past due', async () => {
+  const warnings = [];
+  const warn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    await h.inGym(gym, async () => {
+      const endSec = nowSec() + DAY;
+      const order = await subscription({ endSec });
+      const failedAt = nowSec() - 120;
+
+      // The renewal fails, then goes through on Stripe's retry.
+      await payments.handleWebhook(paymentFailed('in_retry', order, failedAt));
+      await settle();
+      assert.equal((await stored(order)).status, 'past_due');
+      assert.equal(failedNotices(order), 1);
+
+      await payments.handleWebhook(invoicePaid('in_retry', order, { amount: 5000, reason: 'subscription_cycle', start: endSec, end: endSec + 30 * DAY }));
+      assert.equal((await stored(order)).status, 'active');
+
+      // Stripe delivers the failed attempt again, after the paid one.
+      await payments.handleWebhook(paymentFailed('in_retry', order, failedAt));
+      await settle();
+      const row = await stored(order);
+      assert.equal(row.status, 'active', 'a paid member is not put past due by old news');
+      assert.equal(row.payment.lastPaymentError, '');
+      assert.equal(failedNotices(order), 1, 'and is not told their card failed a second time');
+      assert.ok(warnings.some((line) => /invoice\.payment_failed in_retry ignored: order .+ has been paid since$/.test(line)), warnings.join('\n'));
+
+      // The failure of an earlier invoice, arriving late, is old news too:
+      // a payment has been recorded since it happened.
+      await payments.handleWebhook(paymentFailed('in_older_never_paid', order, failedAt - 3600));
+      assert.equal((await stored(order)).status, 'active');
+
+      // The next renewal failing is news.
+      await payments.handleWebhook(paymentFailed('in_next_month', order, nowSec() + 30 * DAY));
+      await settle();
+      const later = await stored(order);
+      assert.equal(later.status, 'past_due');
+      assert.equal(later.payment.lastPaymentError, 'Your card could not be charged');
+      assert.equal(failedNotices(order), 2);
+    });
+  } finally {
+    console.warn = warn;
+  }
+});

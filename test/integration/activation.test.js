@@ -170,3 +170,153 @@ test('an order closed because its checkout expired is still activated when the m
     assert.equal(await confirmationsFor(doc.orderNumber), 1);
   });
 });
+
+/* ------------------------- a claim nobody finished ------------------------- */
+
+// A card order whose activation was claimed `minutesAgo` and never finished.
+function claimedOrder(minutesAgo, extra = {}) {
+  const doc = seed({ status: 'pending', ...extra });
+  doc.payment.status = 'processing';
+  delete doc.payment.paidAt;
+  delete doc.refund;
+  delete doc.cancellation;
+  doc.createdAt = new Date(Date.now() - 60 * 60000);
+  doc.updatedAt = new Date(Date.now() - minutesAgo * 60000);
+  return doc;
+}
+
+test('a claim left by a request that died is taken over after ten minutes, and the paid order activates', async () => {
+  await h.inGym(gym, async () => {
+    const doc = claimedOrder(11);
+    await PackageOrder.collection.insertOne(doc);
+
+    await payments.handleWebhook(intentSucceeded(doc));
+    const row = await PackageOrder.findById(doc._id).lean();
+    assert.equal(row.payment.status, 'paid');
+    assert.equal(row.status, 'active');
+    assert.equal(row.subscription.isActive, true);
+    assert.ok(row.invoice.number, 'an invoice was issued');
+    assert.equal(await confirmationsFor(doc.orderNumber), 1);
+
+    // Redelivered: nothing more.
+    await payments.handleWebhook(intentSucceeded(doc));
+    assert.equal(await confirmationsFor(doc.orderNumber), 1);
+  });
+});
+
+test('of two callers taking over the same stale claim, one activates', async () => {
+  await h.inGym(gym, async () => {
+    const doc = claimedOrder(30);
+    await PackageOrder.collection.insertOne(doc);
+    const [a, b] = await Promise.all([PackageOrder.findById(doc._id), PackageOrder.findById(doc._id)]);
+    const results = await Promise.all([payments.activateOnce(a, async () => ({})), payments.activateOnce(b, async () => ({}))]);
+    assert.deepEqual(results.map((r) => r.activated).sort(), [false, true]);
+    assert.equal(await confirmationsFor(doc.orderNumber), 1);
+  });
+});
+
+test('a claim somebody still holds is not taken: the event is refused so Stripe sends it again, and the webhook answers 409', async () => {
+  const controller = h.src('gymfolio/controller/gymfolioPaymentController');
+  const Settings = h.src('models/settings');
+  const doc = claimedOrder(1);
+  const event = intentSucceeded(doc);
+  h.setStripe({ webhooks: { constructEvent: () => event } });
+  const errors = [];
+  const logError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    await h.inGym(gym, async () => {
+      await PackageOrder.collection.insertOne(doc);
+      await assert.rejects(payments.handleWebhook(event), (error) => error.code === 'ACTIVATION_IN_PROGRESS' && error.status === 409);
+      const row = await PackageOrder.findById(doc._id).lean();
+      assert.equal(row.payment.status, 'processing');
+      assert.equal(row.status, 'pending');
+      assert.equal(await confirmationsFor(doc.orderNumber), 0);
+
+      // Over HTTP that is a 409, not a 500 and not an error in the log.
+      await Settings.updateOne({}, { $set: { stripe: { enabled: true, publishableKey: 'pk_test_act', secretKey: 'sk_test_act', webhookSecret: 'whsec_act' } } });
+      const res = await h.call(controller.handleWebhook, { headers: { 'stripe-signature': 'sig' }, body: Buffer.from('{}') });
+      assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+      assert.deepEqual(res.body, { received: false, inProgress: true, message: 'This payment is still being recorded. Send the event again later.' });
+      assert.equal(errors.length, 0, errors.join('\n'));
+
+      // The holder finishes while the event waits: acknowledged.
+      setTimeout(() => {
+        h.inGym(gym, () => PackageOrder.updateOne({ _id: doc._id }, { $set: { 'payment.status': 'paid', status: 'active' } })).catch(() => {});
+      }, 100);
+      const done = await h.call(controller.handleWebhook, { headers: { 'stripe-signature': 'sig' }, body: Buffer.from('{}') });
+      assert.equal(done.statusCode, 200, JSON.stringify(done.body));
+      assert.deepEqual(done.body, { received: true });
+    });
+  } finally {
+    console.error = logError;
+    h.setStripe(null);
+  }
+});
+
+test("a bank transfer waiting for its receipt to be checked is never a stale claim, however long it waits", async () => {
+  await h.inGym(gym, async () => {
+    const doc = claimedOrder(3 * 24 * 60);
+    doc.payment.method = 'bank_transfer';
+    delete doc.payment.stripePaymentIntentId;
+    delete doc.payment.stripeSessionId;
+    await PackageOrder.collection.insertOne(doc);
+    const order = await PackageOrder.findById(doc._id);
+    let prepared = false;
+    const result = await payments.activateOnce(order, async () => {
+      prepared = true;
+      return {};
+    });
+    assert.equal(result.activated, false);
+    assert.equal(prepared, false);
+    assert.equal((await PackageOrder.findById(doc._id).lean()).payment.status, 'processing');
+  });
+});
+
+test('a completed checkout with no order here is acknowledged and logged, not failed for Stripe to resend for days', async () => {
+  const warnings = [];
+  const warn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  h.setStripe({
+    checkout: { sessions: { retrieve: async (id) => ({ id, mode: 'payment', payment_status: 'paid', status: 'complete', payment_intent: 'pi_elsewhere' }) } }
+  });
+  try {
+    await h.inGym(gym, async () => {
+      const result = await payments.handleWebhook({
+        type: 'checkout.session.completed',
+        data: { object: { id: 'cs_elsewhere', object: 'checkout.session', client_reference_id: 'PKG-OTHER-1', metadata: { type: 'gymfolio_package_subscription', orderNumber: 'PKG-OTHER-1' } } }
+      });
+      assert.deepEqual(result, { received: true });
+      assert.equal(warnings.length, 1, warnings.join('\n'));
+      assert.match(warnings[0], /checkout\.session\.completed cs_elsewhere ignored: no order here for it \(order number PKG-OTHER-1\)/);
+
+      // The success page asking about the same session is told plainly, with a 404.
+      await assert.rejects(payments.verifyPackagePayment('cs_elsewhere'), (error) => {
+        assert.equal(error.name, 'MembershipError');
+        assert.deepEqual([error.status, error.code], [404, 'ORDER_NOT_FOUND']);
+        assert.match(error.message, /We could not find an order for this payment\. If you have paid, contact the gym with your receipt\./);
+        return true;
+      });
+    });
+
+    // Stripe being unreachable is still a failure, so the event is sent again.
+    h.setStripe({
+      checkout: {
+        sessions: {
+          retrieve: async () => {
+            throw new Error('Stripe is down');
+          }
+        }
+      }
+    });
+    await h.inGym(gym, async () => {
+      await assert.rejects(
+        payments.handleWebhook({ type: 'checkout.session.completed', data: { object: { id: 'cs_down', metadata: { type: 'gymfolio_package_subscription' } } } }),
+        /Stripe is down/
+      );
+    });
+  } finally {
+    console.warn = warn;
+    h.setStripe(null);
+  }
+});
