@@ -378,6 +378,23 @@ test('a restore ends every session, including ones ended since the backup that i
     // A token and a desk sign-in as the backup will remember them.
     const stolen = member.tokenVersion || 0;
     const desk = await DesktopToken.issue(member._id, { deviceLabel: 'DESK-9', ip: '127.0.0.1' });
+    // And, on the day of the backup: a reset link and a confirmation link
+    // waiting to be opened, and a password paused after ten wrong tries.
+    const soon = new Date(Date.now() + 3600000);
+    await User.collection.updateOne(
+      { _id: member._id },
+      {
+        $set: {
+          passwordResetTokenHash: 'a'.repeat(64),
+          passwordResetExpiresAt: soon,
+          emailVerified: false,
+          emailVerifyTokenHash: 'b'.repeat(64),
+          emailVerifyExpiresAt: soon,
+          signInAttempts: 10,
+          signInWindowEndsAt: soon
+        }
+      }
+    );
     const backupId = (await h.call(controller.run, as())).body.data.id;
 
     // Then the token is found to be stolen and the password reset, which
@@ -400,6 +417,15 @@ test('a restore ends every session, including ones ended since the backup that i
     assert.match(await auth.sessionProblem({ id: String(member._id), tv: since }), ENDED);
     assert.equal(await DesktopToken.findUsable(desk.token), null);
     assert.match(await auth.sessionProblem({ id: String(owner._id), tv: ownerNow.tokenVersion || 0 }), ENDED);
+
+    // Nothing waiting on the day of the backup comes back usable: not the
+    // links, not the pause. The address is still unconfirmed, as it was.
+    const row = await User.collection.findOne({ _id: member._id });
+    assert.deepEqual(
+      [row.passwordResetTokenHash, row.passwordResetExpiresAt, row.emailVerifyTokenHash, row.emailVerifyExpiresAt, row.signInAttempts, row.signInWindowEndsAt],
+      [null, null, null, null, 0, null]
+    );
+    assert.equal(row.emailVerified, false);
 
     // A sign-in after the restore is an ordinary one.
     const restored = await User.findById(member._id).lean();

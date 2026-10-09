@@ -224,7 +224,11 @@ async function highestTokenVersion(db) {
 //     (`liveHighest`) and in the backup, and above the time in seconds --
 //     far past any count of sign-outs -- which covers accounts deleted
 //     since the backup, whose later versions are nowhere left to read;
-//   * reset links and emailed sign-in codes pending in the backup go;
+//   * reset links, email-confirmation links and emailed sign-in codes
+//     pending in the backup go (an unconfirmed address stays unconfirmed,
+//     and is sent a new link when its owner asks);
+//   * a count of wrong passwords, or a pause, from the backup's day goes
+//     too (services/signInLock.js) -- it says nothing about today;
 //   * every desk sign-in is revoked;
 //   * this process forgets the gym's cached sessions (other instances
 //     re-read theirs within 30 seconds, middleware/auth.js).
@@ -234,6 +238,11 @@ async function endEverySession(db, liveHighest) {
   await users.updateMany({}, { $set: { tokenVersion: next } });
   await users.updateMany({ passwordResetTokenHash: { $ne: null } }, { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } });
   await users.updateMany({ 'twoFactor.pending.challengeId': { $ne: null } }, { $set: { 'twoFactor.pending': null } });
+  await users.updateMany({ emailVerifyTokenHash: { $ne: null } }, { $set: { emailVerifyTokenHash: null, emailVerifyExpiresAt: null } });
+  await users.updateMany(
+    { $or: [{ signInAttempts: { $gt: 0 } }, { signInWindowEndsAt: { $ne: null } }] },
+    { $set: { signInAttempts: 0, signInWindowEndsAt: null } }
+  );
   await db.collection('gym_desktop_tokens').updateMany({ revokedAt: null }, { $set: { revokedAt: new Date() } });
   require('../middleware/auth').forgetGymSessions();
 }
