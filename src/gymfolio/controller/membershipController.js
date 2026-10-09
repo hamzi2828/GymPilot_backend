@@ -151,7 +151,7 @@ module.exports = {
       const order = await PackageOrder.findById(req.params.id);
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       // The order as it was activated: of two approvals sent together only
-      // one gets this far, and the other is told it is already paid.
+      // one gets this far; the other is told it is being confirmed, or paid.
       const approved = await service.approveTransfer(order, { by: userId(req) });
       tell('membershipConfirmed', approved);
       return res.json({ success: true, message: `Payment confirmed. ${approved.packageDetails.name} is now active.`, data: approved });

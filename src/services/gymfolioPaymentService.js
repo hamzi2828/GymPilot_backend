@@ -608,12 +608,12 @@ class GymfolioPaymentService {
         if (!subId) break;
         const order = await orderForSubscription(subId, object);
         if (!order || order.payment.status !== 'paid') break;
-        const failed = await PackageOrder.findOneAndUpdate(pastDueFilter(order._id, object.id, event.created), {
-          $set: {
-            status: 'past_due',
-            'payment.lastPaymentError': (object.last_finalization_error && object.last_finalization_error.message) || 'Your card could not be charged'
-          }
-        }, { new: true });
+        const lastPaymentError = (object.last_finalization_error && object.last_finalization_error.message) || 'Your card could not be charged';
+        const failed = await PackageOrder.findOneAndUpdate(
+          pastDueFilter(order._id, object.id, event.created),
+          { $set: { status: 'past_due', 'payment.lastPaymentError': lastPaymentError } },
+          { new: true }
+        );
         if (failed) afterResponse(notify.paymentFailed(failed, await memberFor(failed)), 'paymentFailed');
         else console.warn(`[payments] invoice.payment_failed ${object.id} ignored: order ${order._id} (${order.orderNumber}) has been paid since`);
         break;

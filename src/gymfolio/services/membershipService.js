@@ -413,7 +413,7 @@ function money(value, field) {
 //
 // A desk request sent again because its answer never arrived -- a timeout, a
 // dropped connection -- must not sell a second term or record a second
-// instalment. The desk may send `requestId` with a sale, a renewal or a part
+// installment. The desk may send `requestId` with a sale, a renewal or a part
 // payment: any id it makes up for that one action (a UUID will do), sent
 // again unchanged when it retries. A request whose id is already recorded
 // is answered with the first result and changes nothing. Left out, every
