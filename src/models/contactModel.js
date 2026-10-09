@@ -45,9 +45,12 @@ const contactSchema = new mongoose.Schema({
     enum: ['low', 'medium', 'high', 'urgent'],
     default: 'medium'
   },
+  // What the enquiry is about. The first five are what a gym's contact form
+  // offers; the rest are from the shop this form was first written for, and
+  // stay valid so the enquiries filed under them still load and save.
   category: {
     type: String,
-    enum: ['general', 'support', 'returns', 'wholesale', 'technical', 'feedback'],
+    enum: ['general', 'membership', 'classes', 'personal-training', 'billing', 'other', 'support', 'returns', 'wholesale', 'technical', 'feedback'],
     default: 'general'
   },
   source: {
