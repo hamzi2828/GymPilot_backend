@@ -278,6 +278,18 @@ async function cancelSubscriptionNow(subscriptionId, stripe = null) {
 }
 
 /**
+ * Stops (or starts again) Stripe collecting on a subscription, for a gym the
+ * panel suspends and reactivates. Paused, the subscription stays as it is --
+ * same price, same dates -- and each invoice that falls due is voided rather
+ * than charged, so a gym that is switched off is not paying for it. Nothing
+ * is owed for the time it was paused. Throws when Stripe refuses.
+ */
+async function setCollectionPaused(subscriptionId, paused, stripe = null) {
+  const client = stripe || (await getPlatformStripe());
+  await client.subscriptions.update(subscriptionId, { pause_collection: paused ? { behavior: 'void' } : '' });
+}
+
+/**
  * The subscription a gym moving to `plan` on `billingCycle` would have: the
  * add-ons it pays for kept, the new plan's included ones added, all at the
  * list price -- a price agreed for the old plan does not carry over. Both
@@ -328,6 +340,7 @@ module.exports = {
   closeSignupCheckoutSession: closeCheckoutSession,
   stripeSubscriptionEnded,
   cancelSubscriptionNow,
+  setCollectionPaused,
   subscriptionForPlanChange,
   createPortalSession,
   priceLinesFor,

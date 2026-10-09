@@ -24,6 +24,8 @@ const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { invalidatePlanCache } = require('../planLimits');
 const { sendOwnerInvite } = require('../ownerInvite');
 const { syncStripeSubscription, changesPrice, SubscriptionSyncError } = require('../services/subscriptionSync');
+// Called through the module, not destructured, so a test can stand in for it.
+const platformBilling = require('../services/platformBilling');
 
 const User = require('../../models/user');
 const { ADMIN_SLUG } = require('../../services/roleService');
@@ -381,6 +383,14 @@ module.exports = {
   },
 
   // PATCH /api/platform/gyms/:id/status   { status: 'active' | 'suspended' }
+  //
+  // A gym that pays by card is not charged while it is suspended: Stripe
+  // stops collecting on its subscription (platformBilling
+  // .setCollectionPaused) and starts again when it is reactivated. The
+  // switch itself never waits on Stripe -- a gym may need taking offline now
+  // -- so when Stripe refuses, the status still changes and `warnings` says
+  // what is left to do by hand. `billing` is `{ subscriptionId, paused }`
+  // when Stripe took it, else null.
   setStatus: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
@@ -391,12 +401,30 @@ module.exports = {
         return res.status(400).json({ success: false, message: `Status must be one of: ${Gym.GYM_STATUSES.join(', ')}` });
       }
 
+      const changed = gym.status !== status;
       gym.status = status;
       await gym.save();
       invalidateTenantCache();
-      audit(req, status === 'suspended' ? 'gym_suspended' : 'gym_activated', gym);
 
-      return res.json({ success: true, data: publicGym(gym) });
+      const subscriptionId = (gym.subscription && gym.subscription.stripeSubscriptionId) || '';
+      const suspended = status === 'suspended';
+      const warnings = [];
+      let billing = null;
+      if (changed && subscriptionId) {
+        try {
+          await platformBilling.setCollectionPaused(subscriptionId, suspended);
+          billing = { subscriptionId, paused: suspended };
+        } catch (error) {
+          warnings.push(
+            suspended
+              ? `The gym is suspended, but Stripe would not pause its card subscription (${error.message}), so its owner is still being charged. Pause or cancel ${subscriptionId} in the Stripe dashboard.`
+              : `The gym is back on, but Stripe would not start charging its card subscription again (${error.message}). Resume ${subscriptionId} in the Stripe dashboard.`
+          );
+        }
+      }
+      audit(req, suspended ? 'gym_suspended' : 'gym_activated', gym, subscriptionId ? { billing, warnings } : null);
+
+      return res.json({ success: true, data: publicGym(gym), billing, warnings });
     } catch (error) {
       return fail(res, error);
     }
