@@ -39,10 +39,12 @@ function forgetGymSessions() {
 
 /**
  * Why this decoded token may no longer be used, or null when it may.
- * Tokens issued before `tv` existed count as version 0.
+ * Tokens issued before `tv` existed count as version 0. A token that names
+ * no account is nobody's session: there is nothing to check it against, so
+ * it is refused rather than waved through.
  */
 async function sessionProblem(decoded) {
-  if (!decoded || !decoded.id) return null;
+  if (!decoded || !decoded.id) return 'Invalid or expired token';
   const state = await sessionState(decoded.id);
   if (!state.exists) return 'Account no longer exists';
   if (!state.isActive) return 'This account has been deactivated.';
@@ -53,11 +55,18 @@ async function sessionProblem(decoded) {
 // A gym token carries the id of the gym that issued it (`tid`). It is checked
 // against the gym the request resolved to, so a token from one gym's site
 // presented on another's is refused even though both verify with the same
-// secret. Tokens minted before this claim existed carry no `tid` and are
-// accepted as before; they age out with their 7-day expiry.
+// secret. Every sign-in has written the claim for longer than any token
+// lives, so one without it is no longer "from before": it belongs to no gym
+// and is refused wherever there is a gym to belong to.
 function tenantMismatch(decoded, req) {
-  if (!decoded || !decoded.tid || !req.tenant) return false;
+  if (!decoded || !req.tenant) return false;
+  if (!decoded.tid) return true;
   return String(decoded.tid) !== String(req.tenant._id);
+}
+
+// What every gym session's token carries: the account and the gym.
+function hasSessionClaims(decoded) {
+  return !!(decoded && decoded.id && decoded.tid);
 }
 
 // Tokens the member app is issued carry `app: 'member'` (see
@@ -138,6 +147,11 @@ module.exports = async function auth(req, res, next) {
     // A platform (super admin) session is a different kind of thing and
     // must never pass as a gym account.
     if (decoded.scope === 'platform') {
+      return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
+    }
+    // Signed with the right secret but naming no account or no gym: not a
+    // session any sign-in here issues.
+    if (!hasSessionClaims(decoded)) {
       return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
     }
     if (tenantMismatch(decoded, req)) {

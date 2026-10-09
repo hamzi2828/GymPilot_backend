@@ -84,7 +84,8 @@ test('wrong details get the same answer whichever way they were typed', async ()
   const noSuchEmail = await login({ email: 'nobody@username.test', password: PASSWORD });
   for (const res of [wrongPassword, noSuchUser, noSuchEmail]) {
     assert.equal(res.statusCode, 401);
-    assert.equal(res.body.message, 'Invalid credentials');
+    assert.deepEqual(res.body, wrongPassword.body, 'one answer, whatever was wrong');
+    assert.match(res.body.message, /do not match/);
   }
   const empty = await login({ email: '', password: PASSWORD });
   assert.equal(empty.statusCode, 400);

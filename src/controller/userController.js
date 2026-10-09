@@ -17,7 +17,17 @@ const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
-const { passwordMatches } = require('../services/passwordCheck');
+const { currentPasswordRefusal } = require('../services/passwordCheck');
+const { escapeHtml } = require('../templates/gymEmails');
+const verification = require('../services/emailVerification');
+const signInLock = require('../services/signInLock');
+const oauthState = require('../services/oauthState');
+
+// One answer for a name nobody has, a wrong password, an account that has
+// no password because it only ever used Google, and one whose password is
+// paused after too many wrong ones (services/signInLock.js). Any other
+// wording for one of them tells whoever is asking that the account exists.
+const SIGN_IN_REJECTED = `That email or username and password do not match. ${signInLock.PAUSE_NOTE}`;
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -143,21 +153,25 @@ async function subscriptionsBlockDeletion(userId, { self, by = null }) {
     return live ? refusal('') : null;
 }
 
+// Everything put into these two emails is escaped (templates/gymEmails.js
+// escapeHtml). The first name is whatever was typed at sign-up, and sign-up
+// takes any address: markup in it would otherwise reach that address's real
+// owner inside a genuine email from the gym, link and all.
 function welcomeEmailHtml({ firstName, email, username, password, siteName, loginUrl }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
-    <h2 style="margin:0 0 16px;font-size:20px">Welcome to ${siteName}, ${firstName}</h2>
+    <h2 style="margin:0 0 16px;font-size:20px">Welcome to ${escapeHtml(siteName)}, ${escapeHtml(firstName)}</h2>
     <p style="margin:0 0 16px;line-height:1.6">An account has been created for you. Use these details to sign in:</p>
     <table style="width:100%;border-collapse:collapse;background:#fafafa;border:1px solid #e4e4e7;border-radius:8px;margin-bottom:16px">
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Email</td>
-          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${email}</td></tr>
+          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${escapeHtml(email)}</td></tr>
       ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username</td>
-          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${username}</td></tr>` : ''}
+          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(username)}</td></tr>` : ''}
       <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
-          <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${password}</td></tr>
+          <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(password)}</td></tr>
     </table>
     <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' You can sign in with your email or your username, here and on the GymPilot phone app.' : ''}</p>
-    <a href="${loginUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
+    <a href="${escapeHtml(loginUrl)}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
   </div>`;
 }
@@ -165,12 +179,12 @@ function welcomeEmailHtml({ firstName, email, username, password, siteName, logi
 function passwordResetEmailHtml({ firstName, siteName, resetUrl, validMinutes }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
-    <h2 style="margin:0 0 16px;font-size:20px">Reset your ${siteName} password</h2>
-    <p style="margin:0 0 16px;line-height:1.6">Hi ${firstName}, we received a request to reset the password on your account. Click the button below to choose a new one.</p>
-    <a href="${resetUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Choose a new password</a>
-    <p style="margin:20px 0 0;line-height:1.6;font-size:13px;color:#71717a">This link is valid for ${validMinutes} minutes and can only be used once.</p>
+    <h2 style="margin:0 0 16px;font-size:20px">Reset your ${escapeHtml(siteName)} password</h2>
+    <p style="margin:0 0 16px;line-height:1.6">Hi ${escapeHtml(firstName)}, we received a request to reset the password on your account. Click the button below to choose a new one.</p>
+    <a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Choose a new password</a>
+    <p style="margin:20px 0 0;line-height:1.6;font-size:13px;color:#71717a">This link is valid for ${escapeHtml(validMinutes)} minutes and can only be used once.</p>
     <p style="margin:16px 0 0;line-height:1.6;font-size:13px;color:#71717a">If the button does not work, paste this into your browser:<br>
-      <span style="word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${resetUrl}</span></p>
+      <span style="word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${escapeHtml(resetUrl)}</span></p>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you did not ask for this, you can ignore this email — your password will not change.</p>
   </div>`;
 }
@@ -197,11 +211,17 @@ const { passwordProblem, initialPassword, setPasswordHandler } = require('../ser
 // the response has gone (see forgotPassword), so it reports trouble in the
 // log, never to the caller.
 async function sendResetLink(user, email) {
-  // Raw token goes in the email; only its hash is stored.
+  // Raw token goes in the email; only its hash is stored -- and only while
+  // the account still has the address the link is going to. A reset through
+  // it later counts as proof of that address (resetPassword), so a link must
+  // never outlive a change of address made while it was being sent.
   const token = crypto.randomBytes(32).toString('hex');
-  user.passwordResetTokenHash = hashResetToken(token);
-  user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
-  await user.save();
+  const tokenHash = hashResetToken(token);
+  const stored = await User.updateOne(
+    { _id: user._id, email },
+    { $set: { passwordResetTokenHash: tokenHash, passwordResetExpiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000) } }
+  );
+  if (!stored.matchedCount) return;
 
   const siteName = await gymSiteName();
   const frontend = tenantOrigin();
@@ -225,9 +245,10 @@ async function sendResetLink(user, email) {
     // nobody received from sitting valid for an hour, and the
     // logged error is how an admin finds out SMTP is misconfigured.
     console.error('[auth] reset email failed for', email, '-', result.error);
-    user.passwordResetTokenHash = null;
-    user.passwordResetExpiresAt = null;
-    await user.save();
+    await User.updateOne(
+      { _id: user._id, passwordResetTokenHash: tokenHash },
+      { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } }
+    );
   }
 }
 
@@ -258,6 +279,12 @@ async function linkGoogleAccount(user, { googleId, picture }) {
   if (picture && user.avatarUrl !== picture) updates.avatarUrl = picture;
   const takeover = user.provider !== 'google' && !!user.password;
   if (takeover) updates.password = null;
+  // Google has checked the address, which is more than sign-up did.
+  if (user.emailVerified === false) {
+    updates.emailVerified = true;
+    updates.emailVerifyTokenHash = null;
+    updates.emailVerifyExpiresAt = null;
+  }
   if (!Object.keys(updates).length) return user;
 
   await User.updateOne(
@@ -563,8 +590,21 @@ const userController = {
                 return res.status(400).json({ message: 'Passwords do not match' });
             }
 
+            // The same rule a reset or a change of password is held to
+            // (services/adminPasswords.js): a length, nothing else.
+            const problem = passwordProblem(password);
+            if (problem) {
+                return res.status(400).json({ message: problem });
+            }
+
+            // One address: the confirmation link below is sent to it.
+            const normalisedEmail = String(email).toLowerCase().trim();
+            if (!verification.looksLikeEmail(normalisedEmail)) {
+                return res.status(400).json({ message: 'Please provide a valid email address' });
+            }
+
             // Check if user already exists
-            const existing = await User.findOne({ email: email.toLowerCase().trim() });
+            const existing = await User.findOne({ email: normalisedEmail });
             if (existing) {
                 return res.status(409).json({ message: 'Email already in use' });
             }
@@ -583,8 +623,12 @@ const userController = {
             const user = await User.create({
                 firstName: firstName.trim(),
                 lastName: lastName.trim(),
-                email: email.toLowerCase().trim(),
+                email: normalisedEmail,
                 password: hashed,
+                // Anybody can type any address here. Until its owner opens
+                // the link sent below, it claims nothing that was bought
+                // under it (services/emailVerification.js).
+                emailVerified: false,
             });
 
             await assignMemberCode(user);
@@ -592,6 +636,7 @@ const userController = {
             // The welcome email carries their username for the phone app,
             // which they are told nowhere else. Not waited for.
             afterResponse(() => notify.memberWelcome(user), 'welcome email');
+            afterResponse(() => verification.sendLink(user, { origin: verification.apiOrigin(req) }), 'confirmation email');
 
             // Sanitize output
             return res.status(201).json({ message: 'User created successfully', data: publicUserView(user) });
@@ -618,9 +663,12 @@ const userController = {
             const platformType = req.query.platformType || '';
             // The gym rides along in `state`: Google sends the callback to the
             // API's own address, which says nothing about which site started
-            // the sign-in. See platform/middleware/tenantFromPayload.js.
-            const stateData = JSON.stringify({ returnUrl, platformType, tenant: currentTenantSlug() });
-            const state = encodeURIComponent(stateData);
+            // the sign-in. See platform/middleware/tenantFromPayload.js. It is
+            // signed, and tied to this browser by a cookie, so the sign-in can
+            // only be finished where it was started (services/oauthState.js).
+            const issued = oauthState.issue({ returnUrl, platformType, tenant: currentTenantSlug() });
+            res.cookie(oauthState.COOKIE_NAME, issued.nonce, oauthState.cookieOptions(req));
+            const state = encodeURIComponent(issued.state);
             const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}&access_type=offline&include_granted_scopes=true&prompt=consent&state=${state}`;
 
             return res.redirect(authUrl);
@@ -648,15 +696,16 @@ const userController = {
                 return res.status(500).send('Server misconfiguration: missing Google OAuth envs');
             }
 
-            // Parse state to get returnUrl and platformType
-            let returnUrl = '/';
-            try {
-                const stateData = JSON.parse(decodeURIComponent(state || '{}'));
-                returnUrl = stateData.returnUrl || '/';
-            } catch (parseError) {
-                // Fallback to treating state as just the returnUrl for backward compatibility
-                returnUrl = decodeURIComponent(state || '/');
+            // The state must be the one this server wrote, for this gym, and
+            // come back in the browser that was given its cookie -- or this
+            // is somebody else's sign-in being finished here
+            // (services/oauthState.js). Checked before the code is spent.
+            const stateData = oauthState.verify(state, oauthState.readCookie(req), currentTenantSlug());
+            res.clearCookie(oauthState.COOKIE_NAME, { path: oauthState.cookieOptions(req).path });
+            if (!stateData) {
+                return res.status(400).type('text/plain').send('This sign-in did not start in this browser, or took too long. Please go back to the sign-in page and try again.');
             }
+            const returnUrl = stateData.returnUrl || '/';
 
             const frontendOrigin = tenantOrigin();
 
@@ -706,6 +755,8 @@ const userController = {
                     provider: 'google',
                     googleId: googleId || null,
                     avatarUrl: picture || null,
+                    // Google has checked the address.
+                    emailVerified: true,
                 });
                 // A new member, as from the sign-up form -- with no password
                 // yet, which the phone app needs.
@@ -787,21 +838,16 @@ const userController = {
             }
 
             const user = await User.findOne(filter);
-            if (!user) {
-                // The bcrypt work a real account costs, so a name nobody
-                // has is not answered faster (services/passwordCheck.js).
-                await passwordMatches(password, null);
-                return res.status(401).json({ message: 'Invalid credentials' });
-            }
 
-            // Prevent password login for accounts created via Google
-            if (!user.password) {
-                return res.status(401).json({ message: 'This account uses Google login. Please sign in with Google.' });
-            }
-
-            const match = await bcrypt.compare(password, user.password);
-            if (!match) {
-                return res.status(401).json({ message: 'Invalid credentials' });
+            // One of the account's ten tries is used, then the password is
+            // compared: a name nobody has costs the same bcrypt work and
+            // gets the same answer as a wrong password or a paused account
+            // (services/signInLock.js, services/passwordCheck.js). So does
+            // an account with no password -- one made with Google. Saying
+            // "this account uses Google" before any password was checked
+            // told anybody who asked which addresses are members.
+            if (!(await signInLock.signInPasswordMatches(user, password))) {
+                return res.status(401).json({ message: SIGN_IN_REJECTED });
             }
 
             // Checked here as well as in requirePermission. That gate only
@@ -950,6 +996,9 @@ const userController = {
 
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(password, salt);
+            // Wrong tries at the old password no longer count (signInLock).
+            user.signInAttempts = 0;
+            user.signInWindowEndsAt = null;
             // Every other session ends with the old password.
             user.tokenVersion = (user.tokenVersion || 0) + 1;
             forgetSession(user._id);
@@ -960,6 +1009,10 @@ const userController = {
             user.passwordResetExpiresAt = null;
             user.passwordChangedAt = new Date();
             await user.save();
+
+            // The link only ever went to the account's address (sendResetLink),
+            // so whoever used it reads that mailbox: the address is theirs.
+            await verification.markVerified(user._id, user.email);
 
             return res.status(200).json({
                 message: 'Password updated. You can now sign in with your new password.'
@@ -998,9 +1051,11 @@ const userController = {
                 return res.status(400).json({ message: 'Current password is required' });
             }
 
-            const matches = await bcrypt.compare(currentPassword, user.password);
+            // Counted like a sign-in, so a stolen session cannot guess here
+            // without limit (services/signInLock.js).
+            const matches = await signInLock.signInPasswordMatches(user, currentPassword);
             if (!matches) {
-                return res.status(401).json({ message: 'Current password is incorrect' });
+                return res.status(401).json({ message: `Current password is incorrect. ${signInLock.PAUSE_NOTE}` });
             }
 
             const salt = await bcrypt.genSalt(10);
@@ -1073,6 +1128,8 @@ const userController = {
                     provider: 'google',
                     googleId: googleId || null,
                     avatarUrl: picture || null,
+                    // Google has checked the address.
+                    emailVerified: true,
                 });
                 await assignMemberCode(user);
                 afterResponse(() => notify.memberWelcome(user, { viaGoogle: true }), 'welcome email');
@@ -1115,7 +1172,17 @@ const userController = {
         }
     },
 
-    // PUT /user - Update an existing user
+    // PUT /update/user - a member edits their own profile
+    //
+    // { firstName?, lastName?, email?, phone?, dateOfBirth?, gender?,
+    //   avatarUrl?, goals?, currentPassword? }
+    //
+    // `currentPassword` is needed when, and only when, the request changes
+    // or removes the email address: that address is where a password reset
+    // goes, so whoever can change it owns the account. Without it the
+    // answer is a 400 with `code` PASSWORD_REQUIRED, PASSWORD_INCORRECT or
+    // PASSWORD_NOT_SET (services/passwordCheck.js) and nothing is saved.
+    // The old address is told, and the new one is sent a link to confirm it.
     updateUser: async (req, res) => {
         try {
             const token = req.headers.authorization;
@@ -1137,26 +1204,63 @@ const userController = {
             }
             if (typeof safeUpdates.email === 'string') safeUpdates.email = safeUpdates.email.toLowerCase().trim();
 
+            // What the request does to the address: nothing (not sent, or
+            // the one already on the account), removes it, or changes it.
+            //
             // An empty box is "remove my email". The model reads '' as no
             // email at all, so a $set of it quietly kept the old address while
             // answering "updated"; it is an $unset, for an account that may
             // go without one (emailRemovalProblem).
             let removedEmail = false;
-            if (safeUpdates.email === '' || safeUpdates.email === null) {
-                delete safeUpdates.email;
+            let changedEmail = false;
+            let previousEmail = null;
+            if (safeUpdates.email !== undefined) {
                 const me = await User.findById(currentUser.id).select('email role employment.isStaff twoFactor.enabled provider googleId password').lean();
-                if (me && me.email) {
-                    const problem = emailRemovalProblem(me);
-                    if (problem) return res.status(409).json({ message: problem });
-                    removedEmail = true;
+                if (!me) return res.status(404).json({ message: 'User not found' });
+
+                if (safeUpdates.email === '' || safeUpdates.email === null) {
+                    delete safeUpdates.email;
+                    if (me.email) {
+                        const problem = emailRemovalProblem(me);
+                        if (problem) return res.status(409).json({ message: problem });
+                        removedEmail = true;
+                    }
+                } else if (safeUpdates.email !== me.email) {
+                    if (!verification.looksLikeEmail(safeUpdates.email)) {
+                        return res.status(400).json({ message: 'Please provide a valid email address' });
+                    }
+                    changedEmail = true;
+                }
+
+                if (changedEmail || removedEmail) {
+                    const refusal = await currentPasswordRefusal(me, userData.currentPassword, {
+                        toDo: removedEmail ? 'remove your email address' : 'change your email address'
+                    });
+                    if (refusal) return res.status(400).json(refusal);
+                    previousEmail = me.email || null;
                 }
             }
             if (!Object.keys(safeUpdates).length && !removedEmail) {
                 return res.status(400).json({ message: 'Nothing to update' });
             }
             const update = {};
-            if (Object.keys(safeUpdates).length) update.$set = safeUpdates;
+            if (Object.keys(safeUpdates).length) update.$set = { ...safeUpdates };
             if (removedEmail) update.$unset = { email: 1 };
+            if (changedEmail || removedEmail) {
+                // A new address is nobody's until its owner says so: it is
+                // sent a link, and claims no guest order before that
+                // (services/emailVerification.js). Links already out -- a
+                // reset, a confirmation -- went to the old address, and stop
+                // working with it.
+                update.$set = {
+                    ...update.$set,
+                    ...(changedEmail ? { emailVerified: false } : {}),
+                    emailVerifyTokenHash: null,
+                    emailVerifyExpiresAt: null,
+                    passwordResetTokenHash: null,
+                    passwordResetExpiresAt: null
+                };
+            }
             
             const updatedUser = await User.findByIdAndUpdate(
                 currentUser.id,
@@ -1168,14 +1272,28 @@ const userController = {
                 return res.status(404).json({ message: 'User not found' });
             }
 
+            if (changedEmail) {
+                afterResponse(() => verification.sendLink(updatedUser, { origin: verification.apiOrigin(req) }), 'confirmation email');
+            }
+            // The address it was is told: if this was not its owner, that
+            // message is how they find out.
+            if (previousEmail) {
+                afterResponse(() => verification.sendChangeNotice(previousEmail, updatedUser, { removed: removedEmail }), 'email change notice');
+            }
+
             // Remove sensitive data from response
-            res.status(200).json({
-                message: removedEmail
-                    ? `Your email address was removed. Sign in with your username${updatedUser.username ? `, ${updatedUser.username},` : ''} from now on.`
-                    : 'User updated successfully',
-                data: publicUserView(updatedUser)
-            });
+            let message = 'User updated successfully';
+            if (removedEmail) {
+                message = `Your email address was removed. Sign in with your username${updatedUser.username ? `, ${updatedUser.username},` : ''} from now on.`;
+            } else if (changedEmail) {
+                message = `Saved. We are sending a link to ${updatedUser.email}: open it to confirm the address is yours.`;
+            }
+            res.status(200).json({ message, data: publicUserView(updatedUser) });
         } catch (error) {
+            // Somebody else's address: said as the sign-up form says it.
+            if (error && error.code === 11000) {
+                return res.status(409).json({ message: duplicateMessage(error) });
+            }
             console.error('Update user error:', error);
             res.status(400).json({ 
                 message: 'Error updating user', 
@@ -1194,7 +1312,10 @@ const userController = {
                 return res.status(401).json({ message: 'Invalid or expired token' });
             }
 
-            const user = await User.findById(currentUser.id).select('role isActive').lean();
+            // The photo and the uploaded documents ride along for
+            // releaseAccount, which removes the stored files with the
+            // account; `documents` is select: false, so it is asked for.
+            const user = await User.findById(currentUser.id).select('role isActive avatarUrl +documents').lean();
             if (!user) {
                 return res.status(404).json({ message: 'User not found' });
             }
@@ -1521,7 +1642,9 @@ const userController = {
             const billing = await subscriptionsBlockDeletion(id, { self: false, by: currentUser.id });
             if (billing) return res.status(409).json(billing);
 
-            const deleted = await User.findByIdAndDelete(id);
+            // With the uploaded documents (select: false), so releaseAccount
+            // can remove the stored files along with the account.
+            const deleted = await User.findByIdAndDelete(id).select('+documents');
             if (!deleted) {
                 return res.status(404).json({ message: 'User not found' });
             }
@@ -1734,3 +1857,5 @@ module.exports = userController;
 module.exports.createMemberAccount = createMemberAccount;
 // ...and take it back out again when the larger thing fails.
 module.exports.releaseAccount = releaseAccount;
+// For the unit tests: the two emails built in this file.
+module.exports.emailTemplates = { welcomeEmailHtml, passwordResetEmailHtml };

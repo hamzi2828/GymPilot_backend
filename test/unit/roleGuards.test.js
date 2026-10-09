@@ -110,3 +110,57 @@ test('nobody creates an account above their own, or gives a front-desk grant the
   // An administrator creates and grants anything.
   assert.equal(guards.createRoleProblem({ actorRole: 'admin', actorPermissions: allowAll(), role: 'manager', rolePermissions: MANAGER, grants: { allowAttendanceApp: true } }), null);
 });
+
+test('reaching into another account holds the same line: admins by admins, nothing above your own', () => {
+  const reach = (args) => guards.reachProblem({ doing: 'sign out', ...args });
+  assert.match(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: otherAdmin, targetPermissions: allowAll() }), /Only an administrator can sign out an administrator/);
+  assert.match(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: manager, targetPermissions: MANAGER }), /more access than yours \(.+\), so ask an administrator to sign out this account/);
+  assert.equal(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: member, targetPermissions: NONE }), null);
+  assert.equal(reach({ actorRole: 'manager', actorPermissions: MANAGER, target: { _id: 'r1', role: 'receptionist' }, targetPermissions: RECEPTION }), null);
+  assert.equal(reach({ actorRole: 'admin', target: otherAdmin, targetPermissions: allowAll() }), null);
+  // A front-desk grant the actor lacks is reach too.
+  assert.match(
+    reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, actorGrants: {}, target: { _id: 'u9', role: 'user', allowAttendanceApp: true }, targetPermissions: NONE }),
+    /front-desk app/
+  );
+  assert.equal(
+    reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, actorGrants: { allowAttendanceApp: true }, target: { _id: 'u9', role: 'user', allowAttendanceApp: true }, targetPermissions: NONE }),
+    null
+  );
+  assert.equal(reach({ actorRole: 'receptionist', actorPermissions: RECEPTION, target: null }), null);
+});
+
+test('roles: manage shapes the roles beneath you, and never widens your own', () => {
+  const ROLES_MANAGER = fullPermissionMap({ users: 'manage', roles: 'manage', attendance: 'view' });
+  const edit = (args) => guards.roleEditProblem({ actorRole: 'office', actorPermissions: ROLES_MANAGER, ...args });
+
+  // The role you hold is not yours to change, whatever the change.
+  assert.match(edit({ role: { slug: 'office', permissions: ROLES_MANAGER }, nextPermissions: ROLES_MANAGER }), /role you hold yourself/);
+  assert.match(edit({ role: { slug: 'Office', permissions: ROLES_MANAGER }, nextPermissions: allowAll() }), /role you hold yourself/);
+
+  // Nothing you do not hold, at a level you do not hold it, in a new role or an old one.
+  assert.match(edit({ nextPermissions: fullPermissionMap({ settings: 'view' }) }), /more access than your own \(Settings\)/);
+  assert.match(edit({ nextPermissions: fullPermissionMap({ attendance: 'manage' }) }), /more access than your own \(Attendance\)/);
+  assert.match(
+    edit({ role: { slug: 'helper', permissions: NONE }, nextPermissions: fullPermissionMap({ users: 'manage', accounts: 'view' }) }),
+    /more access than your own \(Accounts\)/
+  );
+  assert.equal(edit({ nextPermissions: fullPermissionMap({ users: 'manage', attendance: 'view' }) }), null);
+  assert.equal(edit({ role: { slug: 'helper', permissions: NONE }, nextPermissions: fullPermissionMap({ users: 'view' }) }), null);
+
+  // A role that already reaches further is an administrator's to change, even to narrow it.
+  assert.match(edit({ role: { slug: 'manager', permissions: MANAGER }, nextPermissions: NONE }), /This role has more access than yours/);
+  assert.match(edit({ role: { slug: 'admin', permissions: allowAll() }, nextPermissions: allowAll() }), /Only an administrator can change the Administrator role/);
+
+  // Permissions arrive as a Map from a role document.
+  assert.match(edit({ role: { slug: 'manager', permissions: new Map(Object.entries(MANAGER)) }, nextPermissions: NONE }), /more access than yours/);
+
+  // An administrator may do any of it.
+  for (const args of [
+    { role: { slug: 'admin', permissions: allowAll() }, nextPermissions: allowAll() },
+    { role: { slug: 'manager', permissions: MANAGER }, nextPermissions: allowAll() },
+    { nextPermissions: allowAll() }
+  ]) {
+    assert.equal(guards.roleEditProblem({ actorRole: 'admin', actorPermissions: allowAll(), ...args }), null);
+  }
+});

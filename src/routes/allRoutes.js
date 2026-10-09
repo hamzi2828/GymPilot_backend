@@ -21,6 +21,8 @@ const {
   twoFactorLimiter,
   passwordResetLimiter,
   passwordResetConfirmLimiter,
+  emailVerifyLimiter,
+  emailVerifySendLimiter,
   signupLimiter,
   googleLoginLimiter,
   contactLimiter,
@@ -53,10 +55,17 @@ router.put('/user/change-password', auth, userController.changePassword);
 const securityController = require('../controller/securityController');
 // Second sign-in step: the emailed code, exchanged for the token.
 router.post('/user/login/2fa', twoFactorLimiter, securityController.verifyTwoFactor);
+// "Confirm your email": the emailed link opens a page (GET) whose button
+// posts the token back; a signed-in account can ask for a fresh link. See
+// services/emailVerification.js.
+router.get('/user/verify-email', emailVerifyLimiter, securityController.verifyEmailPage);
+router.post('/user/verify-email', emailVerifyLimiter, securityController.verifyEmail);
+router.post('/user/verify-email/send', auth, emailVerifySendLimiter, securityController.sendVerifyEmail);
 router.put('/user/two-factor', auth, securityController.setMyTwoFactor);
 router.post('/user/logout-all', auth, securityController.logoutAll);
 router.put('/user/consents', auth, securityController.setMyConsent);
 router.get('/user/export', auth, securityController.exportMyData);
+router.post('/admin/users/:id/verify-email', auth, requirePermission('users', 'manage'), securityController.vouchEmail);
 router.put('/admin/users/:id/consent', auth, requirePermission('users', 'manage'), securityController.recordConsent);
 router.post('/admin/users/:id/logout-all', auth, requirePermission('users', 'manage'), securityController.forceLogout);
 router.get('/admin/audit-log', auth, requirePermission('audit'), securityController.auditLog);

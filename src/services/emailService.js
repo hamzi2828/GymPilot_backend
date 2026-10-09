@@ -113,7 +113,9 @@ async function sendEmail(to, subject, html, options = {}) {
     };
 
     const result = await transport.sendMail(mailOptions);
-    console.log(`✉️ Email sent to ${to}: ${subject}`);
+    // Who, not what: a subject can carry something only the recipient
+    // should read, and a log is read by other people.
+    console.log(`✉️ Email sent to ${to}`);
     return { success: true, messageId: result.messageId };
   } catch (error) {
     console.error(`❌ Failed to send email to ${to}:`, error.message);

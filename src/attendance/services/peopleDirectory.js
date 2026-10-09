@@ -18,6 +18,7 @@ const User = require('../../models/user');
 const Trainer = require('../../gymfolio/models/trainerModel');
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const { defaultCurrency } = require('../../services/currency');
+const { unprovenIds } = require('../../services/emailVerification');
 
 const MEMBER_PREFIX = 'GP-';
 const STAFF_PREFIX = 'TR-';
@@ -240,21 +241,60 @@ async function trainerProfilesOf(userIds) {
 // Guest checkouts are matched by email as well as by userId: someone can buy
 // a package before ever creating an account, then sign up with the same
 // address, and the front desk should still see the package they paid for.
+// Only once the address is shown to be theirs, though -- sign-up takes any
+// address, and a guest's membership must not go to whoever types it
+// (services/emailVerification.js). Orders under the account's own id are
+// matched whatever the state of its address.
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Cancelled and suspended orders are decisions somebody made; neither counts
 // as live however far off its end date is.
 const NOT_LIVE = new Set(['cancelled', 'suspended']);
 
+// A card subscription renews on Stripe's clock, not ours: the next term is
+// charged around the moment this one ends, and the invoice.paid that moves
+// the end date on can land hours later -- days, while Stripe retries a card.
+// The expiry sweep gives such an order STRIPE_SETTLE_DAYS before calling it
+// lapsed (gymfolio/services/membershipExpiry.js), and the desk gives it the
+// same: without that, every card member who walked in during the gap was
+// told their fee had expired. "Still renewing" is reminderJobs.willAutoRenew,
+// so one told to stop ends on its end date like any other. Both are read
+// where they are defined, and when first needed: those files load the
+// notification stack, which this one must not pull in on load.
+function inRenewalGrace(order, end, now) {
+  const { STRIPE_SETTLE_DAYS } = require('../../gymfolio/services/membershipExpiry');
+  if (end.getTime() + STRIPE_SETTLE_DAYS * DAY_MS < now.getTime()) return false;
+  const { willAutoRenew } = require('../../services/reminderJobs');
+  return willAutoRenew(order);
+}
+
 function isLiveOrder(order, now) {
-  return (
-    !NOT_LIVE.has(order.status) &&
-    order.subscription &&
-    order.subscription.endDate &&
-    new Date(order.subscription.endDate) >= now &&
-    // A pack with nothing left on it is not a live membership.
-    !(order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total)
-  );
+  if (NOT_LIVE.has(order.status) || !order.subscription || !order.subscription.endDate) return false;
+  // A pack with nothing left on it is not a live membership.
+  if (order.sessions && order.sessions.total > 0 && order.sessions.used >= order.sessions.total) return false;
+  const end = new Date(order.subscription.endDate);
+  return end >= now || inRenewalGrace(order, end, now);
+}
+
+// Whether the order is frozen right now. A freeze has an end
+// (freeze.resumeAt), and the stored status only catches up when the daily
+// job resumes it -- until then a member back from their freeze was still
+// told "frozen" at the door. The end date was already moved on by the
+// frozen days when the freeze began, so past resumeAt the term simply runs.
+function isFrozenNow(order, now) {
+  if (order.status !== 'frozen') return false;
+  const resumeAt = order.freeze && order.freeze.resumeAt;
+  return !resumeAt || new Date(resumeAt) > now;
+}
+
+// A personal-training pack pays for PT sessions. It says nothing about the
+// membership, so it does not speak for the member at the door while they
+// hold anything else: led by the newest end date alone, a PT pack bought
+// last week read "Active" over a membership that had expired or was frozen.
+// Somebody whose only orders are PT packs is still answered from those.
+function ordersForTheDoor(orders) {
+  const others = orders.filter((order) => !(order.packageDetails && order.packageDetails.kind === 'pt_pack'));
+  return others.length ? others : orders;
 }
 
 // Whether the term has begun. The desk can sell a membership that starts in
@@ -359,12 +399,16 @@ function describeOrder(order, status, now) {
 
 // The address guest checkouts are matched on -- compared exactly, as the
 // query does, so an order the database would not return is never claimed.
-function ownerEmail(user) {
-  return user && user.email ? String(user.email).toLowerCase().trim() : null;
+// None for an address nobody has shown is theirs. `unproven` is the ids
+// unprovenIds found: a caller's projection may not carry the flag itself.
+function ownerEmail(user, unproven = null) {
+  if (!user || !user.email || user.emailVerified === false) return null;
+  if (unproven && unproven.has(String(user._id))) return null;
+  return String(user.email).toLowerCase().trim();
 }
 
 async function membershipFor(user) {
-  const emailMatch = ownerEmail(user);
+  const emailMatch = ownerEmail(user, await unprovenIds([user]));
   const ownerClauses = [{ userId: user._id }];
   if (emailMatch) ownerClauses.push({ 'customerInfo.email': emailMatch });
 
@@ -404,7 +448,7 @@ function membershipFromOrders(paidOrders, unpaid, now = new Date(), { owing = pa
 }
 
 function verdictFromOrders(paidOrders, unpaid, now) {
-  const recent = (paidOrders || []).slice(0, RECENT_PAID_ORDERS);
+  const recent = ordersForTheDoor(paidOrders || []).slice(0, RECENT_PAID_ORDERS);
 
   // A paid membership that is in date wins over everything else: a renewal
   // sitting in the bank-transfer queue must not hide the term that is
@@ -419,7 +463,7 @@ function verdictFromOrders(paidOrders, unpaid, now) {
   const liveOrders = recent.filter((order) => isLiveOrder(order, now));
   if (liveOrders.some((order) => hasStarted(order, now))) {
     const live = liveOrders[0];
-    const status = live.status === 'frozen' ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
+    const status = isFrozenNow(live, now) ? 'frozen' : live.status === 'past_due' ? 'past_due' : 'active';
     return describeOrder(live, status, now);
   }
 
@@ -476,8 +520,9 @@ function newestCreatedFirst(a, b) {
 // Files `orders` under their owners, and answers "which of these are this
 // user's" the way membershipFor's query does: by userId, or by an email that
 // matches theirs exactly. Each order once, even when it matches on both -- a
-// guest order later claimed by the account does.
-function ordersByOwner(orders) {
+// guest order later claimed by the account does. Accounts in `unproven`
+// (see ownerEmail) are answered by userId alone.
+function ordersByOwner(orders, unproven = null) {
   const byUser = new Map();
   const byEmail = new Map();
   const file = (map, key, order) => {
@@ -491,7 +536,7 @@ function ordersByOwner(orders) {
   }
 
   return (user) => {
-    const email = ownerEmail(user);
+    const email = ownerEmail(user, unproven);
     const mine = new Map();
     for (const order of byUser.get(String(user._id)) || []) mine.set(String(order._id), order);
     for (const order of (email && byEmail.get(email)) || []) mine.set(String(order._id), order);
@@ -504,9 +549,9 @@ function ordersByOwner(orders) {
  * all of them: each member is answered from exactly the orders membershipFor
  * would have fetched for them alone. Pure. Keyed by String(user._id).
  */
-function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date(), { currency = null } = {}) {
-  const paidOf = ordersByOwner(paidOrders);
-  const unpaidOf = ordersByOwner(unpaidOrders);
+function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date(), { currency = null, unproven = null } = {}) {
+  const paidOf = ordersByOwner(paidOrders, unproven);
+  const unpaidOf = ordersByOwner(unpaidOrders, unproven);
 
   const index = new Map();
   for (const user of users || []) {
@@ -528,15 +573,17 @@ function membershipsFromOrders(users, paidOrders, unpaidOrders, now = new Date()
 async function membershipsFor(users, now) {
   if (!users || !users.length) return new Map();
 
-  const emails = users.map(ownerEmail).filter(Boolean);
+  // The addresses that may claim a guest order: the proven ones.
+  const unproven = await unprovenIds(users);
+  const emails = users.map((user) => ownerEmail(user, unproven)).filter(Boolean);
   const owners = {
     $or: [{ userId: { $in: users.map((user) => user._id) } }, { 'customerInfo.email': { $in: emails } }]
   };
 
   // Only what membershipFromOrders reads, plus the two owner fields.
   const fields =
-    'userId customerInfo.email packageDetails.name subscription sessions status createdAt ' +
-    'payment.status payment.balanceDue payment.currency';
+    'userId customerInfo.email packageDetails.name packageDetails.kind subscription sessions status createdAt ' +
+    'payment.status payment.balanceDue payment.currency payment.stripeSubscriptionId freeze.resumeAt';
   const [paidOrders, unpaidOrders] = await Promise.all([
     PackageOrder.find({ ...owners, ...PAID_ORDER }).select(fields).lean(),
     PackageOrder.find({ ...owners, ...AWAITING_PAYMENT }).select(fields).lean()
@@ -544,7 +591,7 @@ async function membershipsFor(users, now) {
 
   // The gym's currency is only needed when money is owed in more than one.
   const currency = owedTotals(paidOrders).size > 1 ? await defaultCurrency() : null;
-  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date(), { currency });
+  return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date(), { currency, unproven });
 }
 
 // The directory's entries as they go out to the desk. `codes` -- every code

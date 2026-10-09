@@ -11,6 +11,12 @@
 //   * system roles cannot be deleted or renamed at the slug level
 //   * the 'admin' role's permissions cannot be reduced
 //   * a role still assigned to accounts cannot be deleted out from under them
+//
+// ...and about nobody writing themselves more access. Below an administrator,
+// an account with `roles: manage` cannot change the role it holds, change a
+// role that reaches further than its own, or give any role a tab at a level
+// it does not hold itself (services/roleGuards.js roleEditProblem). The
+// member role holds no tabs, whoever asks: every member has it.
 
 const mongoose = require('mongoose');
 
@@ -27,8 +33,10 @@ const {
   MEMBER_SLUG,
   ensureDefaultRoles,
   permissionsFor,
+  actorAccess,
   invalidate
 } = require('../services/roleService');
+const { roleEditProblem } = require('../services/roleGuards');
 
 const SLUG_RX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -181,8 +189,16 @@ module.exports = {
         return res.status(400).json({ message: 'That name does not make a usable role key' });
       }
 
+      // The system roles exist before anything is compared with them, so
+      // 'admin' and 'user' can never be created from here.
+      await ensureDefaultRoles();
       const clash = await Role.findOne({ slug });
       if (clash) return res.status(409).json({ message: `A role with the key "${slug}" already exists` });
+
+      // Nobody hands out access they do not hold (services/roleGuards.js).
+      const nextPermissions = fullPermissionMap(permissions || {});
+      const refusal = roleEditProblem({ ...(await actorAccess(req)), nextPermissions });
+      if (refusal) return res.status(403).json({ message: refusal });
 
       const role = await Role.create({
         name: String(name).trim(),
@@ -190,7 +206,7 @@ module.exports = {
         description: String(description || '').trim(),
         isStaff: isStaff !== false,
         isSystem: false,
-        permissions: fullPermissionMap(permissions || {}),
+        permissions: nextPermissions,
         order: Number(order) || 50
       });
 
@@ -215,6 +231,23 @@ module.exports = {
 
       const { name, description, isStaff, permissions, isActive, order } = req.body || {};
 
+      // What the role will hold once saved. 'admin' stays all-access and
+      // the member role stays without a tab: every member holds it, and the
+      // code that tells staff from members reads the role, not its tabs.
+      const current = fullPermissionMap(role.permissions);
+      let nextPermissions = permissions !== undefined ? fullPermissionMap(permissions) : current;
+      if (role.slug === ADMIN_SLUG) nextPermissions = allowAll();
+      if (role.slug === MEMBER_SLUG) nextPermissions = fullPermissionMap();
+
+      // Not your own role, not one above yours, and nothing in it that you
+      // do not hold yourself (services/roleGuards.js).
+      const refusal = roleEditProblem({
+        ...(await actorAccess(req)),
+        role: { slug: role.slug, permissions: current },
+        nextPermissions
+      });
+      if (refusal) return res.status(403).json({ message: refusal });
+
       if (name !== undefined) role.name = String(name).trim() || role.name;
       if (description !== undefined) role.description = String(description).trim();
       if (order !== undefined) role.order = Number(order) || 0;
@@ -227,10 +260,7 @@ module.exports = {
         if (isActive !== undefined) role.isActive = !!isActive;
       }
 
-      if (permissions !== undefined) {
-        role.permissions =
-          role.slug === ADMIN_SLUG ? allowAll() : fullPermissionMap(permissions);
-      }
+      if (permissions !== undefined) role.permissions = nextPermissions;
 
       await role.save();
       invalidate();

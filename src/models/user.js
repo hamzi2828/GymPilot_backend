@@ -159,6 +159,16 @@ const userSchema = new mongoose.Schema({
     // never match "nobody's". Existing gyms swap the old always-unique index
     // with scripts/migrateEmailIndex.js.
     email: { type: String, lowercase: true, trim: true, set: blankToUndefined },
+    // Whether anybody has shown this address is theirs. Sign-up takes any
+    // address, and a member may change theirs, so until it is proven the
+    // address signs in and receives mail but claims nothing: a guest order
+    // bought under it is matched to an account only when this is not false
+    // (services/emailVerification.js). Proven by opening the emailed link, a
+    // Google sign-in, an emailed sign-in code or an emailed reset link; an
+    // account staff made or imported is vouched for, hence the default.
+    // Accounts from before the field have no value and count as proven, so
+    // only `false` ever means "not yet".
+    emailVerified: { type: Boolean, default: true },
     // What the gym reads out to a member so they can sign in on the phone
     // app: their name (or email) plus three digits, unique across the whole
     // platform. Filled in by the hook below wherever an account is created,
@@ -186,6 +196,13 @@ const userSchema = new mongoose.Schema({
     // the JWT as `tv` and compared by middleware/auth on each request.
     tokenVersion: { type: Number, default: 0 },
 
+    // Password tries used in the window that ends at signInWindowEndsAt:
+    // after ten wrong in a row the password is not checked again for
+    // fifteen minutes (services/signInLock.js). No defaults, like the
+    // confirmation token below, and never in a query that does not ask.
+    signInAttempts: { type: Number, select: false },
+    signInWindowEndsAt: { type: Date, select: false },
+
     // Email code at sign-in. `pending` is the challenge in flight; the hash
     // is never returned by a query that does not ask for it.
     twoFactor: {
@@ -195,6 +212,9 @@ const userSchema = new mongoose.Schema({
         codeHash: { type: String, default: null, select: false },
         expiresAt: { type: Date, default: null },
         attempts: { type: Number, default: 0 },
+        // The address the code went to. A right code proves that address,
+        // not whatever the account's address has been changed to since.
+        sentTo: { type: String, default: null },
         // "Remember me" ticked at the password step, carried through to the
         // code step so the token issued there gets the same longer life.
         remember: { type: Boolean, default: false }
@@ -353,6 +373,16 @@ const userSchema = new mongoose.Schema({
     // change would use to invalidate live sessions issued before a reset --
     // which today's stateless 7-day JWT cannot do.
     passwordChangedAt: { type: Date, default: null, select: false },
+
+    // ---- Email confirmation ------------------------------------------------
+    //
+    // The link in the "confirm your email" message, kept the way the reset
+    // link is: only the hash, with an expiry, cleared when used or when the
+    // address changes (services/emailVerification.js). No defaults, so an
+    // account that was never sent a link has neither field, and a document
+    // fresh from User.create() carries nothing of them into a response.
+    emailVerifyTokenHash: { type: String, select: false },
+    emailVerifyExpiresAt: { type: Date, select: false },
 
 }, { timestamps: true });
 

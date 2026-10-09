@@ -24,6 +24,12 @@
 //   * the last active administrator can never be demoted, deactivated or
 //     deleted -- somebody has to be able to hand the role back out.
 //
+// The same line is held on the roles themselves (roleEditProblem): holding
+// `roles: manage` lets somebody shape the roles beneath them, not write
+// themselves a wider one -- nobody below an administrator edits the role
+// they hold, edits a role that reaches further than theirs, or gives any
+// role a tab at a level they do not hold.
+//
 // Every function returns a sentence explaining the refusal, or null when the
 // change may go ahead. The callers turn a sentence into a 403. Permissions
 // are { tab: level } maps (roleService.permissionsFor); the callers look
@@ -168,11 +174,66 @@ function createRoleProblem({ actorRole, actorPermissions, actorGrants, role, rol
   return grantProblem({ actorRole, actorGrants, grants });
 }
 
+/**
+ * Doing something to somebody else's account that is not a change of role,
+ * status or existence but still reaches into it: signing it out everywhere,
+ * recording its owner's consent, vouching for its email address. The same
+ * two lines as everything above -- an administrator's account only by an
+ * administrator, and nothing on an account that reaches further than the
+ * actor's own (a tab at a higher level, or a front-desk grant they lack).
+ * `doing` words the refusal: "sign out", "record consent for".
+ *
+ * @param {{ actorRole, actorPermissions, actorGrants, target, targetPermissions, doing }} args
+ *   target carries role and the two front-desk grants; targetPermissions are
+ *   those of its role.
+ */
+function reachProblem({ actorRole, actorPermissions, actorGrants = {}, target, targetPermissions, doing = 'change' }) {
+  if (!target) return null;
+
+  if (isAdmin(target.role) && !isAdmin(actorRole)) {
+    return `Only an administrator can ${doing} an administrator.`;
+  }
+  if (isAdmin(actorRole)) return null;
+
+  const above = widerTab(actorPermissions, targetPermissions);
+  if (above) return `This account has more access than yours (${above}), so ask an administrator to ${doing} this account.`;
+
+  if (deskGrantBeyond(actorGrants, target)) {
+    return `This account can use the front-desk app and yours cannot, so ask an administrator to ${doing} this account.`;
+  }
+  return null;
+}
+
+/**
+ * Creating a role, or changing one, so that it holds `nextPermissions`.
+ * `role` is the role as it stands ({ slug, permissions }); null for a new
+ * one. An administrator may do either; below that, see the top of this file.
+ */
+function roleEditProblem({ actorRole, actorPermissions, role = null, nextPermissions }) {
+  if (isAdmin(actorRole)) return null;
+
+  if (role) {
+    if (isAdmin(role.slug)) return 'Only an administrator can change the Administrator role.';
+    if (same(String(role.slug || '').toLowerCase(), String(actorRole || '').toLowerCase())) {
+      return 'You cannot change the role you hold yourself. Ask an administrator to do it.';
+    }
+    const above = widerTab(actorPermissions, role.permissions);
+    if (above) return `This role has more access than yours (${above}), so ask an administrator to change it.`;
+  }
+
+  const beyond = widerTab(actorPermissions, nextPermissions);
+  if (beyond) return `You cannot give a role more access than your own (${beyond}). Ask an administrator to do it.`;
+
+  return null;
+}
+
 module.exports = {
   ADMIN_SLUG,
   isAdmin,
   widerTab,
   deskGrantBeyond,
+  reachProblem,
+  roleEditProblem,
   roleChangeProblem,
   statusChangeProblem,
   deleteProblem,

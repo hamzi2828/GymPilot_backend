@@ -121,7 +121,7 @@ async function account(fields) {
 
 test('a member can remove their email, and signs in with their username after', async () => {
   const mia = await account({ firstName: 'Mia', lastName: 'Member', email: 'mia@account-email.test' });
-  const res = await updateMe(mia, { firstName: 'Mia', email: '' });
+  const res = await updateMe(mia, { firstName: 'Mia', email: '', currentPassword: PASSWORD });
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.match(res.body.message, new RegExp(mia.username));
   assert.equal('email' in (await storedOf(mia)), false, 'the address is gone, not kept or stored as ""');

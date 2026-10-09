@@ -34,6 +34,49 @@ function resolveSecret(label, incoming, existing, warnings, { trim = true } = {}
   return existing || '';
 }
 
+// A stored secret belongs to the place it was saved for. Whoever may edit
+// Settings never sees it -- only its masked preview -- but could otherwise
+// point the mail host or a gateway address at a server of their own and
+// leave the secret box alone: the next email or text would then hand the
+// gym's password or token to that server. So when the destination changes,
+// the secret has to come with the request, typed again (or cleared).
+//
+// Whether `incoming` would leave the stored secret in place.
+function keepsStoredSecret(incoming, existing) {
+  return !!existing && (incoming === undefined || isMasked(incoming));
+}
+
+function sameHost(a, b) {
+  return String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+}
+
+/** The refusal for a mail host changed with its saved password kept, or null. */
+function smtpSecretProblem(existing = {}, incoming = {}) {
+  if (incoming.host === undefined || sameHost(incoming.host, existing.host)) return null;
+  if (!keepsStoredSecret(incoming.pass, existing.pass)) return null;
+  return {
+    code: 'SECRET_REQUIRED',
+    field: 'smtp.pass',
+    message: 'You changed the mail server (SMTP host), so type its password again. Nothing was saved.'
+  };
+}
+
+/** The same for an SMS or WhatsApp gateway address changed with its saved token kept. */
+function gatewaySecretProblem(existing = {}, incoming = {}) {
+  for (const [key, label] of [['sms', 'SMS'], ['whatsapp', 'WhatsApp']]) {
+    const was = (existing && existing[key]) || {};
+    const now = (incoming && incoming[key]) || {};
+    if (now.webhookUrl === undefined || String(now.webhookUrl).trim() === String(was.webhookUrl || '').trim()) continue;
+    if (!keepsStoredSecret(now.webhookToken, was.webhookToken)) continue;
+    return {
+      code: 'SECRET_REQUIRED',
+      field: `messaging.${key}.webhookToken`,
+      message: `You changed the ${label} gateway address, so type its token again, or clear the token box. Nothing was saved.`
+    };
+  }
+  return null;
+}
+
 // Every response that returns the settings document must go through this.
 // Logo upload/remove and reset all echo the document back, and without this
 // they leaked the SMTP password and Stripe secrets in cleartext.
@@ -401,6 +444,18 @@ const settingsController = {
         openingHours,
         locale
       } = req.body;
+
+      // Before anything is written: a saved secret is never carried over to
+      // a mail host or a gateway address that has just been changed (see
+      // keepsStoredSecret). The admin page asks for it again by itself; this
+      // is for a request that did not.
+      if ((smtp && typeof smtp === 'object') || (messaging && typeof messaging === 'object')) {
+        const current = await currentSettings();
+        const problem =
+          (smtp && typeof smtp === 'object' ? smtpSecretProblem((current && current.smtp) || {}, smtp) : null) ||
+          (messaging && typeof messaging === 'object' ? gatewaySecretProblem((current && current.messaging) || {}, messaging) : null);
+        if (problem) return res.status(400).json({ success: false, ...problem });
+      }
 
       // Prepare update data with only provided fields
       const updateData = {};

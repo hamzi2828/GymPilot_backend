@@ -18,6 +18,15 @@ const { shell, paragraph, escapeHtml } = require('../templates/gymEmails');
 const CODE_TTL_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
 
+// A challenge that is over: used, expired or out of tries.
+const NO_CHALLENGE = { challengeId: null, codeHash: null, expiresAt: null, attempts: 0, remember: false, sentTo: null };
+
+function refusal(message, status = 401) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
 function hashCode(challengeId, code) {
   return crypto.createHash('sha256').update(`${challengeId}:${code}`).digest('hex');
 }
@@ -74,7 +83,9 @@ async function startChallenge(user) {
     challengeId,
     codeHash: hashCode(challengeId, code),
     expiresAt: new Date(Date.now() + CODE_TTL_MS),
-    attempts: 0
+    attempts: 0,
+    // Where the code is about to go (see verify).
+    sentTo: user.email
   };
   await user.save();
 
@@ -85,7 +96,9 @@ async function startChallenge(user) {
     `<p style="margin:0 0 16px;font-size:32px;letter-spacing:0.3em;font-weight:700;color:#18181b">${code}</p>`,
     paragraph('It expires in 10 minutes. If you did not try to sign in, you can ignore this email — nobody can get in without the code.')
   ].join('');
-  const result = await sendEmail(user.email, `${code} is your ${b.siteName} sign-in code`, shell(b.siteName, 'Your sign-in code', body));
+  // The code is in the body only. A subject is shown on lock screens and in
+  // notification previews, and is what mail systems and logs keep.
+  const result = await sendEmail(user.email, `Your ${b.siteName} sign-in code`, shell(b.siteName, 'Your sign-in code', body));
 
   return { challengeId, emailed: !!result.success, error: result.success ? null : result.error };
 }
@@ -94,44 +107,62 @@ async function startChallenge(user) {
  * Checks a code. Returns the user on success; throws with `status` and a
  * message otherwise. A challenge is single-use and dies after five wrong
  * tries, so a six-digit code cannot be brute-forced.
+ *
+ * Every try is taken in one conditional write BEFORE the code is compared:
+ * the count only goes up while the challenge is in date and has tries left.
+ * Read first and written after, a burst of parallel requests all saw the
+ * same count and each got a guess -- far more than five.
  */
 async function verify(challengeId, code) {
   const clean = String(code || '').replace(/\D/g, '');
-  if (!challengeId || clean.length !== 6) {
-    const error = new Error('Enter the 6-digit code from your email');
-    error.status = 400;
-    throw error;
+  if (!challengeId || clean.length !== 6) throw refusal('Enter the 6-digit code from your email', 400);
+
+  const id = String(challengeId);
+  const now = new Date();
+  const user = await User.findOneAndUpdate(
+    { 'twoFactor.pending.challengeId': id, 'twoFactor.pending.expiresAt': { $gt: now }, 'twoFactor.pending.attempts': { $lt: MAX_ATTEMPTS } },
+    { $inc: { 'twoFactor.pending.attempts': 1 } },
+    { new: true }
+  ).select('+twoFactor.pending.codeHash');
+
+  if (!user) {
+    // No such challenge, or one that is out of time or tries: whatever is
+    // left of it goes, and the answer says which it was.
+    const spent = await User.findOneAndUpdate({ 'twoFactor.pending.challengeId': id }, { $set: { 'twoFactor.pending': NO_CHALLENGE } })
+      .select('twoFactor.pending.expiresAt')
+      .lean();
+    const was = spent && spent.twoFactor && spent.twoFactor.pending;
+    if (!was) throw refusal('This sign-in has expired. Please sign in again.');
+    const expired = !was.expiresAt || new Date(was.expiresAt) <= now;
+    throw refusal(expired ? 'That code has expired. Please sign in again.' : 'Too many wrong codes. Please sign in again.');
   }
 
-  const user = await User.findOne({ 'twoFactor.pending.challengeId': String(challengeId) }).select('+twoFactor.pending.codeHash');
-  const pending = user && user.twoFactor && user.twoFactor.pending;
-  if (!user || !pending || !pending.codeHash) {
-    const error = new Error('This sign-in has expired. Please sign in again.');
-    error.status = 401;
-    throw error;
+  const pending = user.twoFactor.pending;
+  const expected = Buffer.from(String(pending.codeHash || ''));
+  const given = Buffer.from(hashCode(id, clean));
+  const matches = expected.length === given.length && crypto.timingSafeEqual(expected, given);
+
+  if (!matches) {
+    const left = MAX_ATTEMPTS - pending.attempts;
+    if (left > 0) throw refusal(`That code is not right. ${left} attempt(s) left.`);
+    await User.updateOne({ _id: user._id, 'twoFactor.pending.challengeId': id }, { $set: { 'twoFactor.pending': NO_CHALLENGE } });
+    throw refusal('Too many wrong codes. Please sign in again.');
   }
 
-  const expired = !pending.expiresAt || new Date(pending.expiresAt) < new Date();
-  const matches = crypto.timingSafeEqual(Buffer.from(pending.codeHash), Buffer.from(hashCode(challengeId, clean)));
+  // Whoever typed the code reads the mailbox it went to: that address is
+  // theirs (services/emailVerification.js). Only that address -- the
+  // account's may have been changed since the code was sent.
+  const proves = user.emailVerified === false && !!pending.sentTo && pending.sentTo === user.email;
 
-  if (expired || pending.attempts >= MAX_ATTEMPTS || !matches) {
-    if (expired || pending.attempts + 1 >= MAX_ATTEMPTS) {
-      user.twoFactor.pending = null;
-      await user.save();
-      const error = new Error(expired ? 'That code has expired. Please sign in again.' : 'Too many wrong codes. Please sign in again.');
-      error.status = 401;
-      throw error;
-    }
-    user.twoFactor.pending.attempts = (pending.attempts || 0) + 1;
-    await user.save();
-    const error = new Error(`That code is not right. ${MAX_ATTEMPTS - user.twoFactor.pending.attempts} attempt(s) left.`);
-    error.status = 401;
-    throw error;
-  }
-
-  user.twoFactor.pending = null;
-  await user.save();
-  return user;
+  // Single use: the challenge is given up in the write that accepts it, so
+  // the same code sent twice signs in once.
+  const signedIn = await User.findOneAndUpdate(
+    { _id: user._id, 'twoFactor.pending.challengeId': id, ...(proves ? { email: pending.sentTo } : {}) },
+    { $set: { 'twoFactor.pending': NO_CHALLENGE, ...(proves ? { emailVerified: true } : {}) } },
+    { new: true }
+  );
+  if (!signedIn) throw refusal('This sign-in has expired. Please sign in again.');
+  return signedIn;
 }
 
 module.exports = {
