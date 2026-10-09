@@ -51,3 +51,33 @@ test('sign-up holds a password to the rule a reset and a change are held to', as
   // A length and nothing else: no rule about digits or symbols.
   assert.equal(passwordProblem('aaaaaaaa'), null);
 });
+
+test('the reset and welcome emails carry a name as text, never as markup', () => {
+  const { welcomeEmailHtml, passwordResetEmailHtml } = users.emailTemplates;
+  const hostile = '<a href="https://evil.test/login">Click here to keep your account</a>';
+
+  const reset = passwordResetEmailHtml({
+    firstName: hostile,
+    siteName: 'Iron <b>Works</b>',
+    resetUrl: 'https://gym.test/authentication?mode=reset&token=abc&email=a%40b.test',
+    validMinutes: 60
+  });
+  assert.equal(reset.includes('evil.test/login">'), false, 'the attacker has no link in the email');
+  assert.equal(reset.includes('<b>'), false);
+  assert.ok(reset.includes('&lt;a href=&quot;https://evil.test/login&quot;&gt;'), 'the name is shown as it was typed');
+  // The gym's own link is the only one, and still works as a link.
+  assert.equal(reset.match(/<a /g).length, 1);
+  assert.ok(reset.includes('href="https://gym.test/authentication?mode=reset&amp;token=abc&amp;email=a%40b.test"'));
+
+  const welcome = welcomeEmailHtml({
+    firstName: hostile,
+    email: 'a@b.test',
+    username: 'ann<i>123',
+    password: 'p<w>&"\'',
+    siteName: 'Iron <b>Works</b>',
+    loginUrl: 'https://gym.test/authentication'
+  });
+  assert.equal(welcome.match(/<a /g).length, 1);
+  for (const raw of ['evil.test/login">', '<b>', '<i>', '<w>']) assert.equal(welcome.includes(raw), false, raw);
+  assert.ok(welcome.includes('p&lt;w&gt;&amp;&quot;&#39;'), 'a password with symbols reads back exactly');
+});

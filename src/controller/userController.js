@@ -18,6 +18,7 @@ const { afterResponse } = require('../services/afterResponse');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
 const { passwordMatches } = require('../services/passwordCheck');
+const { escapeHtml } = require('../templates/gymEmails');
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -133,21 +134,25 @@ async function subscriptionsBlockDeletion(userId, { self, by = null }) {
     return live ? refusal('') : null;
 }
 
+// Everything put into these two emails is escaped (templates/gymEmails.js
+// escapeHtml). The first name is whatever was typed at sign-up, and sign-up
+// takes any address: markup in it would otherwise reach that address's real
+// owner inside a genuine email from the gym, link and all.
 function welcomeEmailHtml({ firstName, email, username, password, siteName, loginUrl }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
-    <h2 style="margin:0 0 16px;font-size:20px">Welcome to ${siteName}, ${firstName}</h2>
+    <h2 style="margin:0 0 16px;font-size:20px">Welcome to ${escapeHtml(siteName)}, ${escapeHtml(firstName)}</h2>
     <p style="margin:0 0 16px;line-height:1.6">An account has been created for you. Use these details to sign in:</p>
     <table style="width:100%;border-collapse:collapse;background:#fafafa;border:1px solid #e4e4e7;border-radius:8px;margin-bottom:16px">
       <tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Email</td>
-          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${email}</td></tr>
+          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600">${escapeHtml(email)}</td></tr>
       ${username ? `<tr><td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;color:#71717a;font-size:13px">Username</td>
-          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${username}</td></tr>` : ''}
+          <td style="padding:12px 16px;border-bottom:1px solid #e4e4e7;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(username)}</td></tr>` : ''}
       <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
-          <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${password}</td></tr>
+          <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(password)}</td></tr>
     </table>
     <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' You can sign in with your email or your username, here and on the GymPilot phone app.' : ''}</p>
-    <a href="${loginUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
+    <a href="${escapeHtml(loginUrl)}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
   </div>`;
 }
@@ -155,12 +160,12 @@ function welcomeEmailHtml({ firstName, email, username, password, siteName, logi
 function passwordResetEmailHtml({ firstName, siteName, resetUrl, validMinutes }) {
   return `
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#18181b">
-    <h2 style="margin:0 0 16px;font-size:20px">Reset your ${siteName} password</h2>
-    <p style="margin:0 0 16px;line-height:1.6">Hi ${firstName}, we received a request to reset the password on your account. Click the button below to choose a new one.</p>
-    <a href="${resetUrl}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Choose a new password</a>
-    <p style="margin:20px 0 0;line-height:1.6;font-size:13px;color:#71717a">This link is valid for ${validMinutes} minutes and can only be used once.</p>
+    <h2 style="margin:0 0 16px;font-size:20px">Reset your ${escapeHtml(siteName)} password</h2>
+    <p style="margin:0 0 16px;line-height:1.6">Hi ${escapeHtml(firstName)}, we received a request to reset the password on your account. Click the button below to choose a new one.</p>
+    <a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Choose a new password</a>
+    <p style="margin:20px 0 0;line-height:1.6;font-size:13px;color:#71717a">This link is valid for ${escapeHtml(validMinutes)} minutes and can only be used once.</p>
     <p style="margin:16px 0 0;line-height:1.6;font-size:13px;color:#71717a">If the button does not work, paste this into your browser:<br>
-      <span style="word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${resetUrl}</span></p>
+      <span style="word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${escapeHtml(resetUrl)}</span></p>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you did not ask for this, you can ignore this email — your password will not change.</p>
   </div>`;
 }
@@ -1731,3 +1736,5 @@ module.exports = userController;
 module.exports.createMemberAccount = createMemberAccount;
 // ...and take it back out again when the larger thing fails.
 module.exports.releaseAccount = releaseAccount;
+// For the unit tests: the two emails built in this file.
+module.exports.emailTemplates = { welcomeEmailHtml, passwordResetEmailHtml };
