@@ -59,6 +59,23 @@ app.use(
 );
 
 // ---------------------------------------------------------------------------
+// Search engines
+//
+// This is an API: JSON for the gyms' websites and apps, nothing a person
+// should land on from a search result. Crawlers are told so twice -- in
+// robots.txt, and on every response for the ones that fetch a URL anyway.
+// Done here rather than in vercel.json so it holds wherever this runs.
+// ---------------------------------------------------------------------------
+app.use((req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+});
+
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain').send('User-agent: *\nDisallow: /\n');
+});
+
+// ---------------------------------------------------------------------------
 // CORS
 //
 // Every gym on the platform has its own website on its own domain, and all

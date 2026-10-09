@@ -69,6 +69,19 @@ test('an address nothing answers is a JSON 404, in or out of /api', async () => 
   }
 });
 
+test('crawlers are told to stay out: robots.txt disallows everything and every response says noindex', async () => {
+  // No gym named: robots.txt belongs to the API, not to a gym.
+  const robots = await fetch(`${base}/robots.txt`);
+  assert.equal(robots.status, 200);
+  assert.match(robots.headers.get('content-type'), /text\/plain/);
+  assert.equal(await robots.text(), 'User-agent: *\nDisallow: /\n');
+
+  for (const url of ['/robots.txt', '/', '/health', '/api/no-such-thing']) {
+    const res = await fetch(base + url, { headers: inGym() });
+    assert.equal(res.headers.get('x-robots-tag'), 'noindex, nofollow', url);
+  }
+});
+
 test('a malformed id that reaches the error handler is a 400, not a 500', () => {
   const handler = (app.router || app._router).stack.map((layer) => layer.handle).find((handle) => handle.length === 4);
   assert.ok(handler, 'index.js has an error handler');
