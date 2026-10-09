@@ -195,6 +195,50 @@ test('the current-password checks count against the same ten', async () => {
   assert.equal((await change(PASSWORD)).statusCode, 200);
 });
 
+test('the desk app sign-in uses the same ten tries, and respects the pause', async () => {
+  const desktop = h.src('attendance/controller/desktopAppController');
+  await inGym(() => h.ensureIndexes(h.src('attendance/models/desktopTokenModel')));
+  // A new address each time, so the desk's own in-memory limit (eight per
+  // account and address) is not what answers.
+  let from = 0;
+  const deskLogin = (name, password) =>
+    inGym(() => h.call(desktop.login, { headers: { 'x-forwarded-for': `10.9.0.${(from += 1)}` }, body: { email: name, password } }));
+
+  // Wrong passwords at the desk count on the account...
+  const dee = await account({ role: 'receptionist', allowAttendanceApp: true });
+  const unknown = await deskLogin('nobody@lock.test', PASSWORD);
+  assert.equal(unknown.statusCode, 401);
+  assert.match(unknown.body.message, /After 10 wrong tries, sign-in for an account pauses for 15 minutes/);
+  for (let i = 0; i < signInLock.MAX_ATTEMPTS; i++) {
+    const res = await deskLogin(i % 2 ? dee.email : dee.username, WRONG);
+    assert.equal(res.statusCode, 401, JSON.stringify(res.body));
+    assert.deepEqual(res.body, unknown.body, 'a wrong password reads as an unknown name does');
+  }
+  assert.equal((await stored(dee)).signInAttempts, signInLock.MAX_ATTEMPTS);
+  // ...so the right one is refused, at the desk and on the website alike.
+  const paused = await deskLogin(dee.email, PASSWORD);
+  assert.equal(paused.statusCode, 401, JSON.stringify(paused.body));
+  assert.deepEqual(paused.body, unknown.body);
+  assert.equal(paused.body.token, undefined);
+  assert.equal((await login(dee.email, PASSWORD)).statusCode, 401);
+
+  // Once the time is up the desk signs in and the count starts again.
+  await inGym(() => User.updateOne({ _id: dee._id }, { $set: { signInWindowEndsAt: new Date(Date.now() - 1000) } }));
+  const back = await deskLogin(dee.email, PASSWORD);
+  assert.equal(back.statusCode, 200, JSON.stringify(back.body));
+  assert.ok(back.body.token);
+  assert.equal((await stored(dee)).signInAttempts, 0);
+
+  // Ten wrong tries on the website pause the desk sign-in too.
+  const max = await account({ role: 'receptionist', allowAttendanceApp: true });
+  await wrongTries(max.email, signInLock.MAX_ATTEMPTS);
+  assert.equal((await deskLogin(max.email, PASSWORD)).statusCode, 401);
+
+  // An account switched off is refused in the same words, right password or not.
+  const off = await account({ role: 'receptionist', allowAttendanceApp: true, isActive: false });
+  assert.deepEqual((await deskLogin(off.email, PASSWORD)).body, unknown.body);
+});
+
 // ---- the emailed sign-in code ---------------------------------------------
 
 async function challengeFor(lena) {

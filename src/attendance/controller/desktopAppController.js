@@ -27,7 +27,11 @@ const { verifyQrToken } = require('../services/qrToken');
 const { findByCode } = require('../services/peopleDirectory');
 const { tenantKey } = require('../../platform/tenantContext');
 const { loginFilter } = require('../../services/username');
-const { passwordMatches } = require('../../services/passwordCheck');
+const signInLock = require('../../services/signInLock');
+
+// One answer for a wrong password, a name nobody has, an account switched
+// off and one whose password is paused, in the website's words.
+const SIGN_IN_REJECTED = `That email or username and password do not match. ${signInLock.PAUSE_NOTE}`;
 
 // The 1:N false-accept target the desktop matcher scales by candidate count.
 // 1-in-100,000 is the DigitalPersona default and what the reference reader
@@ -40,7 +44,10 @@ const FAR_DENOMINATOR = Number(process.env.FINGERPRINT_FAR || 100000);
 // Held in memory, so on a serverless deployment it is per-instance rather
 // than global -- it raises the cost of a guessing run without pretending to
 // be a complete defence. The real control is that desktop app access is
-// off by default on every account.
+// off by default on every account. Behind it, every password typed at the
+// sign-in window also uses one of the account's ten tries, kept in the
+// database and shared with the website and the phone app
+// (services/signInLock.js).
 // ---------------------------------------------------------------------------
 
 const MAX_ATTEMPTS = 8;
@@ -138,18 +145,14 @@ module.exports = {
         });
       }
 
-      if (!user || !user.password || !user.isActive) {
-        // The bcrypt work a real account costs, so a name nobody has is not
-        // answered faster (services/passwordCheck.js).
-        await passwordMatches(password, null);
+      // One of the account's ten tries, as on the website and the phone
+      // app: after ten wrong ones the password is not checked for fifteen
+      // minutes, wherever they were typed. The same bcrypt work is done for
+      // a name nobody has, so it is not answered faster (signInLock.js).
+      const matches = await signInLock.signInPasswordMatches(user, password);
+      if (!matches || !user.isActive) {
         noteFailure(key);
-        return res.status(401).json({ success: false, message: 'Invalid credentials.' });
-      }
-
-      const matches = await bcrypt.compare(password, user.password);
-      if (!matches) {
-        noteFailure(key);
-        return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+        return res.status(401).json({ success: false, message: SIGN_IN_REJECTED });
       }
 
       if (!user.allowAttendanceApp) {
