@@ -26,6 +26,9 @@ const MEMBERSHIP_KINDS = ['membership', 'session_pack', 'day_pass', 'trial', 'pt
 class MembershipError extends Error {
   constructor(message, status = 400, code = null) {
     super(message);
+    // Handlers outside this module tell these apart by name (the class
+    // booking and personal training controllers), not by instanceof.
+    this.name = 'MembershipError';
     this.status = status;
     this.code = code;
   }

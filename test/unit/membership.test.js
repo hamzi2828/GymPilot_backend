@@ -8,9 +8,19 @@ require('mongoose').set('bufferCommands', false);
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { packageSnapshot, termEnd } = require('../../src/gymfolio/services/membershipService');
+const { packageSnapshot, termEnd, MembershipError } = require('../../src/gymfolio/services/membershipService');
 
 const start = new Date('2026-01-31T10:00:00Z');
+
+test('a MembershipError carries its name, which is how the booking and PT handlers recognise it', () => {
+  // classBookingController and ptController test `error.name`, not the
+  // class: without the name a used-up pack answered 500 instead of saying so.
+  const error = new MembershipError('No sessions left on this pack', 400, 'NO_SESSIONS');
+  assert.equal(error.name, 'MembershipError');
+  assert.ok(error instanceof Error);
+  assert.deepEqual([error.message, error.status, error.code], ['No sessions left on this pack', 400, 'NO_SESSIONS']);
+  assert.deepEqual([new MembershipError('x').status, new MembershipError('x').code], [400, null]);
+});
 
 test('packageSnapshot fills in the shape older packages never had', () => {
   const snap = packageSnapshot({ name: 'Monthly', price: '40', currency: 'GBP', period: 'month', features: ['x'] });
