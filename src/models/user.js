@@ -196,6 +196,13 @@ const userSchema = new mongoose.Schema({
     // the JWT as `tv` and compared by middleware/auth on each request.
     tokenVersion: { type: Number, default: 0 },
 
+    // Password tries used in the window that ends at signInWindowEndsAt:
+    // after ten wrong in a row the password is not checked again for
+    // fifteen minutes (services/signInLock.js). No defaults, like the
+    // confirmation token below, and never in a query that does not ask.
+    signInAttempts: { type: Number, select: false },
+    signInWindowEndsAt: { type: Date, select: false },
+
     // Email code at sign-in. `pending` is the challenge in flight; the hash
     // is never returned by a query that does not ask for it.
     twoFactor: {

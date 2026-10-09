@@ -17,9 +17,14 @@ const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
 const { assignMemberCode } = require('../attendance/services/peopleDirectory');
 const { profileFieldsFrom } = require('../services/memberFields');
-const { passwordMatches, currentPasswordRefusal } = require('../services/passwordCheck');
+const { currentPasswordRefusal } = require('../services/passwordCheck');
 const { escapeHtml } = require('../templates/gymEmails');
 const verification = require('../services/emailVerification');
+const signInLock = require('../services/signInLock');
+
+// One answer for a name nobody has, a wrong password and an account whose
+// password is paused after too many wrong ones (services/signInLock.js).
+const SIGN_IN_REJECTED = `That email or username and password do not match. ${signInLock.PAUSE_NOTE}`;
 
 // A signed-in session lasts a week; "remember me" on the sign-in form makes
 // it a month, the same life the phone app's sessions get.
@@ -816,21 +821,18 @@ const userController = {
             }
 
             const user = await User.findOne(filter);
-            if (!user) {
-                // The bcrypt work a real account costs, so a name nobody
-                // has is not answered faster (services/passwordCheck.js).
-                await passwordMatches(password, null);
-                return res.status(401).json({ message: 'Invalid credentials' });
-            }
 
             // Prevent password login for accounts created via Google
-            if (!user.password) {
+            if (user && !user.password) {
                 return res.status(401).json({ message: 'This account uses Google login. Please sign in with Google.' });
             }
 
-            const match = await bcrypt.compare(password, user.password);
-            if (!match) {
-                return res.status(401).json({ message: 'Invalid credentials' });
+            // One of the account's ten tries is used, then the password is
+            // compared: a name nobody has costs the same bcrypt work and
+            // gets the same answer as a wrong password or a paused account
+            // (services/signInLock.js, services/passwordCheck.js).
+            if (!(await signInLock.signInPasswordMatches(user, password))) {
+                return res.status(401).json({ message: SIGN_IN_REJECTED });
             }
 
             // Checked here as well as in requirePermission. That gate only
@@ -979,6 +981,9 @@ const userController = {
 
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(password, salt);
+            // Wrong tries at the old password no longer count (signInLock).
+            user.signInAttempts = 0;
+            user.signInWindowEndsAt = null;
             // Every other session ends with the old password.
             user.tokenVersion = (user.tokenVersion || 0) + 1;
             forgetSession(user._id);
@@ -1031,9 +1036,11 @@ const userController = {
                 return res.status(400).json({ message: 'Current password is required' });
             }
 
-            const matches = await bcrypt.compare(currentPassword, user.password);
+            // Counted like a sign-in, so a stolen session cannot guess here
+            // without limit (services/signInLock.js).
+            const matches = await signInLock.signInPasswordMatches(user, currentPassword);
             if (!matches) {
-                return res.status(401).json({ message: 'Current password is incorrect' });
+                return res.status(401).json({ message: `Current password is incorrect. ${signInLock.PAUSE_NOTE}` });
             }
 
             const salt = await bcrypt.genSalt(10);

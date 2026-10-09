@@ -192,3 +192,35 @@ test('the notice to the old address masks the new one and shows names as text', 
   const removed = verification.addressChangedEmail({ firstName: 'Ann', siteName: 'Iron Works', newEmail: '', username: '' });
   assert.match(removed.html, /was removed from your Iron Works account/);
 });
+
+// ---- what a sent email leaves in the log (services/emailService.js) --------
+
+test('a sent email is logged by recipient, never by subject', async () => {
+  const nodemailer = require('nodemailer');
+  const emailService = require('../../src/services/emailService');
+  const realTransport = nodemailer.createTransport;
+  const realLog = console.log;
+  const env = { host: process.env.SMTP_HOST, user: process.env.SMTP_USER, pass: process.env.SMTP_PASS };
+  const sent = [];
+  const logged = [];
+  nodemailer.createTransport = () => ({ sendMail: async (mail) => (sent.push(mail), { messageId: 'unit-1' }) });
+  // A host no other test uses, so the transport made here is the stand-in.
+  Object.assign(process.env, { SMTP_HOST: 'smtp.log-test.invalid', SMTP_USER: 'gym@log-test.invalid', SMTP_PASS: 'unit' });
+  console.log = (...args) => logged.push(args.join(' '));
+  try {
+    const result = await emailService.sendEmail('sam@gym.test', '482913 is your sign-in code', '<p>482913</p>');
+    assert.equal(result.success, true);
+  } finally {
+    console.log = realLog;
+    nodemailer.createTransport = realTransport;
+    for (const [key, name] of [['host', 'SMTP_HOST'], ['user', 'SMTP_USER'], ['pass', 'SMTP_PASS']]) {
+      if (env[key] === undefined) delete process.env[name];
+      else process.env[name] = env[key];
+    }
+  }
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].subject, '482913 is your sign-in code', 'the email itself is untouched');
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].includes('sam@gym.test'));
+  assert.equal(logged[0].includes('482913'), false, 'whatever a subject carries stays out of the log');
+});

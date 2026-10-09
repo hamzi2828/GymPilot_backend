@@ -22,11 +22,14 @@ const { branding } = require('../services/branding');
 const { isExpoPushToken } = require('../services/messaging');
 const { MEMBER_APP_CLAIM } = require('../middleware/auth');
 const { passwordMatches } = require('../services/passwordCheck');
+const signInLock = require('../services/signInLock');
 
 // One message for "no such username" and "wrong password" alike: a member
 // list is worth money to a competitor, and a login form that says which
 // usernames exist hands one over.
-const REJECTED = 'That username and password do not match.';
+// It also covers an account whose password is paused after too many wrong
+// ones, and says so every time (services/signInLock.js).
+const REJECTED = `That username and password do not match. ${signInLock.PAUSE_NOTE}`;
 const EXPIRED_SIGN_IN = 'This sign-in has expired. Please sign in again.';
 const TURNED_OFF = 'This account has been turned off. Please speak to your gym.';
 // Same idea for the reset link: one answer whether or not the username exists.
@@ -185,8 +188,10 @@ module.exports = {
       const result = await runWithTenant(context, async () => {
         const User = require('../models/user');
         const user = await User.findById(entry.userId);
-        // No account, or no password on it, is never a match.
-        if (!(await passwordMatches(password, user && user.password))) {
+        // No account, or no password on it, is never a match -- nor is
+        // anything typed while the account's password is paused: each call
+        // uses one of its ten tries (services/signInLock.js).
+        if (!(await signInLock.signInPasswordMatches(user, password))) {
           return { status: 401, body: { success: false, message: REJECTED } };
         }
         if (user.isActive === false) {

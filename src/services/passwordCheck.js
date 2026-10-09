@@ -36,7 +36,8 @@ async function passwordMatches(password, hash) {
  * null when the password is right, or to the body of the 400 to send:
  *
  *   PASSWORD_REQUIRED   none was sent
- *   PASSWORD_INCORRECT  it does not match
+ *   PASSWORD_INCORRECT  it does not match, or too many wrong ones have
+ *                       paused the account's password for a while
  *   PASSWORD_NOT_SET    the account has none (it only ever used Google) --
  *                       "Forgot password" emails its address a link to set
  *                       one, which is the proof this check stands for
@@ -56,8 +57,12 @@ async function currentPasswordRefusal(account, typed, { toDo = 'do this' } = {})
       message: `Enter your current password to ${toDo}. It stops anyone else who gets into your account from taking it over.`
     };
   }
-  if (!(await passwordMatches(typed, account.password))) {
-    return { code: 'PASSWORD_INCORRECT', message: 'That password is not right, so nothing was changed.' };
+  // Counted like a sign-in (services/signInLock.js): a stolen session must
+  // not be a place to guess the password without limit. Required here, not
+  // at the top: that file needs this one.
+  const { signInPasswordMatches, PAUSE_NOTE } = require('./signInLock');
+  if (!(await signInPasswordMatches(account, typed))) {
+    return { code: 'PASSWORD_INCORRECT', message: `That password is not right, so nothing was changed. ${PAUSE_NOTE}` };
   }
   return null;
 }
