@@ -1,6 +1,6 @@
 // src/controller/mobileAuthController.js
 //
-// Sign-in for the GymPilot phone app.
+// Sign-in for the GymsPilotPro phone app.
 //
 // The website knows which gym it is from the domain it was opened on. The app
 // does not: a member types the username and password their gym gave them and

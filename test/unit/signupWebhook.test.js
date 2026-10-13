@@ -630,8 +630,8 @@ test('the signup\'s Stripe page takes a card, carries the trial, and is priced l
     assert.deepEqual(
       params.line_items.map((l) => [l.price_data.product_data.name, l.price_data.unit_amount, l.price_data.currency, l.price_data.recurring.interval]),
       [
-        ['Growth (GymPilot)', 800000, 'pkr', 'month'],
-        ['Member app (GymPilot)', 150000, 'pkr', 'month']
+        ['Growth (GymsPilotPro)', 800000, 'pkr', 'month'],
+        ['Member app (GymsPilotPro)', 150000, 'pkr', 'month']
       ]
     );
     assert.equal(params.success_url, 'https://gympilot.app/checkout/success?signup=sig_1');

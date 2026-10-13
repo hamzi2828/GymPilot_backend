@@ -203,7 +203,7 @@ const normaliseCategoryId = (value) => {
  * @param {String} siteName - The gym's name
  * @returns {String} JSON-LD schema string
  */
-const generateDefaultSchema = (title, content, imageUrl, siteName = 'GymPilot') => {
+const generateDefaultSchema = (title, content, imageUrl, siteName = 'GymsPilotPro') => {
   const schema = {
     "@context": "https://schema.org",
     "@type": "BlogPosting",

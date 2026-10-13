@@ -2,7 +2,7 @@
 //
 // The platform's own settings -- one document, created on first read.
 //
-// The Stripe keys here are GymPilot's, for charging gyms their plan. They are
+// The Stripe keys here are GymsPilotPro's, for charging gyms their plan. They are
 // NOT a gym's keys: a gym sells memberships into its own Stripe account and
 // those keys live in that gym's Settings (see services/stripeClient.js). The
 // two must never be crossed, which is why the platform's live in the platform

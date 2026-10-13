@@ -1,6 +1,6 @@
 // src/platform/services/platformStripe.js
 //
-// Stripe for the platform itself -- the account GymPilot charges gyms into.
+// Stripe for the platform itself -- the account GymsPilotPro charges gyms into.
 //
 // Deliberately has no environment fallback. The STRIPE_* variables belong to
 // the default gym (see services/stripeClient.js), and quietly borrowing them

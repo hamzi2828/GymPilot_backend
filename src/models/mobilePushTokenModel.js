@@ -1,6 +1,6 @@
 // src/models/mobilePushTokenModel.js
 //
-// A phone running the GymPilot member app that has agreed to receive this
+// A phone running the GymsPilotPro member app that has agreed to receive this
 // gym's notifications. One row per device, keyed by the Expo push token the
 // app registers after sign-in. A token registered again by another account
 // (a shared phone) moves to that account rather than being duplicated, and

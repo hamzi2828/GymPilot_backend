@@ -123,7 +123,7 @@ test('a file cut short is refused as incomplete', async () => {
 });
 
 test('something that is not a backup is refused, whatever it is', async () => {
-  await assert.rejects(readAll(Buffer.from('name,email\nA,a@b.c\n')), (error) => error instanceof backups.BackupFileError && /not a GymPilot backup/.test(error.message));
+  await assert.rejects(readAll(Buffer.from('name,email\nA,a@b.c\n')), (error) => error instanceof backups.BackupFileError && /not a GymsPilotPro backup/.test(error.message));
   await assert.rejects(readAll(zlib.gzipSync(Buffer.from('{"hello":"world"}'))), (error) => error instanceof backups.BackupFileError);
 
   // A well-formed tar.gz of somebody else's files.
@@ -132,8 +132,8 @@ test('something that is not a backup is refused, whatever it is', async () => {
     const pad = Buffer.alloc((512 - (data.length % 512)) % 512);
     return zlib.gzipSync(Buffer.concat([header, data, pad, Buffer.alloc(1024)]));
   };
-  await assert.rejects(readAll(tarOf('notes.txt', Buffer.from('hello'))), /not a GymPilot backup/);
-  await assert.rejects(readAll(tarOf('backup.json', Buffer.from('{"format":"something-else"}'))), /not a GymPilot backup/);
+  await assert.rejects(readAll(tarOf('notes.txt', Buffer.from('hello'))), /not a GymsPilotPro backup/);
+  await assert.rejects(readAll(tarOf('backup.json', Buffer.from('{"format":"something-else"}'))), /not a GymsPilotPro backup/);
   await assert.rejects(readAll(tarOf('backup.json', Buffer.from('{"format":"gympilot-backup","version":99}'))), /newer version/);
 });
 

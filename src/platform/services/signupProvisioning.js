@@ -47,7 +47,7 @@ const { STALE_CLAIM_MS } = require('../controllers/platformSettingsController');
 const { afterResponse } = require('../../services/afterResponse');
 const { shell, paragraph, detailTable, callout, dateLabel, escapeHtml } = require('../../templates/gymEmails');
 
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 
 // A signup whose last attempt began this long ago and is still being set up
 // (its delivery died), or failed, is stuck. Longer than STALE_CLAIM_MS, so

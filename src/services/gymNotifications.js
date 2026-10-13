@@ -41,7 +41,7 @@ async function brand() {
   const hit = brands.get(key);
   if (hit && Date.now() - hit.at < SETTINGS_TTL_MS) return hit.value;
 
-  let siteName = process.env.SITE_NAME || 'GymPilot';
+  let siteName = process.env.SITE_NAME || 'GymsPilotPro';
   let notificationsOn = true;
   // Which text channels carry the transactional notices, beyond email.
   let channels = { sms: false, whatsapp: false, push: true };

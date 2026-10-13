@@ -1,6 +1,6 @@
 // src/platform/controllers/billingController.js
 //
-// A gym looking at, and paying for, its own GymPilot subscription -- from
+// A gym looking at, and paying for, its own GymsPilotPro subscription -- from
 // its admin's Settings page. Mounted at /api/billing AFTER the tenant gate,
 // so `req.tenant` is the gym and `auth` + requirePermission('settings') say
 // who inside it may look and who may pay.
@@ -355,7 +355,7 @@ module.exports = {
         return res.status(409).json({
           success: false,
           code: 'CURRENCY_MISMATCH',
-          message: `${plan.name} is priced in ${priced}, but this gym pays in ${billed}. Contact ${process.env.PLATFORM_CONTACT_EMAIL || 'GymPilot support'} to change currency.`
+          message: `${plan.name} is priced in ${priced}, but this gym pays in ${billed}. Contact ${process.env.PLATFORM_CONTACT_EMAIL || 'GymsPilotPro support'} to change currency.`
         });
       }
       let next;

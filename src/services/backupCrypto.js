@@ -212,10 +212,10 @@ function decryptStream(gymId) {
   const readHeader = () => {
     const bytes = queue.take(HEADER_BYTES);
     if (!bytes.subarray(0, MAGIC.length).equals(MAGIC)) {
-      throw new BackupCryptoError('This file is not an encrypted GymPilot backup.');
+      throw new BackupCryptoError('This file is not an encrypted GymsPilotPro backup.');
     }
     if (bytes[MAGIC.length] !== VERSION) {
-      throw new BackupCryptoError('This backup was made by a newer version of GymPilot and cannot be opened here.');
+      throw new BackupCryptoError('This backup was made by a newer version of GymsPilotPro and cannot be opened here.');
     }
     const key = gymKey(gymId);
     if (!bytes.subarray(MAGIC.length + 1, MAGIC.length + 9).equals(keyIdOf(key))) {
@@ -244,7 +244,7 @@ function decryptStream(gymId) {
     flush(done) {
       try {
         if (!header) {
-          throw new BackupCryptoError(queue.length ? 'This file is not an encrypted GymPilot backup.' : 'This backup is empty.');
+          throw new BackupCryptoError(queue.length ? 'This file is not an encrypted GymsPilotPro backup.' : 'This backup is empty.');
         }
         if (queue.length < TAG_BYTES) throw new BackupCryptoError('This backup could not be opened: it is damaged or incomplete.');
         this.push(open(queue.take(queue.length), true));

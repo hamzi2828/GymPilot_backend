@@ -9,7 +9,7 @@
 
 const Settings = require('../models/settings');
 
-const DEFAULT_SITE_NAME = 'GymPilot';
+const DEFAULT_SITE_NAME = 'GymsPilotPro';
 
 async function gymSiteName() {
   try {

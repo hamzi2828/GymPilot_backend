@@ -1,4 +1,4 @@
-# Deploying GymPilot
+# Deploying GymsPilotPro
 
 What has to be true in production for the API to run as it should, and the
 order to do things in for this release (*Deploying this release*, at the
@@ -50,7 +50,7 @@ Everything else the API reads, with its default or an example in `.env.example`:
 | `FRONTEND_ORIGIN`, `GYMFOLIO_URL`, `EXTRA_CORS_ORIGINS` | CORS. `FRONTEND_ORIGIN` is also the website address of the `DEFAULT_TENANT_SLUG` gym, and the last fallback for a gym with neither a domain nor a platform subdomain. |
 | `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` | Only for the `DEFAULT_TENANT_SLUG` gym (§2). |
 | `EMAIL_FROM`, `SITE_NAME` | Sender line for the env SMTP transport; the name emails fall back to when a gym has no site name yet. |
-| `PLATFORM_NAME`, `PLATFORM_CONTACT_EMAIL` | Branding on platform emails (default `GymPilot`); the address gym admins are shown on their Billing tab. |
+| `PLATFORM_NAME`, `PLATFORM_CONTACT_EMAIL` | Branding on platform emails (default `GymsPilotPro`); the address gym admins are shown on their Billing tab. |
 | `PLATFORM_TOKEN_TTL`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD` | Super-admin session length (default `12h`); the first super admin, created on the first sign-in attempt when none exists. |
 | `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, `VERCEL_TEAM_ID` | Domains added to the website project for you (§3). |
 | `ALLOW_DEDICATED_DB_URI`, `OWNER_INVITE_TTL_HOURS` | `1` to accept a gym on its own cluster; how long the owner's set-password link lasts (default 72 hours). |
@@ -69,7 +69,7 @@ tests (FEATURES.md → *Tests*); none belongs on the server.
 
 ## 2. Stripe
 
-**The platform's own account** — what gyms pay GymPilot through, and what a
+**The platform's own account** — what gyms pay GymsPilotPro through, and what a
 self-serve sign-up pays with (BILLING.md → *Platform billing*):
 
 * Under the panel's **System → Stripe**: the secret key, charging switched

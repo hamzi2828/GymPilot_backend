@@ -10,7 +10,7 @@ const MAX_TRANSPORTERS = 100;
 // The name on the sender line when the gym has not set one: the gym's own
 // name from Settings → General. The env value is only the fallback a
 // single-gym deployment used before every gym had its own settings.
-const DEFAULT_SITE_NAME = 'GymPilot';
+const DEFAULT_SITE_NAME = 'GymsPilotPro';
 
 /**
  * Resolves SMTP config, preferring the admin-managed settings document and

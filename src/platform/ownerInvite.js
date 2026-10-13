@@ -20,7 +20,7 @@ const User = require('../models/user');
 const { sendEmail } = require('../services/emailService');
 const { shell, paragraph, button, detailTable, escapeHtml } = require('../templates/gymEmails');
 
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 const INVITE_TTL_HOURS = Math.max(1, Number(process.env.OWNER_INVITE_TTL_HOURS) || 72);
 
 /** Same hashing as userController.hashResetToken -- the reset endpoint compares against this. */

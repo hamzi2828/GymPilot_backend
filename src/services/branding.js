@@ -79,7 +79,7 @@ async function branding(apiOrigin = '') {
 
   return {
     gym: gym ? { slug: gym.slug, name: gym.name } : null,
-    siteName: settings.siteName || (gym && gym.name) || 'GymPilot',
+    siteName: settings.siteName || (gym && gym.name) || 'GymsPilotPro',
     // Where the gym's website lives, for the things the app hands over to
     // it: buying or changing a plan, invoices, the password reset link. The
     // registered domain first; failing that, whatever Settings says.

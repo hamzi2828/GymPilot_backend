@@ -1,7 +1,7 @@
 // src/controller/userImportController.js
 //
 // Bringing a gym's existing members in from a spreadsheet. Every gym that
-// switches to GymPilot already has its members somewhere else; without this
+// switches to GymsPilotPro already has its members somewhere else; without this
 // they retype hundreds of people by hand, and most would not.
 //
 // One CSV, one row per member. Columns are matched by name, loosely
@@ -321,7 +321,7 @@ module.exports = {
   // GET /admin/users/import/template
   template: (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="gympilot-members-template.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="gymspilotpro-members-template.csv"');
     return res.send(`${TEMPLATE_HEADER}\n${TEMPLATE_EXAMPLE}\n`);
   },
 

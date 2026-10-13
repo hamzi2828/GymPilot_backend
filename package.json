@@ -1,7 +1,7 @@
 {
   "name": "gympilot_backend",
   "version": "1.0.0",
-  "description": "GymPilot - gym management backend (members, memberships, classes, attendance, accounts)",
+  "description": "GymsPilotPro - gym management backend (members, memberships, classes, attendance, accounts)",
   "main": "index.js",
   "scripts": {
     "test": "node --test \"test/*.test.js\" \"test/unit/**/*.test.js\"",

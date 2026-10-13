@@ -18,7 +18,7 @@ const MIN_PASSWORD_LENGTH = 10;
 const CODE_TTL_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
 const RESET_TTL_MS = 60 * 60 * 1000;
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 
 function publicAdmin(admin) {
   return {

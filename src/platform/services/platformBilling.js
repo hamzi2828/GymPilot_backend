@@ -21,7 +21,7 @@ const PlatformAddon = require('../models/platformAddonModel');
 // written on the gym; re-exported below for the webhook.
 const { toMinorUnits, fromMinorUnits } = require('../../helper/money');
 
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 // Stripe refuses a Checkout trial_end closer than this; a shorter trial is
 // simply charged now.
 const MIN_TRIAL_END_MS = 48 * 60 * 60 * 1000;

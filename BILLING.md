@@ -1,4 +1,4 @@
-# GymPilot billing & memberships
+# GymsPilotPro billing & memberships
 
 How a gym sells and runs memberships: packages, ways to pay, what happens
 after the sale, and the paperwork.
@@ -331,7 +331,7 @@ cancelled, expiring (14/7/1 days), expired.
 
 ---
 
-# Platform billing — GymPilot charging gyms
+# Platform billing — GymsPilotPro charging gyms
 
 Everything above is a gym charging its members through the gym's own Stripe
 account. This part is the platform charging the gym for its plan, through the
@@ -347,7 +347,7 @@ The two are never crossed.
 `currency`, `startedAt`, `currentPeriodEnd`, `cancelledAt`, `pastDueSince`
 (when it went past due; `null` whenever it is not), `notes`, and for
 self-serve card payment `stripeCustomerId`, `stripeSubscriptionId`,
-`stripePriceSummary` ("Growth (GymPilot) + Member app · PKR 10,400 / month"),
+`stripePriceSummary` ("Growth (GymsPilotPro) + Member app · PKR 10,400 / month"),
 `checkoutSessionId` (the Stripe Checkout page the Billing tab opened last,
 cleared once it is paid), plus `notices` (when each lifecycle email went —
 see below).
@@ -460,7 +460,7 @@ less left, or a payment is overdue.
 
 `contactEmail` is `PLATFORM_CONTACT_EMAIL`. The checkout builds inline prices
 (`line_items[].price_data`, `recurring.interval` month/year,
-`product_data.name` "<Plan> (GymPilot)", `unit_amount` in minor units via
+`product_data.name` "<Plan> (GymsPilotPro)", `unit_amount` in minor units via
 `helper/money.toMinorUnits` — zero-decimal currencies as they are, and the
 three-decimal ones (BHD, JOD, KWD, OMR, TND) in thousandths, rounded to the
 hundredth as Stripe requires; what Stripe reports is read back the same way
@@ -642,7 +642,7 @@ cancellation is under a week old: older ones are marked without an email,
 so the first run does not write to every gym that ever left). Each email names the gym and the
 date and links to `<siteUrl>/admin/settings?tab=billing` to subscribe or update
 the card (an expired gym's owner lands on the "Sign in to renew" page there),
-branded `PLATFORM_NAME` (default GymPilot) and sent with the platform's own
+branded `PLATFORM_NAME` (default GymsPilotPro) and sent with the platform's own
 SMTP (env). The decision is the pure `noticesDue(subscription, now)` in
 `src/platform/billingNotices.js` (unit-tested). With `dryRun` the job returns
 what it would send and marks nothing.

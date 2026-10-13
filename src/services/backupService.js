@@ -258,7 +258,7 @@ async function writeArchive(options, ...streams) {
 
 /* --------------------------------- reading --------------------------------- */
 
-/** A file that is not a GymPilot backup, or not a whole one. `message` is fit to show. */
+/** A file that is not a GymsPilotPro backup, or not a whole one. `message` is fit to show. */
 class BackupFileError extends Error {
   constructor(message) {
     super(message);
@@ -280,7 +280,7 @@ function parseOctal(field) {
 function readTarHeader(block) {
   let sum = 0;
   for (let i = 0; i < BLOCK; i += 1) sum += i >= 148 && i < 156 ? 32 : block[i];
-  if (parseOctal(block.subarray(148, 156)) !== sum) throw new BackupFileError('This file is not a GymPilot backup (or it is damaged).');
+  if (parseOctal(block.subarray(148, 156)) !== sum) throw new BackupFileError('This file is not a GymsPilotPro backup (or it is damaged).');
   const name = block.subarray(0, 100).toString('utf8').replace(/\0.*$/s, '');
   const prefix = block.subarray(345, 500).toString('utf8').replace(/\0.*$/s, '');
   // A NUL type is an old-style regular file, as '0' is.
@@ -328,7 +328,7 @@ async function* tarFiles(source, maxEntryBytes = MAX_ENTRY_BYTES) {
         break;
       }
       const header = readTarHeader(block);
-      if (header.size > maxEntryBytes) throw new BackupFileError('This file is not a GymPilot backup: it holds a part far larger than any backup writes.');
+      if (header.size > maxEntryBytes) throw new BackupFileError('This file is not a GymsPilotPro backup: it holds a part far larger than any backup writes.');
       entry = { name: header.name, type: header.type, remaining: header.size, pad: (BLOCK - (header.size % BLOCK)) % BLOCK, parts: [] };
       if (complete()) {
         const done = entry;
@@ -384,11 +384,11 @@ async function* readArchive(source, { maxEntryBytes = MAX_ENTRY_BYTES } = {}) {
     for await (const file of tarFiles(gunzip, maxEntryBytes)) {
       if (manifest) throw new BackupFileError('This backup is damaged: something follows its manifest.');
       if (!header) {
-        if (file.name !== 'backup.json') throw new BackupFileError('This file is not a GymPilot backup.');
+        if (file.name !== 'backup.json') throw new BackupFileError('This file is not a GymsPilotPro backup.');
         header = parseJson(file.data, 'its header');
-        if (!header || header.format !== FORMAT) throw new BackupFileError('This file is not a GymPilot backup.');
+        if (!header || header.format !== FORMAT) throw new BackupFileError('This file is not a GymsPilotPro backup.');
         if (!(Number(header.version) >= 1 && Number(header.version) <= VERSION)) {
-          throw new BackupFileError('This backup was made by a newer version of GymPilot and cannot be read here.');
+          throw new BackupFileError('This backup was made by a newer version of GymsPilotPro and cannot be read here.');
         }
         yield { type: 'header', header };
         continue;
@@ -439,14 +439,14 @@ async function* readArchive(source, { maxEntryBytes = MAX_ENTRY_BYTES } = {}) {
       }
       // Anything else (a note someone added?) is not ours to interpret.
     }
-    if (!header) throw new BackupFileError('This file is not a GymPilot backup.');
+    if (!header) throw new BackupFileError('This file is not a GymsPilotPro backup.');
     if (!manifest) throw new BackupFileError('This backup is incomplete: it has no manifest, so it did not finish being written.');
   } catch (error) {
     if (error instanceof BackupFileError) throw error;
     // zlib's own complaints ("incorrect header check", "unexpected end of
     // file") mean the same to the owner.
     if (error && (error.code === 'Z_DATA_ERROR' || error.code === 'Z_BUF_ERROR' || error.errno === -3 || error.errno === -5)) {
-      throw new BackupFileError('This file is not a GymPilot backup (or it is damaged or cut short).');
+      throw new BackupFileError('This file is not a GymsPilotPro backup (or it is damaged or cut short).');
     }
     throw error;
   } finally {

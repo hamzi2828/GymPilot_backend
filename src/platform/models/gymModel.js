@@ -109,7 +109,7 @@ const gymSchema = new mongoose.Schema(
       // services/platformBilling.js). Empty for gyms billed by hand.
       stripeCustomerId: { type: String, default: '', trim: true },
       stripeSubscriptionId: { type: String, default: '', trim: true },
-      // "Growth (GymPilot) + Member app · PKR 10,400 / month" -- what Stripe
+      // "Growth (GymsPilotPro) + Member app · PKR 10,400 / month" -- what Stripe
       // is charging, in words, for the panel.
       stripePriceSummary: { type: String, default: '', trim: true },
       // When the newest Stripe event applied to this gym was created. Stripe
@@ -195,14 +195,14 @@ gymSchema.statics.findByIdWithUri = function (id) {
 gymSchema.statics.accessBlock = function (gym) {
   if (!gym) return { status: 404, code: 'TENANT_NOT_FOUND', message: 'No gym is connected to this domain.' };
   if (gym.status === 'suspended') {
-    return { status: 403, code: 'TENANT_SUSPENDED', message: 'This gym has been suspended. Please contact GymPilot support.' };
+    return { status: 403, code: 'TENANT_SUSPENDED', message: 'This gym has been suspended. Please contact GymsPilotPro support.' };
   }
   const sub = gym.subscription || {};
   if (sub.status === 'expired' || sub.status === 'cancelled') {
     return {
       status: 402,
       code: 'SUBSCRIPTION_INACTIVE',
-      message: 'This gym\'s GymPilot subscription is not active. Please contact GymPilot support to renew.'
+      message: 'This gym\'s GymsPilotPro subscription is not active. Please contact GymsPilotPro support to renew.'
     };
   }
   return null;

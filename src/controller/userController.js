@@ -170,7 +170,7 @@ function welcomeEmailHtml({ firstName, email, username, password, siteName, logi
       <tr><td style="padding:12px 16px;color:#71717a;font-size:13px">Temporary password</td>
           <td style="padding:12px 16px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(password)}</td></tr>
     </table>
-    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' You can sign in with your email or your username, here and on the GymPilot phone app.' : ''}</p>
+    <p style="margin:0 0 20px;line-height:1.6">Please change this password after your first sign-in.${username ? ' You can sign in with your email or your username, here and on the GymsPilotPro phone app.' : ''}</p>
     <a href="${escapeHtml(loginUrl)}" style="display:inline-block;background:#18181b;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Sign in</a>
     <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa">If you were not expecting this email, you can ignore it.</p>
   </div>`;
@@ -257,7 +257,7 @@ async function sendResetLink(user, email) {
 // ---------------------------------------------------------------------------
 
 // What a visitor sees when the gym's plan has no room for another member.
-// The plan and its limits are between the gym and GymPilot, not something to
+// The plan and its limits are between the gym and GymsPilotPro, not something to
 // tell somebody trying to join; staff adding an account from the admin panel
 // still get the plan wording and the PLAN_LIMIT_REACHED code their screens
 // act on.

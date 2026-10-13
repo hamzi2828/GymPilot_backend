@@ -17,7 +17,7 @@ const { shell, paragraph, button, detailTable, callout, dateLabel, escapeHtml } 
 // How long a gym keeps being served after its period ends before it is cut
 // off. Days, so a missed invoice is a reminder before it is an outage.
 const GRACE_DAYS = Math.max(0, Number(process.env.SUBSCRIPTION_GRACE_DAYS || 7));
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 // A gym Stripe bills is charged about an hour AFTER its period ends, and the
 // webhook then moves the period on. Marking it past due (and emailing "payment
 // overdue") the moment the date passes would cry wolf at every renewal, so

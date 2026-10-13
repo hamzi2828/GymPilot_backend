@@ -112,7 +112,7 @@ async function gymBySubscriptionId(id) {
   return Gym.findOne({ 'subscription.stripeSubscriptionId': id }).lean();
 }
 
-/** "Growth (GymPilot) + Member app · PKR 10,400 / month" */
+/** "Growth (GymsPilotPro) + Member app · PKR 10,400 / month" */
 async function summaryFor(gym, { amount, currency, interval, billingCycle }) {
   const plan = await planFor(gym).catch(() => null);
   const parts = [plan ? plan.name : 'Plan'];

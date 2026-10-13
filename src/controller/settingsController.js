@@ -961,7 +961,7 @@ const settingsController = {
       // and no logo -- never the platform's name or a placeholder picture.
       const gym = require('../platform/tenantContext').currentTenant();
       const defaultSettings = {
-        siteName: (gym && gym.name) || currentSettings.siteName || 'GymPilot',
+        siteName: (gym && gym.name) || currentSettings.siteName || 'GymsPilotPro',
         siteUrl: '',
         logoUrl: '',
         timezone: 'UTC+05:00',

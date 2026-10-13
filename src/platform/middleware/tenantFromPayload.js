@@ -17,7 +17,7 @@ const { storage, originForHost, primaryHost } = require('../tenantContext');
 
 // A gym's Stripe webhook records money its members have ALREADY paid, into
 // the gym's own Stripe account: a renewal, a failed card, a cancellation.
-// None of that stops because the gym's own GymPilot subscription lapsed --
+// None of that stops because the gym's own GymsPilotPro subscription lapsed --
 // Stripe goes on charging its members either way -- and an event
 // acknowledged but not applied is lost for good. So a lapsed gym
 // (SUBSCRIPTION_INACTIVE, the block its owner lifts by paying) still has its

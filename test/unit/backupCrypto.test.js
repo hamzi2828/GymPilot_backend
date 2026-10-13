@@ -86,7 +86,7 @@ test('a file cut short is refused, even exactly at a chunk boundary', async () =
     const atBoundary = sealed.subarray(0, HEADER_BYTES + 2 * (CHUNK_BYTES + TAG_BYTES));
     await assert.rejects(decrypt(atBoundary), /damaged or incomplete/);
     await assert.rejects(decrypt(sealed.subarray(0, HEADER_BYTES + 100)), /damaged or incomplete/);
-    await assert.rejects(decrypt(sealed.subarray(0, 20)), /not an encrypted GymPilot backup/);
+    await assert.rejects(decrypt(sealed.subarray(0, 20)), /not an encrypted GymsPilotPro backup/);
   });
 });
 
@@ -111,7 +111,7 @@ test('no key, no stored backups: nothing is encrypted with a stand-in', async ()
 
 test('something that is not ours is refused before any key is needed', async () => {
   await withKey('unit-backup-key', async () => {
-    await assert.rejects(decrypt(Buffer.from('x'.repeat(200))), /not an encrypted GymPilot backup/);
+    await assert.rejects(decrypt(Buffer.from('x'.repeat(200))), /not an encrypted GymsPilotPro backup/);
     await assert.rejects(decrypt(Buffer.alloc(0)), /empty/);
   });
 });

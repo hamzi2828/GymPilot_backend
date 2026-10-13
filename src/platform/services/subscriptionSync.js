@@ -18,7 +18,7 @@
 const { getPlatformStripe } = require('./platformStripe');
 const { toMinorUnits } = require('../../helper/money');
 
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 
 // Stripe subscriptions that are over: nothing to change, nothing charged.
 const ENDED = new Set(['canceled', 'incomplete_expired']);
@@ -74,7 +74,7 @@ function changesPrice(before, after, planBefore, planAfter) {
   );
 }
 
-/** "Growth (GymPilot) + Member app · PKR 10,400 / month" -- as the webhook words it. */
+/** "Growth (GymsPilotPro) + Member app · PKR 10,400 / month" -- as the webhook words it. */
 function priceSummary(plan, sub, total) {
   const parts = [plan.name];
   for (const addon of (sub && sub.addons) || []) {

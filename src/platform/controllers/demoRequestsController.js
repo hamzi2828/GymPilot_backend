@@ -15,7 +15,7 @@ const { afterResponse } = require('../../services/afterResponse');
 const { shell, paragraph, detailTable, escapeHtml } = require('../../templates/gymEmails');
 const { localFallback } = require('../tenantContext');
 
-const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymPilot';
+const PLATFORM_NAME = process.env.PLATFORM_NAME || 'GymsPilotPro';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // A second request of the same KIND from the same address inside this window
 // is the same person pressing the button twice, not a new lead. A checkout

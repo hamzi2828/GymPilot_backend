@@ -28,7 +28,7 @@ const settingsSchema = new mongoose.Schema(
       type: String, 
       required: true, 
       trim: true, 
-      default: 'GymPilot' 
+      default: 'GymsPilotPro' 
     },
     siteUrl: { 
       type: String, 
@@ -459,7 +459,7 @@ settingsSchema.statics.getSettings = async function() {
   if (!settings) {
     // Create default settings if none exist
     const defaults = {
-      siteName: 'GymPilot',
+      siteName: 'GymsPilotPro',
       siteUrl: '',
       logoUrl: '',
       timezone: 'UTC+05:00',

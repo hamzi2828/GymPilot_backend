@@ -246,7 +246,7 @@ async function renderEmail(key, vars = {}) {
   const subject = fill(use.subject, vars, false);
   return {
     subject,
-    html: shell(vars.siteName || 'GymPilot', subject, bodyToHtml(use.body, vars)),
+    html: shell(vars.siteName || 'GymsPilotPro', subject, bodyToHtml(use.body, vars)),
     custom: use === custom
   };
 }
@@ -261,7 +261,7 @@ async function renderText(key, vars = {}) {
 }
 
 /** Example values for previews and test sends. */
-function sampleVars(siteName = 'GymPilot', origin = 'https://example.com') {
+function sampleVars(siteName = 'GymsPilotPro', origin = 'https://example.com') {
   return {
     firstName: 'Alex',
     username: 'alex.smith',

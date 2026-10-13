@@ -195,8 +195,8 @@ test('only a change to what the gym is charged counts as a price change', () => 
   assert.equal(changesPrice(before, { ...before, planAmount: 6000 }, 'p1', 'p1'), true);
   assert.equal(changesPrice(before, { ...before, addons: [] }, 'p1', 'p1'), true);
   assert.deepEqual(stripeLinesFor(plan, { ...before, addons: [...before.addons, { slug: 'kiosk', name: 'Kiosk', amount: 0 }] }), [
-    { name: 'Growth (GymPilot)', amount: 5000 },
-    { name: 'Member app (GymPilot)', amount: 1500 }
+    { name: 'Growth (GymsPilotPro)', amount: 5000 },
+    { name: 'Member app (GymsPilotPro)', amount: 1500 }
   ]);
 });
 
@@ -210,7 +210,7 @@ function fakeStripe({ status = 'active', currency = 'pkr' } = {}) {
         status,
         currency,
         metadata: { gymId: 'g1' },
-        items: { data: [{ id: 'si_plan', price: { product: { id: 'prod_growth', name: 'Growth (GymPilot)', active: true } } }] }
+        items: { data: [{ id: 'si_plan', price: { product: { id: 'prod_growth', name: 'Growth (GymsPilotPro)', active: true } } }] }
       }),
       update: async (id, params) => {
         calls.updates.push({ id, params });
@@ -242,7 +242,7 @@ test("a Stripe-billed gym's new price is put on its Stripe subscription, prorate
   // The plan keeps its product; the add-on it never had gets one.
   assert.deepEqual(params.items[1].price_data, { currency: 'pkr', product: 'prod_growth', unit_amount: 5000000, recurring: { interval: 'year' } });
   assert.equal(params.items[2].price_data.product, 'prod_1');
-  assert.equal(stripe.calls.products[0].name, 'Member app (GymPilot)');
+  assert.equal(stripe.calls.products[0].name, 'Member app (GymsPilotPro)');
   assert.equal(params.metadata.planSlug, 'growth');
   assert.equal(params.metadata.billingCycle, 'yearly');
 });

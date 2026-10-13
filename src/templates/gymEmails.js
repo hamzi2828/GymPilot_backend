@@ -12,7 +12,7 @@
 // Every function returns { subject, html } so callers hand them to sendEmail
 // the same way throughout.
 
-const BRAND_FALLBACK = 'GymPilot';
+const BRAND_FALLBACK = 'GymsPilotPro';
 
 /* ------------------------------- chrome -------------------------------- */
 
@@ -339,7 +339,7 @@ function membershipCancelled({ firstName, packageName, endDate, immediate, siteN
 function memberWelcome({ firstName, siteName = BRAND_FALLBACK, portalUrl, timetableUrl, username, needsPassword = false }) {
   const app = username
     ? [
-        paragraph(`Get the GymPilot app from the App Store or Google Play and sign in with your username${needsPassword ? '' : ' and the password you chose'}:`),
+        paragraph(`Get the GymsPilotPro app from the App Store or Google Play and sign in with your username${needsPassword ? '' : ' and the password you chose'}:`),
         detailTable([['Username', username]]),
         needsPassword
           ? callout('You joined with Google, so there is no password on your account yet. Set one with "Forgot password" on the sign-in page and use it in the app.')

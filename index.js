@@ -166,7 +166,7 @@ app.use(cors({
 // ---------------------------------------------------------------------------
 const BODY_LIMIT = '1mb';
 const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
-// The platform's own webhook (GymPilot charging gyms) needs the same
+// The platform's own webhook (GymsPilotPro charging gyms) needs the same
 // untouched body as a gym's does.
 const PLATFORM_WEBHOOK_PATH = '/api/platform/stripe/webhook';
 
@@ -315,7 +315,7 @@ app.get('/api/tenant', (req, res) => {
   });
 });
 
-// The gym's own subscription to GymPilot: what it is on, and the Stripe
+// The gym's own subscription to GymsPilotPro: what it is on, and the Stripe
 // checkout / billing portal to pay for it. Past the tenant gate on purpose --
 // the gym asking is the one whose site the request came from.
 const billingRoutes = require('./src/platform/routes/billingRoutes');
@@ -427,7 +427,7 @@ app.get('/', (req, res) => {
     const mongoose = require('mongoose');
 
     res.json({
-      message: 'GymPilot API',
+      message: 'GymsPilotPro API',
       status: 'running',
       timestamp: new Date().toISOString(),
       version: '1.0.0',
@@ -440,7 +440,7 @@ app.get('/', (req, res) => {
   } catch (error) {
     console.error('Error in welcome route:', error);
     res.status(500).json({
-      message: 'GymPilot API',
+      message: 'GymsPilotPro API',
       status: 'error',
       error: error.message,
       timestamp: new Date().toISOString(),

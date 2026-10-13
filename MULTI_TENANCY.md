@@ -1,4 +1,4 @@
-# GymPilot multi-tenancy
+# GymsPilotPro multi-tenancy
 
 One backend, one website deployment, one front-desk app — and **one database
 per gym**. A gym is served on its own domain(s); the platform owner manages
@@ -197,7 +197,7 @@ derived from `MONGO_URI`), `DEFAULT_TENANT_SLUG`, `PLATFORM_ROOT_DOMAIN`, `PLATF
 `PLATFORM_TOKEN_TTL`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`,
 `PLATFORM_ADMIN_ORIGIN`, `SUBSCRIPTION_GRACE_DAYS`; and for the pieces above:
 `ALLOW_DEDICATED_DB_URI` (`1` to accept `database.uri` from the panel),
-`PLATFORM_NAME` (branding on platform emails, default `GymPilot`),
+`PLATFORM_NAME` (branding on platform emails, default `GymsPilotPro`),
 `PLATFORM_CONTACT_EMAIL` (shown to gym admins on their billing page),
 `OWNER_INVITE_TTL_HOURS` (default 72).
 
