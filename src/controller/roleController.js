@@ -134,7 +134,7 @@ module.exports = {
   me: async (req, res) => {
     try {
       const account = await User.findById(req.user.id)
-        .select('firstName lastName email role isActive employment.isStaff employment.jobTitle')
+        .select('firstName lastName email role isActive employment.isStaff employment.jobTitle allowAttendanceApp')
         .lean();
 
       if (!account) return res.status(401).json({ message: 'Account no longer exists' });
@@ -165,6 +165,9 @@ module.exports = {
           role_name: role ? role.name : account.role === ADMIN_SLUG ? 'Administrator' : account.role,
           is_staff: !!(account.employment && account.employment.isStaff),
           job_title: (account.employment && account.employment.jobTitle) || '',
+          // Lets the menu offer the Desk app page to an account that may use
+          // the front-desk app without holding the attendance tab.
+          allow_attendance_app: !!account.allowAttendanceApp,
           setup_completed: setupCompleted
         },
         permissions,

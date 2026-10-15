@@ -273,6 +273,25 @@ app.use('/api/mobile', async (req, res, next) => {
 }, mobileRoutes);
 
 // ---------------------------------------------------------------------------
+// Linking a front-desk PC with a code from the admin panel
+//
+// Before the tenant gate for the same reason as the phone app: the desk
+// typing the code does not know its gym yet -- the code tells it. The admin
+// panel's half of these routes applies the gate's middleware itself
+// (src/platform/routes/deskLinkRoutes.js).
+// ---------------------------------------------------------------------------
+const deskLinkRoutes = require('./src/platform/routes/deskLinkRoutes');
+app.use('/api/desk-link', async (req, res, next) => {
+  try {
+    await ensureConnection();
+    next();
+  } catch (error) {
+    console.error('Failed to ensure MongoDB connection:', error);
+    res.status(503).json({ success: false, message: 'Database connection failed. Please try again in a moment.' });
+  }
+}, deskLinkRoutes);
+
+// ---------------------------------------------------------------------------
 // Tenant gate
 //
 // Everything past this point runs for exactly one gym: the one whose website
