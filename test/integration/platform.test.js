@@ -472,8 +472,15 @@ test('a payment recorded by hand brings a lapsed gym back, once, and the daily r
   assert.equal(retyped.body.code, 'DUPLICATE_REFERENCE');
   assert.equal(await PlatformPayment.countDocuments({ gymId: gym._id }), 1);
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const audits = await PlatformAuditLog.find({ action: 'gym_payment_recorded', gymId: gym._id }).lean();
+  // The audit write is not awaited: poll for it rather than guess how long a
+  // busy machine takes, then give a stray second write time to show up.
+  let audits = [];
+  for (const until = Date.now() + 5000; !audits.length && Date.now() < until; ) {
+    audits = await PlatformAuditLog.find({ action: 'gym_payment_recorded', gymId: gym._id }).lean();
+    if (!audits.length) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  audits = await PlatformAuditLog.find({ action: 'gym_payment_recorded', gymId: gym._id }).lean();
   assert.equal(audits.length, 1, 'logged once');
   assert.equal(audits[0].actorEmail, 'admin@gympilot.test');
   assert.equal(audits[0].meta.reference, 'FT26283XYZ');
