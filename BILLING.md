@@ -511,7 +511,7 @@ clears `notices`; a status write starts, keeps or clears `pastDueSince`
 
 ## Self-serve sign-up — `src/platform/controllers/signupController.js`
 
-A buyer on the marketing site's checkout (`GymPilot_frontendAdmin` `/checkout`)
+A buyer on the marketing site's checkout (`GymPilot_marketing` `/checkout`)
 can pay and get a gym with nobody in the panel involved. Their answers are
 kept as a demo request of `kind: 'signup'` (`platform_demo_requests`) with a
 `signup` block — `state` `awaiting_payment → provisioning → ready`, or

@@ -100,7 +100,7 @@ Nothing may serialise such a document to a client: the panel goes through
 
 ## The platform panel
 
-App: `GymPilot_frontendAdmin` -- the marketing site at `/` and the panel at `/super-admin` (sign in at `/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `/api/platform/public/addons`, `/api/platform/public/config` → `{ root_domain, self_serve_signup }`, `POST /api/platform/public/demo-requests`, and the self-serve sign-up's `POST /api/platform/public/signup` and `GET /api/platform/public/signup/:id/status` — see BILLING.md → *Self-serve sign-up*)
+App: `GymPilot_marketing` -- the marketing site at `/` and the panel at `/super-admin` (sign in at `/login`); the gym website redirects its old `/super-admin` links there. API: `/api/platform/*` (public, no session: `/api/platform/public/plans`, `/api/platform/public/addons`, `/api/platform/public/config` → `{ root_domain, self_serve_signup }`, `POST /api/platform/public/demo-requests`, and the self-serve sign-up's `POST /api/platform/public/signup` and `GET /api/platform/public/signup/:id/status` — see BILLING.md → *Self-serve sign-up*)
 (`src/platform/routes/platformRoutes.js`). Its accounts (`super_admins`) and
 session token are separate from every gym's.
 

@@ -3,7 +3,7 @@
 //   node scripts/platform/createSuperAdmin.js owner@gympilot.com "a strong password" --name "Your Name"
 //
 // Super admins live in the platform database, not in any gym's. They sign in
-// at /login on the platform site (GymPilot_frontendAdmin) and see every gym,
+// at /login on the platform site (GymPilot_marketing) and see every gym,
 // its plan and its numbers.
 //
 // On a host with no shell (Vercel), set SUPER_ADMIN_EMAIL and

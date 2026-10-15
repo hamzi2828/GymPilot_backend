@@ -35,7 +35,7 @@ router.put('/auth/password', platformAuth, authController.changePassword);
 router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
 router.post('/auth/logout', platformAuth, authController.logout);
 
-// Public: what the marketing site (GymPilot_frontendAdmin) reads and posts.
+// Public: what the marketing site (GymPilot_marketing) reads and posts.
 // No session; nothing here says anything about a gym.
 router.get('/public/plans', plansController.publicPlans);
 router.get('/public/addons', addonsController.publicAddons);

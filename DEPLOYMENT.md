@@ -16,7 +16,7 @@ none of it is code.
 | `TENANT_DB_PREFIX` | leave unset (= `GymPilot_`) | New gyms get `GymPilot_<slug>` on the same cluster. |
 | `PLATFORM_JWT_SECRET` | a fresh random 64-char string | Signs super-admin sessions separately from gym sessions. |
 | `QR_TOKEN_SECRET` | a fresh random 64-char string | Signs members' check-in QR codes. |
-| `PLATFORM_ADMIN_ORIGIN` | e.g. `https://gympilot.app` (comma separated for more than one, e.g. with and without `www`). **Required in production** | Where the marketing site + platform panel (`GymPilot_frontendAdmin`) is served; used for CORS, password-reset links, demo-request emails and — for a self-serve sign-up — where Stripe sends the buyer back. Links use the first origin listed. In production nothing stands in for it: without it a super admin's "forgot password" answers 503, self-serve sign-up stays off, and emails to the platform admins carry no link to the panel. |
+| `PLATFORM_ADMIN_ORIGIN` | e.g. `https://gymspilotpro.com` (comma separated for more than one, e.g. with and without `www`). **Required in production** | Where the marketing site + platform panel (`GymPilot_marketing`) is served; used for CORS, password-reset links, demo-request emails and — for a self-serve sign-up — where Stripe sends the buyer back. Links use the first origin listed. In production nothing stands in for it: without it a super admin's "forgot password" answers 503, self-serve sign-up stays off, and emails to the platform admins carry no link to the panel. |
 | `PLATFORM_ROOT_DOMAIN` | e.g. `gympilot.app` | Every new gym is also registered as `<slug>.<this domain>`, and its owner's invite points there. **Self-serve sign-up needs it**: without it checkout sends a request for the panel instead of taking payment. |
 | `PLATFORM_SELF_SERVE_SIGNUP` | leave unset | Checkout takes payment and builds the gym itself whenever the prerequisites hold — `PLATFORM_ROOT_DOMAIN`, `PLATFORM_ADMIN_ORIGIN`, the platform's Stripe keys with charging on, its webhook signing secret, and `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` that the mail server actually accepts (it is asked; the owner's set-password link goes out by email) (§2; BILLING.md → *Self-serve sign-up*). Set `off` to send every new gym through the panel regardless. |
 | `SUBSCRIPTION_GRACE_DAYS` | `7` | Days a gym is served after its platform subscription lapses. |
@@ -120,7 +120,7 @@ after the API: an older build keeps working with this release.
 
 ## 5. After the first deploy
 
-1. Deploy `GymPilot_frontendAdmin` (marketing site + platform panel) with `NEXT_PUBLIC_BACKEND_URL` and `NEXT_PUBLIC_SITE_URL` set, and put its origin in the API's `PLATFORM_ADMIN_ORIGIN`. Sign in at `<that origin>/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
+1. Deploy `GymPilot_marketing` (marketing site + platform panel) with `NEXT_PUBLIC_BACKEND_URL` and `NEXT_PUBLIC_SITE_URL` set, and put its origin in the API's `PLATFORM_ADMIN_ORIGIN`. Sign in at `<that origin>/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
 2. Create your platform plans (**Plans**) and put the demo gym on one.
 3. Provision new gyms from **Gyms → New gym**; each owner lands in the setup
    wizard at `/admin/setup`. Gyms can also sign up and pay on their own at
@@ -178,7 +178,7 @@ fails rather than skips (FEATURES.md → *Tests*).
    job will run). Vercel → Project → Settings → Cron Jobs lists two:
    `/api/jobs/backups` at 02:00 UTC and `/api/jobs/reminders` at 03:00 UTC.
 6. **Deploy the two web apps**, `GymPilot_frontend` and
-   `GymPilot_frontendAdmin`, after the API: they use what this release adds.
+   `GymPilot_marketing`, after the API: they use what this release adds.
 7. Front-desk PCs (§4) in their own time.
 
 ### Rolling back

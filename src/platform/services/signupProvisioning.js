@@ -70,7 +70,7 @@ const PAID = new Set(['trialing', 'active']);
 // What the free-text "City / country" says about the gym's own money and
 // clock -- what it charges its members in, not what it pays us in. The same
 // table the panel's New gym form fills itself in from
-// (GymPilot_frontendAdmin super-admin/gyms/new); keep the two in step.
+// (GymPilot_marketing super-admin/gyms/new); keep the two in step.
 const PLACE_LOCALES = [
   { match: /\b(pakistan|karachi|lahore|islamabad|rawalpindi|faisalabad|multan|peshawar)\b/i, country: 'PK', currency: 'PKR', timezone: 'Asia/Karachi' },
   { match: /\b(uk|united kingdom|great britain|britain|england|scotland|wales|london|manchester|birmingham|leeds|glasgow|edinburgh)\b/i, country: 'GB', currency: 'GBP', timezone: 'Europe/London' },
