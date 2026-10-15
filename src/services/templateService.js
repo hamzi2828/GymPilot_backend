@@ -267,7 +267,7 @@ function sampleVars(siteName = 'GymsPilotPro', origin = 'https://example.com') {
     username: 'alex.smith',
     siteName,
     portalUrl: `${origin}/user-detail`,
-    timetableUrl: `${origin}/timetable`,
+    timetableUrl: `${origin}/classes`,
     renewUrl: `${origin}/packages`,
     className: 'Morning Spin',
     date: '12 September 2026',

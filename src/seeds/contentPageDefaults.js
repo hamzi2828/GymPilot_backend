@@ -71,19 +71,19 @@ const FAQ = {
         {
           question: 'How do I book a class?',
           answer:
-            '<p>Open the <a href="/timetable">timetable</a>, pick a session and press <strong>Book a place</strong>. You need to be signed in. Your booked classes appear under <em>My classes</em> in your account.</p>',
+            '<p>Open <a href="/classes">Classes</a>, choose a class, pick one of its upcoming sessions and press <strong>Book a place</strong>. You need to be signed in. Your booked classes appear under <em>My classes</em> in your account.</p>',
           order: 0
         },
         {
           question: 'The class I want is full — what happens?',
           answer:
-            '<p>You can join the waiting list. If somebody cancels, the first person waiting is moved into the place automatically and we email them. You can see your position on the timetable.</p>',
+            '<p>You can join the waiting list. If somebody cancels, the first person waiting is moved into the place automatically and we email them. You can see your position on the class page and under <em>My classes</em>.</p>',
           order: 1
         },
         {
           question: 'How do I cancel a booking?',
           answer:
-            '<p>From the <a href="/timetable">timetable</a> or from <em>My classes</em> in your account. Please cancel if you cannot make it — it frees the place for somebody on the waiting list.</p>',
+            '<p>From the class page or from <em>My classes</em> in your account. Please cancel if you cannot make it — it frees the place for somebody on the waiting list.</p>',
           order: 2
         },
         {
@@ -230,7 +230,7 @@ const TERMS = {
 
 <h2>Class bookings</h2>
 <ul>
-  <li>Classes are booked through the timetable and places are limited.</li>
+  <li>Classes are booked from each class's page and places are limited.</li>
   <li>If a class is full you may join the waiting list; places are released in order.</li>
   <li>Please cancel if you cannot attend, so the place can go to somebody else.</li>
   <li>We may cancel or reschedule a class, and will tell you as far in advance as we can.</li>

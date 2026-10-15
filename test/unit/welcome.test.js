@@ -77,7 +77,7 @@ async function send(appEnabled, fn) {
 }
 
 test('the template alone: username and the app, only when given one', () => {
-  const plain = t.memberWelcome({ firstName: 'Sara', siteName: 'Iron Works', timetableUrl: 'https://iron.test/timetable' });
+  const plain = t.memberWelcome({ firstName: 'Sara', siteName: 'Iron Works', timetableUrl: 'https://iron.test/classes' });
   assert.equal(plain.subject, 'Welcome to Iron Works');
   assert.doesNotMatch(plain.html, /Username|App Store/);
 
@@ -104,7 +104,7 @@ test('a gym with the member app: the welcome carries the username and how to get
   assert.equal(emails[0].to, 'sara@iron.test');
   assert.match(emails[0].html, /saramalik284/);
   assert.match(emails[0].html, /App Store or Google Play/);
-  assert.match(emails[0].html, /https:\/\/iron\.test\/timetable/);
+  assert.match(emails[0].html, /https:\/\/iron\.test\/classes/);
 });
 
 test('a gym without the member app: a plain welcome, no username, no app', async () => {

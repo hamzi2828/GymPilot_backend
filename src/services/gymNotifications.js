@@ -71,7 +71,7 @@ async function brand() {
     channels,
     portalUrl: `${frontend}/user-detail?tab=bookings`,
     accountUrl: `${frontend}/user-detail`,
-    timetableUrl: `${frontend}/timetable`,
+    timetableUrl: `${frontend}/classes`,
     renewUrl: `${frontend}/packages`
   };
   brands.set(key, { at: Date.now(), value });

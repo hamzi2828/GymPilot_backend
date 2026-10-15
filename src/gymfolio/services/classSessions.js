@@ -132,9 +132,25 @@ function expand(gymClass, from, to, exceptions = []) {
     }
   }
 
-  return sessions.sort(
-    (a, b) => a.starts_at - b.starts_at || a.class_name.localeCompare(b.class_name)
-  );
+  return sessions.sort(byStart);
+}
+
+/** Earliest first; two classes at the same moment read alphabetically. */
+function byStart(a, b) {
+  return a.starts_at - b.starts_at || a.class_name.localeCompare(b.class_name);
+}
+
+/**
+ * Several classes expanded over one range, as one list in time order.
+ *
+ * Each class's own list is sorted, but laid end to end they are not: a
+ * Monday showed one class's 18:00 before another's 07:00. So the merged list
+ * is sorted again.
+ */
+function expandAll(classes, from, to, exceptions = []) {
+  return classes
+    .flatMap((gymClass) => expand(gymClass, from, to, exceptions))
+    .sort(byStart);
 }
 
 /**
@@ -298,7 +314,7 @@ async function timetable(query = {}, forUserId = null) {
     exceptionsFor(range.from, range.to)
   ]);
 
-  const all = classes.flatMap((gymClass) => expand(gymClass, range.from, range.to, exceptions));
+  const all = expandAll(classes, range.from, range.to, exceptions);
   const sessions = await withCounts(all, forUserId, policy);
 
   return { range, sessions, rules: policy };
@@ -313,6 +329,8 @@ module.exports = {
   exceptionsFor,
   exceptionFor,
   expand,
+  expandAll,
+  byStart,
   withCounts,
   readRange,
   findSlot,

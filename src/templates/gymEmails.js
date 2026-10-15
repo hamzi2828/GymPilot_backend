@@ -351,7 +351,7 @@ function memberWelcome({ firstName, siteName = BRAND_FALLBACK, portalUrl, timeta
     paragraph(`Welcome ${escapeHtml(firstName || 'aboard')} — your account is ready.`),
     paragraph('Here is what you can do from here:'),
     `<ul style="margin:0 0 20px;padding-left:20px;color:#3f3f46;font-size:14px;line-height:1.8">
-       <li>Book classes from the timetable</li>
+       <li>Pick a class and book a place in one of its sessions</li>
        <li>See your membership and when it runs out</li>
        <li>Look back at every visit you have made</li>
      </ul>`,
