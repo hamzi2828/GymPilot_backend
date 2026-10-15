@@ -342,6 +342,15 @@ const settingsSchema = new mongoose.Schema(
       // only scan in: every member scan is then a new visit (see
       // attendance/services/punchService.js).
       memberScanOut: { type: Boolean, default: true },
+      // Members the desk turns away at the door instead of checking in with a
+      // red warning. All off by default: warn only, as the desk always has.
+      // Nothing is recorded for a refused scan (see punchService
+      // entryRefusal); someone already inside can always check out.
+      refuseEntry: {
+        expired: { type: Boolean, default: false },   // membership ran out (or cancelled and ended)
+        unpaid: { type: Boolean, default: false },    // balance owing, or the card payment failed
+        noPackage: { type: Boolean, default: false }  // never bought a package
+      },
       // What the front desk and the web kiosk SAY after the alert sound, for
       // a member whose fee has run out, is about to, or has money owing.
       // Spoken, not shown: the member hears it from across the counter. A

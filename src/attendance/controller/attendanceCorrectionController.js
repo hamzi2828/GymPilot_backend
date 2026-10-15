@@ -195,6 +195,12 @@ function settingsPayload(current) {
   });
   return {
     member_scan_out: current.memberScanOut,
+    // Who the desk turns away instead of letting in with a warning.
+    refuse_entry: {
+      expired: current.refuseEntry.expired,
+      unpaid: current.refuseEntry.unpaid,
+      no_package: current.refuseEntry.noPackage
+    },
     voice: voiceOut(current.voice),
     voice_defaults: voiceOut(VOICE_DEFAULTS)
   };
@@ -382,6 +388,7 @@ module.exports = {
   // -------------------------------------------------------------------------
   // GET /api/attendance/settings
   // PUT /api/attendance/settings   { memberScanOut?: boolean,
+  //                                  refuseEntry?: { expired?, unpaid?, noPackage? },
   //                                  voice?: { enabled?, expiredMessage?,
   //                                            expiringMessage?, balanceDueMessage? } }
   //
@@ -412,6 +419,19 @@ module.exports = {
         said.push(body.memberScanOut ? 'Members now scan in and out.' : 'Members now scan in only.');
       }
 
+      if (body.refuseEntry !== undefined) {
+        const rules = body.refuseEntry;
+        if (!rules || typeof rules !== 'object' || Array.isArray(rules)) return fail(res, 400, 'refuseEntry must be an object.');
+        let changed = false;
+        for (const key of ['expired', 'unpaid', 'noPackage']) {
+          if (rules[key] === undefined) continue;
+          if (typeof rules[key] !== 'boolean') return fail(res, 400, `refuseEntry.${key} must be true or false.`);
+          set[`attendance.refuseEntry.${key}`] = rules[key];
+          changed = true;
+        }
+        if (changed) said.push('Entry rules saved.');
+      }
+
       if (body.voice !== undefined) {
         const voice = readVoice(body.voice);
         if (voice.error) return fail(res, 400, voice.error);
@@ -420,7 +440,7 @@ module.exports = {
       }
 
       if (!Object.keys(set).length) {
-        return fail(res, 400, 'Nothing to change: send memberScanOut (true or false) or voice.');
+        return fail(res, 400, 'Nothing to change: send memberScanOut (true or false), refuseEntry or voice.');
       }
 
       // getSettings() creates the gym's settings row if it has none yet.

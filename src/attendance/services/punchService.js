@@ -45,10 +45,13 @@ function operatorLabel(user) {
   return [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.email;
 }
 
-function punchContext(operator, device, method, requestId) {
+function punchContext(operator, device, method, requestId, offline) {
   return {
     // Only when the desk sent one (see repeatedPunch).
     ...(requestId ? { requestId } : {}),
+    // A scan the desk queued while it had no connection and sent later, at
+    // the time it was scanned (see readScannedAt).
+    ...(offline ? { offline: true } : {}),
     by: operator._id,
     byName: operatorLabel(operator),
     device: device.deviceLabel || '',
@@ -489,7 +492,19 @@ async function attendanceSettings() {
   const attendance = (settings && settings.attendance) || {};
   return {
     memberScanOut: attendance.memberScanOut !== false,
+    refuseEntry: refuseEntrySettings(attendance.refuseEntry),
     voice: voiceSettings(attendance.voice)
+  };
+}
+
+// Who the gym turns away at the door (Settings attendance.refuseEntry). Each
+// is off unless the gym has switched it on: the desk warns, and lets them in.
+function refuseEntrySettings(stored) {
+  const rules = stored || {};
+  return {
+    expired: rules.expired === true,
+    unpaid: rules.unpaid === true,
+    noPackage: rules.noPackage === true
   };
 }
 
@@ -596,7 +611,146 @@ async function repeatedPunch(requestId, { personType, personIds, person, now, se
   };
 }
 
-async function recordPunch({ personType, personId, operator, device, method = 'fingerprint', requestId }) {
+// ---------------------------------------------------------------------------
+// A scan sent late
+//
+// The Windows desk keeps matching fingers while its connection is down and
+// queues each punch on disk, then sends them oldest-first when it is back.
+// Each one carries `scanned_at`, the moment the finger was on the reader, and
+// that is the punch's time -- otherwise a morning's queue sent at noon would
+// all check in at noon, and the second scan of each person would be taken for
+// a check-out a second later. Only a staff desk may send it (the controller
+// refuses it from a web kiosk), only with a request_id (so a queue sent twice
+// records once), and only inside a window: not more than a few minutes ahead
+// of this server's clock, and not older than OFFLINE_MAX_HOURS.
+// ---------------------------------------------------------------------------
+
+const OFFLINE_MAX_HOURS = Number(process.env.ATTENDANCE_OFFLINE_MAX_HOURS || 72);
+const CLOCK_SKEW_SECONDS = 120;
+
+/**
+ * The `scanned_at` a punch carries: undefined when it has none, otherwise
+ * { at } -- the time to record, never later than `now` -- or { error }, the
+ * reason it is refused.
+ */
+function readScannedAt(value, now = new Date()) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const at = typeof value === 'number' ? new Date(value) : new Date(String(value));
+  if (Number.isNaN(at.getTime())) {
+    return { error: 'scanned_at must be a date and time, e.g. 2026-10-15T09:30:00Z.' };
+  }
+  const ahead = at.getTime() - now.getTime();
+  if (ahead > CLOCK_SKEW_SECONDS * 1000) {
+    return { error: "scanned_at is in the future. Check the date and time on the desk PC." };
+  }
+  if (-ahead > OFFLINE_MAX_HOURS * 3600000) {
+    return {
+      error: `This scan is more than ${OFFLINE_MAX_HOURS} hours old, so it was not recorded. ` +
+        'Add the visit from the attendance page if it is needed.'
+    };
+  }
+  // A desk clock a little fast is this moment, not the future.
+  return { at: ahead > 0 ? now : at };
+}
+
+// ---------------------------------------------------------------------------
+// Turned away at the door
+//
+// A gym may refuse entry instead of warning (Settings attendance.refuseEntry):
+// to an expired membership, to money owing, to someone with no package at
+// all. A refused scan records nothing -- no visit, no time -- and answers
+// `success: false, refused: true` with the reason, so the desk and the kiosk
+// can say "Entry refused" in red with the problem sound. Only a check-in is
+// ever refused: someone already inside can always scan out.
+// ---------------------------------------------------------------------------
+
+// The member's membership as this scan finds it, with the verdict the desk
+// shows and the money owing. One read, shared by the refusal and the check-in.
+async function memberStanding(person) {
+  const membership = await membershipFor(person.record);
+  const verdict = membershipVerdict({ ...membership, autoRenews: await autoRenews(membership) });
+  const balanceDue = Number(membership.balanceDue ?? 0) > 0 ? Number(membership.balanceDue) : 0;
+  return {
+    verdict,
+    membership: {
+      orderId: membership.orderId,
+      packageName: membership.packageName,
+      endDate: membership.endDate,
+      status: membership.status,
+      // Kept so the check-out, the office and the day's board can tell a
+      // membership starting later from one waiting on its money.
+      startsOn: membership.startsOn || null,
+      balanceDue,
+      // The order's own currency; the gym's only when the order names none
+      // and there is money to put a currency on.
+      currency: membership.currency || (balanceDue > 0 ? await defaultCurrency() : '')
+    },
+    daysLeft: daysLeftOf(membership)
+  };
+}
+
+// Why this member is refused under the gym's rules, or null to let them in.
+// `reason` is the machine key; `text` is what the desk reads out.
+function entryRefusal(standing, rules) {
+  if (!standing || !rules) return null;
+  const status = standing.verdict.status;
+
+  if (rules.noPackage && status === 'membership_none') {
+    return { reason: 'no_package', text: 'No active membership' };
+  }
+  if (rules.expired) {
+    if (status === 'membership_expired') return { reason: 'expired', text: 'Membership expired' };
+    // Cancelled with nothing left to run: as over as expired.
+    if (status === 'membership_cancelled' && !(standing.daysLeft > 0)) {
+      return { reason: 'expired', text: 'Membership cancelled and ended' };
+    }
+  }
+  if (rules.unpaid) {
+    if (status === 'membership_past_due') return { reason: 'unpaid', text: 'Card payment failed' };
+    if (standing.membership.balanceDue > 0) {
+      return { reason: 'unpaid', text: `Balance due ${moneyLabel(standing.membership.balanceDue, standing.membership.currency)}` };
+    }
+  }
+  return null;
+}
+
+// Rows that describe a visit; a refused scan has none.
+const VISIT_ROWS = new Set(['Check in', 'Check out', 'Visit', 'Duration', 'Recorded by']);
+
+// The answer to a refused scan: who it was and why, on the same receipt the
+// desk shows for a punch, with nothing saved.
+async function refusedEntry({ person, standing, refusal, at, voice }) {
+  const record = new Attendance({
+    personType: 'member',
+    personId: person.id,
+    personName: person.name,
+    personCode: person.code,
+    shiftDate: T.dateKey(at),
+    membership: standing.membership,
+    status: standing.verdict.status,
+    statusLabel: standing.verdict.label
+  });
+
+  const detail = await buildReceipt(record, 'refused', person);
+  detail.rows = detail.rows.filter((r) => !VISIT_ROWS.has(r.caption));
+  detail.refused = true;
+  detail.refusal_reason = refusal.reason;
+  detail.warning = `ENTRY REFUSED — ${refusal.text}`;
+  // Always the problem sound, with whichever of the gym's words fits.
+  const alert = memberAlert(record, voice);
+  detail.alert = { level: 'problem', speech: alert ? alert.speech : null };
+
+  return {
+    success: false,
+    refused: true,
+    reason: refusal.reason,
+    message: `Entry refused — ${refusal.text}.`,
+    detail,
+    person
+  };
+}
+
+async function recordPunch({ personType, personId, operator, device, method = 'fingerprint', requestId, scannedAt }) {
   const person = await resolvePerson(personType, personId);
   if (!person) {
     return {
@@ -605,8 +759,9 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     };
   }
 
-  const now = new Date();
-  const context = punchContext(operator, device, method, requestId);
+  // A queued scan is judged at the moment it was scanned (see readScannedAt).
+  const now = scannedAt || new Date();
+  const context = punchContext(operator, device, method, requestId, Boolean(scannedAt));
   // The gym's attendance settings, read at most once per scan and only by a
   // scan that needs them (see attendanceSettings).
   let settingsRead = null;
@@ -647,6 +802,19 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
 
     if (lastClosed && (now.getTime() - new Date(lastClosed.checkOutAt).getTime()) / 1000 < MIN_PUNCH_GAP_SECONDS) {
       return alreadyCheckedOut(lastClosed, person);
+    }
+  }
+
+  // ---- Refused at the door ----
+  // A member's scan that is about to open a visit -- none open, or a gym
+  // where members only scan in -- is checked against the gym's entry rules
+  // first, before anything (the old visit included) is touched.
+  let standing = null;
+  if (personType === 'member' && (!openRecord || !(await gymSettings()).memberScanOut)) {
+    standing = await memberStanding(person);
+    const refusal = entryRefusal(standing, (await gymSettings()).refuseEntry);
+    if (refusal) {
+      return refusedEntry({ person, standing, refusal, at: now, voice: (await gymSettings()).voice });
     }
   }
 
@@ -730,23 +898,9 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   });
 
   if (personType === 'member') {
-    const membership = await membershipFor(person.record);
-    const verdict = membershipVerdict({ ...membership, autoRenews: await autoRenews(membership) });
-
-    const balanceDue = Number(membership.balanceDue ?? 0) > 0 ? Number(membership.balanceDue) : 0;
-    record.membership = {
-      orderId: membership.orderId,
-      packageName: membership.packageName,
-      endDate: membership.endDate,
-      status: membership.status,
-      // Kept so the check-out, the office and the day's board can tell a
-      // membership starting later from one waiting on its money.
-      startsOn: membership.startsOn || null,
-      balanceDue,
-      // The order's own currency; the gym's only when the order names none
-      // and there is money to put a currency on.
-      currency: membership.currency || (balanceDue > 0 ? await defaultCurrency() : '')
-    };
+    // Read above, before the entry rules were asked (see memberStanding).
+    const { membership, verdict } = standing || (await memberStanding(person));
+    record.membership = membership;
     record.status = verdict.status;
     record.statusLabel = verdict.label;
   } else {
@@ -975,6 +1129,10 @@ function memberWarning(record) {
 module.exports = {
   recordPunch,
   readRequestId,
+  readScannedAt,
+  OFFLINE_MAX_HOURS,
+  entryRefusal,
+  refuseEntrySettings,
   MIN_PUNCH_GAP_SECONDS,
   OPEN_VISIT_HOURS,
   memberScanOut,

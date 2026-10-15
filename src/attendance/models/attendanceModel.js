@@ -35,7 +35,10 @@ const punchContextSchema = new mongoose.Schema(
     // The desk's own id for the punch that recorded this half of the visit,
     // when it sent one: the same id arriving again is that punch being sent
     // again, not a new one (punchService.repeatedPunch).
-    requestId: { type: String }
+    requestId: { type: String },
+    // Scanned while the desk had no connection, queued on that PC and sent
+    // later under the time it was scanned (punchService.readScannedAt).
+    offline: { type: Boolean }
   },
   { _id: false }
 );

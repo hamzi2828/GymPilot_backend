@@ -17,10 +17,10 @@ const Fingerprint = require('../models/fingerprintModel');
 const Attendance = require('../models/attendanceModel');
 const AttendanceLog = require('../models/attendanceLogModel');
 
-const { deviceContext, issueStaffUnlock } = require('../middleware/desktopAuth');
+const { deviceContext, issueStaffUnlock, isKioskToken } = require('../middleware/desktopAuth');
 const { listPeople, resolvePerson, activePersonKeys, trainerProfilesOf } = require('../services/peopleDirectory');
 const { currentPalette } = require('../services/deskTheme');
-const { recordPunch, readRequestId, currentVerdict } = require('../services/punchService');
+const { recordPunch, readRequestId, readScannedAt, currentVerdict } = require('../services/punchService');
 const { openVisitExpr, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 const T = require('../services/timeUtils');
 const { verifyQrToken } = require('../services/qrToken');
@@ -107,6 +107,42 @@ function sessionPayload(user) {
   };
 }
 
+// Everything a successful sign-in does once the account is known to be
+// allowed: a new desktop token, the account's lastLogin, the audit row --
+// and the body the app reads. Shared with the admin panel's link code
+// (platform/controllers/deskLinkController.js), so a desk linked with a code
+// is signed in exactly as one that typed a password. Must run in the gym's
+// tenant context. `extra` is merged into the audit row (its meta, say).
+async function openDeskSession(user, device, extra = {}) {
+  const { token, expiresAt } = await DesktopToken.issue(user._id, device);
+
+  user.lastLogin = new Date();
+  await user.save();
+
+  AttendanceLog.record({
+    event: 'login',
+    userId: user._id,
+    userName: sessionPayload(user).name,
+    userEmail: user.email,
+    success: true,
+    device: device.deviceLabel,
+    osUser: device.osUser,
+    clientApp: device.clientApp,
+    ip: device.ip,
+    ...extra
+  });
+
+  return {
+    success: true,
+    token,
+    theme: await currentPalette(),
+    // The app parses this with DateTime.Parse, so it must be an
+    // unambiguous absolute instant.
+    expires_at: expiresAt.toISOString(),
+    user: sessionPayload(user)
+  };
+}
+
 module.exports = {
   // POST /api/desktop/theme
   //
@@ -179,32 +215,7 @@ module.exports = {
 
       clearFailures(key);
 
-      const { token, expiresAt } = await DesktopToken.issue(user._id, device);
-
-      user.lastLogin = new Date();
-      await user.save();
-
-      AttendanceLog.record({
-        event: 'login',
-        userId: user._id,
-        userName: sessionPayload(user).name,
-        userEmail: user.email,
-        success: true,
-        device: device.deviceLabel,
-        osUser: device.osUser,
-        clientApp: device.clientApp,
-        ip: device.ip
-      });
-
-      return res.json({
-        success: true,
-        token,
-        theme: await currentPalette(),
-        // The app parses this with DateTime.Parse, so it must be an
-        // unambiguous absolute instant.
-        expires_at: expiresAt.toISOString(),
-        user: sessionPayload(user)
-      });
+      return res.json(await openDeskSession(user, device));
     } catch (err) {
       console.error('[attendance] login failed:', err);
       return res.status(500).json({ success: false, message: 'Sign in failed. Try again.' });
@@ -510,13 +521,34 @@ module.exports = {
         });
       }
 
+      // Optional: when a punch the desk queued while offline was scanned
+      // (punchService.readScannedAt). The Windows desk's alone -- a web
+      // kiosk has no queue, and a member at one must not be able to file a
+      // visit at a time of their choosing -- and only with a request_id, so
+      // a queue sent twice is recorded once.
+      let scannedAt;
+      if (body.scanned_at !== undefined && body.scanned_at !== null && body.scanned_at !== '') {
+        if (isKioskToken(req.desktopToken)) {
+          return res.status(400).json({ success: false, message: 'The web kiosk cannot send scanned_at.' });
+        }
+        if (!requestId) {
+          return res.status(400).json({ success: false, message: 'A punch with scanned_at needs a request_id.' });
+        }
+        const read = readScannedAt(body.scanned_at);
+        if (read.error) {
+          return res.status(400).json({ success: false, code: 'SCAN_TIME_REFUSED', message: read.error });
+        }
+        scannedAt = read.at;
+      }
+
       const result = await recordPunch({
         personType,
         personId,
         operator: req.desktopUser,
         device: req.deviceContext,
         method,
-        requestId
+        requestId,
+        scannedAt
       });
 
       AttendanceLog.record({
@@ -536,7 +568,13 @@ module.exports = {
         clientApp: req.deviceContext.clientApp,
         ip: req.deviceContext.ip,
         meta: result.detail
-          ? { status: result.detail.status, ...(requestId ? { requestId } : {}), ...(result.repeated ? { repeated: true } : {}) }
+          ? {
+              status: result.detail.status,
+              ...(requestId ? { requestId } : {}),
+              ...(result.repeated ? { repeated: true } : {}),
+              ...(result.refused ? { refused: result.reason } : {}),
+              ...(scannedAt ? { scannedAt } : {})
+            }
           : null
       });
 
@@ -548,7 +586,9 @@ module.exports = {
         success: result.success,
         message: result.message,
         detail: result.detail || null,
-        ...(result.repeated ? { repeated: true } : {})
+        ...(result.repeated ? { repeated: true } : {}),
+        // Turned away under the gym's entry rules: nothing was recorded.
+        ...(result.refused ? { refused: true, code: 'ENTRY_REFUSED', reason: result.reason } : {})
       });
     } catch (err) {
       console.error('[attendance] punch failed:', err);
@@ -752,3 +792,6 @@ module.exports = {
     }
   }
 };
+
+// For the admin panel's link code (platform/controllers/deskLinkController.js).
+module.exports.openDeskSession = openDeskSession;
