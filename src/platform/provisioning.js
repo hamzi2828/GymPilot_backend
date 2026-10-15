@@ -638,6 +638,8 @@ async function connectDomainsToWebsite(hosts, { platformHost = null, vercel = re
   if (!remote.length) return warnings;
 
   if (!vercel.configured()) {
+    // Said in the log too: a self-serve sign-up has nobody watching the panel.
+    console.warn(`[platform] VERCEL_TOKEN / VERCEL_PROJECT_ID not set: ${remote.join(', ')} not added to the website's Vercel project`);
     const custom = remote.filter((host) => host !== platformHost);
     if (custom.length) {
       warnings.push(`The website host is not connected on the API (VERCEL_TOKEN / VERCEL_PROJECT_ID), so ${custom.join(', ')} ${custom.length === 1 ? 'was' : 'were'} not added to it. Add ${custom.length === 1 ? 'it' : 'them'} to the website's Vercel project by hand.`);

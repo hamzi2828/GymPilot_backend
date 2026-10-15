@@ -127,11 +127,21 @@ module.exports = {
       const plan = await PlatformPlan.findById(req.params.id);
       if (!plan) return res.status(404).json({ success: false, message: 'Plan not found' });
 
+      // What the price was, so the trail says what a change did.
+      const priceOf = (p) => ({ monthly: p.price.monthly, yearly: p.price.yearly, currency: p.price.currency });
+      const oldPrice = priceOf(plan);
       applyBody(plan, req.body || {});
       if (!plan.name) return res.status(400).json({ success: false, message: 'Plan name cannot be empty' });
       await plan.save();
+      const newPrice = priceOf(plan);
+      const priceChanged = JSON.stringify(oldPrice) !== JSON.stringify(newPrice);
 
-      PlatformAuditLog.record({ actorId: req.superAdmin._id, actorEmail: req.superAdmin.email, action: 'plan_updated', meta: { slug: plan.slug } });
+      PlatformAuditLog.record({
+        actorId: req.superAdmin._id,
+        actorEmail: req.superAdmin.email,
+        action: 'plan_updated',
+        meta: { slug: plan.slug, ...(priceChanged ? { oldPrice, newPrice } : {}) }
+      });
       invalidatePlanCache();
 
       const [withCount] = await withGymCounts([plan.toObject()]);

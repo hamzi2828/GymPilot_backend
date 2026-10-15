@@ -20,14 +20,33 @@ const superAdminSchema = new mongoose.Schema(
     // (middleware/platformAuth.js).
     tokenVersion: { type: Number, default: 0 },
 
-    // Emailed six-digit code at sign-in, per account.
+    // A second step at sign-in, per account: a six-digit code emailed each
+    // time, or one from an authenticator app (platform/totp.js).
     twoFactor: {
       enabled: { type: Boolean, default: false },
+      method: { type: String, enum: ['email', 'totp'], default: 'email' },
       pending: {
         challengeId: { type: String, default: null, index: true },
         codeHash: { type: String, default: null, select: false },
         expiresAt: { type: Date, default: null },
         attempts: { type: Number, default: 0 }
+      },
+      // The authenticator app. Secrets are sealed (services/secretBox.js);
+      // backup codes are kept as hashes only and shown once.
+      totp: {
+        secret: { type: String, default: null, select: false },
+        // Set up but not yet confirmed with a code: not used for sign-in.
+        pendingSecret: { type: String, default: null, select: false },
+        pendingExpiresAt: { type: Date, default: null },
+        // The last time step a code was accepted for; never accepted twice.
+        lastStep: { type: Number, default: -1 },
+        backupCodes: { type: [String], default: [], select: false },
+        backupCodesRemaining: { type: Number, default: 0 },
+        enabledAt: { type: Date, default: null },
+        // Wrong codes across sign-ins, so a fresh challenge per password
+        // does not mean a fresh allowance of guesses.
+        failures: { type: Number, default: 0 },
+        lockedUntil: { type: Date, default: null }
       }
     },
 

@@ -13,6 +13,7 @@ const { warmPlatformModels } = require('../models');
 const { platformDatabaseName, tenantDatabasePrefix } = require('../dbNames');
 
 const authController = require('../controllers/platformAuthController');
+const twoFactorAppController = require('../controllers/platformTwoFactorController');
 const gymsController = require('../controllers/gymsController');
 const plansController = require('../controllers/plansController');
 const addonsController = require('../controllers/addonsController');
@@ -33,6 +34,11 @@ router.post('/auth/reset-password', passwordResetConfirmLimiter, authController.
 router.get('/auth/me', platformAuth, authController.me);
 router.put('/auth/password', platformAuth, authController.changePassword);
 router.put('/auth/two-factor', platformAuth, authController.setTwoFactor);
+// Authenticator app: limited like the sign-in code step, since enable and
+// disable take a code too.
+router.post('/auth/two-factor/app/setup', platformAuth, twoFactorAppController.setup);
+router.post('/auth/two-factor/app/enable', twoFactorLimiter, platformAuth, twoFactorAppController.enable);
+router.post('/auth/two-factor/app/disable', twoFactorLimiter, platformAuth, twoFactorAppController.disable);
 router.post('/auth/logout', platformAuth, authController.logout);
 
 // Public: what the marketing site (GymPilot_marketing) reads and posts.

@@ -163,7 +163,7 @@ module.exports = {
         plan: g.plan && g.plan.name ? g.plan.name : null,
         currentPeriodEnd: g.subscription && g.subscription.currentPeriodEnd
       });
-      const [renewing, pastDue, suspendedGyms, newRequests] = await Promise.all([
+      const [renewing, pastDue, suspendedGyms, newRequests, firstPlan] = await Promise.all([
         Gym.find({ status: 'active', 'subscription.status': { $in: ['trialing', 'active'] }, 'subscription.currentPeriodEnd': { $ne: null, $gte: now, $lte: in30 } })
           .sort({ 'subscription.currentPeriodEnd': 1 })
           .limit(10)
@@ -171,7 +171,9 @@ module.exports = {
           .lean(),
         Gym.find({ status: 'active', 'subscription.status': { $in: ['past_due', 'expired'] } }).sort({ 'subscription.currentPeriodEnd': 1 }).limit(10).populate('plan', 'name').lean(),
         Gym.find({ status: 'suspended' }).sort({ updatedAt: -1 }).limit(10).populate('plan', 'name').lean(),
-        DemoRequest.countDocuments({ status: 'new' })
+        DemoRequest.countDocuments({ status: 'new' }),
+        // What the platform sells in, so an empty MRR reads "Rs 0", not "$0".
+        PlatformPlan.findOne({ isActive: true }).sort({ order: 1, createdAt: 1 }).select('price.currency').lean()
       ]);
 
       return res.json({
@@ -181,6 +183,7 @@ module.exports = {
           subscriptions,
           expiring_within_30_days: expiringSoon,
           mrr: mrrRows.map((row) => ({ currency: row._id, amount: Math.round(row.mrr * 100) / 100, gyms: row.gyms })),
+          currency: (firstPlan && firstPlan.price && firstPlan.price.currency) || 'PKR',
           attention: { renewing: renewing.map(brief), past_due: pastDue.map(brief), suspended: suspendedGyms.map(brief) },
           demo_requests_new: newRequests
         }

@@ -1,7 +1,8 @@
 // src/platform/controllers/platformAuthController.js
 //
-// Signing in to the platform panel, with an optional emailed second step,
-// and the forgotten-password flow. Platform email goes through the
+// Signing in to the platform panel, with an optional second step -- a code
+// emailed each time, or one from an authenticator app
+// (platformTwoFactorController.js) -- and the forgotten-password flow. Platform email goes through the
 // environment's SMTP settings: there is no gym in context here.
 
 const bcrypt = require('bcryptjs');
@@ -13,6 +14,7 @@ const { sendEmail } = require('../../services/emailService');
 const { passwordMatches } = require('../../services/passwordCheck');
 const { shell, paragraph, button, escapeHtml } = require('../../templates/gymEmails');
 const { localFallback } = require('../tenantContext');
+const twoFactorApp = require('./platformTwoFactorController');
 
 const MIN_PASSWORD_LENGTH = 10;
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -26,7 +28,10 @@ function publicAdmin(admin) {
     name: admin.name || '',
     email: admin.email,
     last_login: admin.lastLogin || null,
-    two_factor: !!(admin.twoFactor && admin.twoFactor.enabled)
+    two_factor: !!(admin.twoFactor && admin.twoFactor.enabled),
+    // 'email' or 'app' while two_factor is on; null when it is off.
+    two_factor_method: admin.twoFactor && admin.twoFactor.enabled ? (admin.twoFactor.method === 'totp' ? 'app' : 'email') : null,
+    backup_codes_left: twoFactorApp.usesApp(admin) ? Number(admin.twoFactor.totp && admin.twoFactor.totp.backupCodesRemaining) || 0 : null
   };
 }
 
@@ -99,7 +104,23 @@ module.exports = {
       // taken does not say which do (services/passwordCheck.js).
       const matches = await passwordMatches(password, admin && admin.password);
       if (!admin || !admin.isActive || !matches) {
+        // For the owner to see who has been trying; never shown to the caller.
+        PlatformAuditLog.record({
+          actorId: admin ? admin._id : null,
+          actorEmail: String(email).toLowerCase().trim().slice(0, 200),
+          action: 'login_failed',
+          ip: clientIp(req),
+          meta: { reason: !admin ? 'unknown_account' : !admin.isActive ? 'inactive' : 'wrong_password' }
+        });
         return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+
+      if (twoFactorApp.usesApp(admin)) {
+        // Nothing to send: the code is on the admin's phone.
+        const challengeId = crypto.randomBytes(16).toString('hex');
+        admin.twoFactor.pending = { challengeId, codeHash: null, expiresAt: new Date(Date.now() + CODE_TTL_MS), attempts: 0 };
+        await admin.save();
+        return res.json({ success: true, requires2fa: true, method: 'app', challengeId, message: 'Enter the 6-digit code from your authenticator app, or one of your backup codes.' });
       }
 
       if (admin.twoFactor && admin.twoFactor.enabled) {
@@ -107,7 +128,7 @@ module.exports = {
         if (!challenge.emailed) {
           return res.status(503).json({ success: false, message: 'Could not email your sign-in code. Check the platform SMTP settings.', error: challenge.error });
         }
-        return res.json({ success: true, requires2fa: true, challengeId: challenge.challengeId, message: `We emailed a 6-digit code to ${maskEmail(admin.email)}.` });
+        return res.json({ success: true, requires2fa: true, method: 'email', challengeId: challenge.challengeId, message: `We emailed a 6-digit code to ${maskEmail(admin.email)}.` });
       }
 
       admin.lastLogin = new Date();
@@ -126,15 +147,37 @@ module.exports = {
     try {
       const { challengeId, code } = req.body || {};
       const clean = String(code || '').replace(/\D/g, '');
-      if (!challengeId || clean.length !== 6) return res.status(400).json({ success: false, message: 'Enter the 6-digit code from your email' });
+      if (!challengeId || !code) return res.status(400).json({ success: false, message: 'Enter the 6-digit code' });
 
-      const admin = await SuperAdmin.findOne({ 'twoFactor.pending.challengeId': String(challengeId) }).select('+twoFactor.pending.codeHash');
+      const admin = await SuperAdmin.findOne({ 'twoFactor.pending.challengeId': String(challengeId) }).select(`+twoFactor.pending.codeHash ${twoFactorApp.SECRET_FIELDS}`);
       const pending = admin && admin.twoFactor && admin.twoFactor.pending;
-      if (!admin || !pending || !pending.codeHash) return res.status(401).json({ success: false, message: 'This sign-in has expired. Please sign in again.' });
+      // An app challenge carries no code of its own; an emailed one must.
+      const app = twoFactorApp.usesApp(admin);
+      if (!admin || !pending || !pending.challengeId || (!app && !pending.codeHash)) {
+        return res.status(401).json({ success: false, message: 'This sign-in has expired. Please sign in again.' });
+      }
+      if (!app && clean.length !== 6) return res.status(400).json({ success: false, message: 'Enter the 6-digit code from your email' });
 
       const expired = !pending.expiresAt || new Date(pending.expiresAt) < new Date();
-      const matches = crypto.timingSafeEqual(Buffer.from(pending.codeHash), Buffer.from(hashCode(challengeId, clean)));
+      let check = null;
+      let matches = false;
+      if (app) {
+        // An app code or a backup code, its wrong guesses counted against
+        // the account as well as this challenge.
+        if (!expired) check = await twoFactorApp.verifyAppCode(admin, code);
+        matches = !!(check && check.ok);
+      } else {
+        matches = crypto.timingSafeEqual(Buffer.from(pending.codeHash), Buffer.from(hashCode(challengeId, clean)));
+      }
       if (expired || !matches) {
+        if (!expired) {
+          PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: 'login_failed', ip: clientIp(req), meta: { reason: 'wrong_code', method: app ? 'app' : 'email' } });
+        }
+        if (check && check.locked) {
+          admin.twoFactor.pending = null;
+          await admin.save();
+          return res.status(429).json({ success: false, message: check.message });
+        }
         if (expired || pending.attempts + 1 >= MAX_ATTEMPTS) {
           admin.twoFactor.pending = null;
           await admin.save();
@@ -148,7 +191,13 @@ module.exports = {
       admin.twoFactor.pending = null;
       admin.lastLogin = new Date();
       await admin.save();
-      PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: 'login', ip: clientIp(req), meta: { twoFactor: true } });
+      PlatformAuditLog.record({
+        actorId: admin._id,
+        actorEmail: admin.email,
+        action: 'login',
+        ip: clientIp(req),
+        meta: { twoFactor: true, method: app ? 'app' : 'email', ...(check && check.backupCode ? { backupCode: true, backupCodesLeft: check.remaining } : {}) }
+      });
 
       return res.json({ success: true, token: signPlatformToken(admin), admin: publicAdmin(admin) });
     } catch (error) {
@@ -161,6 +210,11 @@ module.exports = {
   setTwoFactor: async (req, res) => {
     try {
       const enabled = !!(req.body && (req.body.enabled === true || req.body.enabled === 'true'));
+      // The app is turned off only with the password and a code
+      // (two-factor/app/disable), never by this switch.
+      if (twoFactorApp.usesApp(req.superAdmin)) {
+        return res.status(409).json({ success: false, code: 'APP_TWO_FACTOR', message: 'Sign-in uses your authenticator app. Turn that off first (it needs your password and a code).' });
+      }
       if (enabled) {
         const { verifyConnection } = require('../../services/emailService');
         const smtp = await verifyConnection();
@@ -169,8 +223,9 @@ module.exports = {
       const admin = await SuperAdmin.findById(req.superAdmin._id);
       admin.twoFactor = admin.twoFactor || {};
       admin.twoFactor.enabled = enabled;
+      admin.twoFactor.method = 'email';
       await admin.save();
-      PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: enabled ? 'two_factor_enabled' : 'two_factor_disabled', ip: clientIp(req) });
+      PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: enabled ? 'two_factor_enabled' : 'two_factor_disabled', ip: clientIp(req), meta: { method: 'email' } });
       return res.json({ success: true, admin: publicAdmin(admin) });
     } catch (error) {
       console.error('[platform] set 2fa failed:', error);
@@ -272,6 +327,7 @@ module.exports = {
         // 400, not 401: the session is fine, it is the form that is wrong.
         // The panel treats a 401 as "signed out" and would send the admin
         // to the sign-in page for a typo.
+        if (admin) PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: 'password_change_failed', ip: clientIp(req), meta: { reason: 'wrong_password' } });
         return res.status(400).json({ success: false, code: 'WRONG_PASSWORD', message: 'The current password is not right. Nothing was changed.' });
       }
 
@@ -308,5 +364,7 @@ module.exports = {
   },
 
   // exported for tests
-  panelOrigin
+  panelOrigin,
+  // for platformTwoFactorController
+  publicAdmin
 };
