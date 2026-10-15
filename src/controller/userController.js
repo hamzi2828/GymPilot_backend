@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { sendEmail } = require('../services/emailService');
 const { frontendOrigin: tenantOrigin, currentTenantId, currentTenantSlug } = require('../platform/tenantContext');
 const { checkLimit } = require('../platform/planLimits');
-const { forgetSession } = require('../middleware/auth');
+const { forgetSession, newSessionId } = require('../middleware/auth');
 const { publicUserView } = require('../services/userView');
 const guards = require('../services/roleGuards');
 const { actorAccess, permissionsFor } = require('../services/roleService');
@@ -805,7 +805,7 @@ const userController = {
                 role: user.role,
                 tid: currentTenantId(),
                 tv: user.tokenVersion || 0,
-            }, secret, { expiresIn: SESSION_TTL });
+            }, secret, { expiresIn: SESSION_TTL, jwtid: newSessionId() });
 
             user.lastLogin = new Date();
             await user.save();
@@ -910,7 +910,7 @@ const userController = {
                 return res.status(500).json({ message: 'Server misconfiguration: missing JWT secret' });
             }
 
-            const token = jwt.sign(payload, secret, { expiresIn: remember ? REMEMBERED_SESSION_TTL : SESSION_TTL });
+            const token = jwt.sign(payload, secret, { expiresIn: remember ? REMEMBERED_SESSION_TTL : SESSION_TTL, jwtid: newSessionId() });
 
             // Update lastLogin timestamp
             user.lastLogin = new Date();
@@ -1164,7 +1164,7 @@ const userController = {
             if (!secret) {
                 return res.status(500).json({ message: 'Server misconfiguration: missing JWT secret' });
             }
-            const token = jwt.sign(payloadJwt, secret, { expiresIn: SESSION_TTL });
+            const token = jwt.sign(payloadJwt, secret, { expiresIn: SESSION_TTL, jwtid: newSessionId() });
 
             user.lastLogin = new Date();
             await user.save();

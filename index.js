@@ -46,13 +46,26 @@ const accountsRoutes = require('./src/accounts/routes/accountsRoutes');
 //     Every product photo, trainer portrait and hero slide on the site is
 //     served from there.
 //
-//   contentSecurityPolicy — disabled globally because this server returns JSON
-//     and images, not HTML, so a page-level CSP has nothing to protect here.
-//     A targeted one IS applied to /uploads below, where it does real work.
+//   contentSecurityPolicy — helmet's default is written for a website (and its
+//     form-action 'self' would stop the "confirm your email" button, whose
+//     answer redirects to the gym's own site). This server returns JSON, files
+//     and two plain pages (services/emailVerification.js: inline styles, one
+//     form, no script), so it gets the narrowest policy those still render
+//     under: nothing loads, nothing runs, nothing frames it. form-action is
+//     left unset (it does not fall back to default-src). /uploads replaces
+//     this with its own sandboxing policy below.
 // ---------------------------------------------------------------------------
 app.use(
   helmet({
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        defaultSrc: ["'none'"],
+        styleSrc: ["'unsafe-inline'"],
+        baseUri: ["'none'"],
+        frameAncestors: ["'none'"]
+      }
+    },
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     crossOriginEmbedderPolicy: false
   })

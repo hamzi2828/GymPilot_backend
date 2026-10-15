@@ -20,7 +20,7 @@ const MemberDirectory = require('../platform/models/memberDirectoryModel');
 const { runWithTenant, tenantContextFor } = require('../platform/tenantContext');
 const { branding } = require('../services/branding');
 const { isExpoPushToken } = require('../services/messaging');
-const { MEMBER_APP_CLAIM } = require('../middleware/auth');
+const { MEMBER_APP_CLAIM, newSessionId } = require('../middleware/auth');
 const { passwordMatches } = require('../services/passwordCheck');
 const signInLock = require('../services/signInLock');
 
@@ -115,7 +115,7 @@ function issueToken(user, gym) {
       app: MEMBER_APP_CLAIM
     },
     secret,
-    { expiresIn: TOKEN_TTL }
+    { expiresIn: TOKEN_TTL, jwtid: newSessionId() }
   );
 }
 

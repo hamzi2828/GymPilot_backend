@@ -1,4 +1,5 @@
 // src/middleware/auth.js
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { tenantKey } = require('../platform/tenantContext');
 
@@ -7,8 +8,19 @@ const { tenantKey } = require('../platform/tenantContext');
 // trip on every single request. Keyed per gym: the same id can never mean
 // two people, but the cache must still never cross databases.
 const SESSION_TTL_MS = 30 * 1000;
-const sessions = new Map(); // `${tenant}:${userId}` -> { at, tokenVersion, isActive }
+const sessions = new Map(); // `${tenant}:${userId}` -> { at, tokenVersion, isActive, revoked }
 const MAX_SESSIONS = 5000;
+
+// The `jti`s of this account's signed-out sessions that have not expired yet
+// (an expired token is refused by jwt.verify before this matters).
+function revokedSet(entries) {
+  const now = Date.now();
+  const set = new Set();
+  for (const entry of entries || []) {
+    if (entry && entry.jti && (!entry.exp || new Date(entry.exp).getTime() > now)) set.add(String(entry.jti));
+  }
+  return set;
+}
 
 async function sessionState(userId) {
   const key = `${tenantKey()}:${userId}`;
@@ -16,14 +28,24 @@ async function sessionState(userId) {
   if (hit && Date.now() - hit.at < SESSION_TTL_MS) return hit;
 
   const User = require('../models/user');
-  const account = await User.findById(userId).select('tokenVersion isActive').lean();
+  // Signed-out sessions ride along on the same read: no second query.
+  const account = await User.findById(userId).select('tokenVersion isActive +revokedSessions').lean();
   const state = account
-    ? { at: Date.now(), exists: true, tokenVersion: account.tokenVersion || 0, isActive: account.isActive !== false }
-    : { at: Date.now(), exists: false, tokenVersion: 0, isActive: false };
+    ? { at: Date.now(), exists: true, tokenVersion: account.tokenVersion || 0, isActive: account.isActive !== false, revoked: revokedSet(account.revokedSessions) }
+    : { at: Date.now(), exists: false, tokenVersion: 0, isActive: false, revoked: new Set() };
 
   if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
   sessions.set(key, state);
   return state;
+}
+
+/**
+ * A fresh session id for a token being issued, passed to jwt.sign as
+ * `jwtid` (the `jti` claim). It is what lets one session be signed out
+ * without ending the account's others.
+ */
+function newSessionId() {
+  return crypto.randomUUID();
 }
 
 /** Drops the cached state for one account, e.g. right after a revocation. */
@@ -41,7 +63,9 @@ function forgetGymSessions() {
  * Why this decoded token may no longer be used, or null when it may.
  * Tokens issued before `tv` existed count as version 0. A token that names
  * no account is nobody's session: there is nothing to check it against, so
- * it is refused rather than waved through.
+ * it is refused rather than waved through. A token signed out on its own
+ * (POST /user/logout) is refused by its `jti`; one issued before tokens
+ * carried a `jti` has none to match and runs until it expires.
  */
 async function sessionProblem(decoded) {
   if (!decoded || !decoded.id) return 'Invalid or expired token';
@@ -49,6 +73,7 @@ async function sessionProblem(decoded) {
   if (!state.exists) return 'Account no longer exists';
   if (!state.isActive) return 'This account has been deactivated.';
   if ((decoded.tv || 0) !== state.tokenVersion) return 'Your session has ended. Please sign in again.';
+  if (decoded.jti && state.revoked && state.revoked.has(String(decoded.jti))) return 'Your session has ended. Please sign in again.';
   return null;
 }
 
@@ -122,7 +147,8 @@ async function memberAppRefusal(decoded, req) {
 //   TOKEN_INVALID     unreadable, expired, or not a gym account's token
 //   TOKEN_WRONG_GYM   issued by a different gym than the one asked for
 //   SESSION_ENDED     the account was deactivated, deleted, or signed out
-//                     everywhere (tokenVersion bumped)
+//                     everywhere (tokenVersion bumped), or this one
+//                     session was signed out (its jti revoked)
 //
 // And one 403 that keeps the session: MEMBER_APP_NOT_INCLUDED, for a member
 // app token at a gym that no longer has the app (see memberAppRefusal).
@@ -174,6 +200,7 @@ module.exports = async function auth(req, res, next) {
 module.exports.tenantMismatch = tenantMismatch;
 module.exports.sessionProblem = sessionProblem;
 module.exports.forgetSession = forgetSession;
+module.exports.newSessionId = newSessionId;
 module.exports.forgetGymSessions = forgetGymSessions;
 module.exports.memberAppRefusal = memberAppRefusal;
 module.exports.MEMBER_APP_CLAIM = MEMBER_APP_CLAIM;

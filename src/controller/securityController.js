@@ -18,13 +18,18 @@ const twoFactor = require('../services/twoFactorService');
 const verification = require('../services/emailVerification');
 const { gymSiteName } = require('../services/gymName');
 const { currentTenantId, currentTenantSlug, frontendOrigin } = require('../platform/tenantContext');
-const { forgetSession } = require('../middleware/auth');
+const { forgetSession, newSessionId } = require('../middleware/auth');
 const { publicUserView } = require('../services/userView');
 const guards = require('../services/roleGuards');
 const { currentPasswordRefusal } = require('../services/passwordCheck');
 const { actorAccess, permissionsFor } = require('../services/roleService');
 
 const BIOMETRIC_CONSENT_VERSION = '2026-09';
+
+// Unexpired signed-out sessions kept per account. Far more than anyone signs
+// out within a token's lifetime; past it the oldest is dropped, which can
+// only revive a token its own owner already threw away.
+const MAX_REVOKED_SESSIONS = 200;
 
 /**
  * The same token loginUser issues, so a 2FA sign-in is no different
@@ -44,7 +49,7 @@ function issueToken(user, { remember = false } = {}) {
       tv: user.tokenVersion || 0
     },
     secret,
-    { expiresIn: remember ? '30d' : '7d' }
+    { expiresIn: remember ? '30d' : '7d', jwtid: newSessionId() }
   );
 }
 
@@ -220,6 +225,37 @@ module.exports = {
     } catch (error) {
       console.error('[security] vouching for an email failed:', error);
       return res.status(500).json({ message: 'Could not confirm the email address' });
+    }
+  },
+
+  // POST /user/logout -- ends the session this request was made with, and
+  // only that one: the token's `jti` joins the account's revokedSessions
+  // until the token would have expired anyway, and middleware/auth refuses
+  // it from then on. The same update drops entries whose tokens have since
+  // expired, so the list stays as short as the account's recent sign-outs.
+  //
+  // A token from before tokens carried a `jti` (or one with no expiry to
+  // keep the entry until) cannot be named on its own; signing it out ends
+  // the account's sessions the way logout-all does.
+  logout: async (req, res) => {
+    try {
+      const { id, jti, exp } = req.user || {};
+      if (!jti || !exp) {
+        await User.updateOne({ _id: id }, { $inc: { tokenVersion: 1 } });
+      } else {
+        const now = new Date();
+        // Kept exactly as long as the token itself would have worked.
+        const until = new Date(exp * 1000);
+        const live = { $filter: { input: { $ifNull: ['$revokedSessions', []] }, cond: { $gt: ['$$this.exp', now] } } };
+        await User.updateOne({ _id: id }, [
+          { $set: { revokedSessions: { $slice: [{ $concatArrays: [live, [{ jti: String(jti), exp: until }]] }, -MAX_REVOKED_SESSIONS] } } }
+        ]);
+      }
+      forgetSession(id);
+      return res.json({ success: true, message: 'Signed out.' });
+    } catch (error) {
+      console.error('[security] logout failed:', error);
+      return res.status(500).json({ message: 'Could not sign out' });
     }
   },
 

@@ -196,6 +196,17 @@ const userSchema = new mongoose.Schema({
     // the JWT as `tv` and compared by middleware/auth on each request.
     tokenVersion: { type: Number, default: 0 },
 
+    // Single sessions ended by signing out: the token's `jti` and when that
+    // token would have expired anyway. Read with tokenVersion by
+    // middleware/auth (so it costs no extra query) and pruned of expired
+    // entries on every sign-out (controller/securityController.js logout).
+    // No default: an account that has never signed out stores nothing.
+    revokedSessions: {
+      type: [{ _id: false, jti: String, exp: Date }],
+      default: undefined,
+      select: false
+    },
+
     // Password tries used in the window that ends at signInWindowEndsAt:
     // after ten wrong in a row the password is not checked again for
     // fifteen minutes (services/signInLock.js). No defaults, like the

@@ -62,6 +62,7 @@ router.get('/user/verify-email', emailVerifyLimiter, securityController.verifyEm
 router.post('/user/verify-email', emailVerifyLimiter, securityController.verifyEmail);
 router.post('/user/verify-email/send', auth, emailVerifySendLimiter, securityController.sendVerifyEmail);
 router.put('/user/two-factor', auth, securityController.setMyTwoFactor);
+router.post('/user/logout', auth, securityController.logout);
 router.post('/user/logout-all', auth, securityController.logoutAll);
 router.put('/user/consents', auth, securityController.setMyConsent);
 router.get('/user/export', auth, securityController.exportMyData);
