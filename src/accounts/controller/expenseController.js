@@ -13,8 +13,13 @@ const User = require('../../models/user');
 const L = require('../services/ledger');
 const categories = require('../services/categories');
 const T = require('../../attendance/services/timeUtils');
+const { parseAmount } = require('../../helper/money');
+const { EXPENSE_METHODS, expenseMethodLabel, readExpenseMethod } = require('../../services/paymentMethods');
 
-const METHODS = ['cash', 'bank_transfer', 'card', 'cheque', 'online', 'other'];
+// How a bill can be paid (services/paymentMethods.js): JazzCash and
+// Easypaisa as well as cash and the bank. An unknown method is refused, never
+// quietly filed as cash.
+const METHODS = EXPENSE_METHODS;
 const STATUSES = ['pending', 'paid', 'cancelled'];
 
 // EXP-202608-0007. Sequential within the month it is filed against, so the
@@ -51,6 +56,7 @@ function shape(expense, heads = null) {
     paid_label: expense.paidOn ? T.dateLabel(expense.paidOn) : null,
     status: expense.status,
     payment_method: expense.paymentMethod,
+    payment_method_label: expenseMethodLabel(expense.paymentMethod),
     vendor: expense.vendor || '',
     reference_no: expense.reference_no || '',
     notes: expense.notes || '',
@@ -79,9 +85,13 @@ function readDate(value, fallback = null) {
 }
 
 async function readBody(body, existing = {}, heads = null) {
-  const amount = Number(body.amount);
+  // Typed as the gym writes money -- "1,20,000", "Rs 5,000" -- and read
+  // exactly as a package price is (helper/money.js parseAmount).
+  const amount = parseAmount(body.amount);
   if (!body.title || !String(body.title).trim()) throw new Error('Give the expense a title');
-  if (!Number.isFinite(amount) || amount < 0) throw new Error('Enter a valid amount');
+  if (amount === null || !Number.isFinite(amount) || amount < 0) throw new Error('Enter a valid amount, like 5000 or 1,20,000');
+  const paid = readExpenseMethod(body.paymentMethod, { fallback: 'cash', current: existing.paymentMethod || null });
+  if (paid.problem) throw new Error(paid.problem);
 
   // A built-in head or one of the gym's own that is not archived; a row
   // already filed under an archived head keeps it.
@@ -99,7 +109,7 @@ async function readBody(body, existing = {}, heads = null) {
     // A paid expense always has a payment date: defaulting it to the date it
     // was incurred beats leaving a hole that every later report has to guess at.
     paidOn: status === 'paid' ? readDate(body.paidOn, existing.paidOn || incurredOn) : null,
-    paymentMethod: METHODS.includes(body.paymentMethod) ? body.paymentMethod : 'cash',
+    paymentMethod: paid.method,
     // Partial-update semantics for the optional fields: a body that does not
     // mention one leaves what is stored; sending '' or null clears it. An
     // older client that never knew about the staff or asset link cannot
@@ -193,6 +203,7 @@ module.exports = {
         categories: heads.active.map((head) => ({ key: head.key, label: head.label, built_in: head.built_in })),
         archived_categories: heads.archived.map((head) => ({ key: head.key, label: head.label })),
         methods: METHODS,
+        method_options: METHODS.map((value) => ({ value, label: expenseMethodLabel(value) })),
         summary: {
           paid: L.presentTotals(paid, base),
           pending: L.presentTotals(pending, base),

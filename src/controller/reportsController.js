@@ -24,6 +24,8 @@ const { sendXlsx } = require('../services/xlsx');
 const { countLiveMembers } = require('../gymfolio/services/membershipExpiry');
 const { dailySales, exportColumns: dailySalesColumns } = require('../services/dailySales');
 const { saleLineStages } = require('../services/saleMoney');
+const { methodLabel } = require('../services/paymentMethods');
+const { round2, paidSoFar } = require('../gymfolio/services/orderMoney');
 
 const EXPIRING_WINDOW_DAYS = 14;
 const EXPORT_LIMIT = 20000;
@@ -57,6 +59,112 @@ function sendExport(req, res, name, sheet, columns, rows) {
   if (exportFormat(req) === 'xlsx') return sendXlsx(res, `${name}.xlsx`, columns, rows, { sheet });
   return sendCsv(res, `${name}.csv`, columns, rows);
 }
+
+// ---- The orders export ----
+//
+// One row per order that says plainly what was charged, what has come in and
+// what is still owed: a part-paid order reads "Part paid" with its balance,
+// an unpaid one has no "Paid on" (it used to show the day it was created, as
+// if it had been paid), and an order paid in parts lists each payment with
+// its day and method.
+
+const PAYMENT_STATUS_LABELS = {
+  pending: 'Not paid',
+  processing: 'Processing',
+  paid: 'Paid',
+  failed: 'Failed',
+  refunded: 'Refunded',
+  cancelled: 'Cancelled'
+};
+
+function words(value) {
+  const text = String(value || '').replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// The money an order has received: its instalments, or -- paid at once --
+// one payment on the day it was paid (an old paid order with no date: the
+// day it was made).
+function orderPayments(order) {
+  const p = order.payment || {};
+  if (Array.isArray(p.installments) && p.installments.length) {
+    return p.installments.map((part) => ({ at: part.at, amount: round2(part.amount), method: part.method || p.method || '' }));
+  }
+  const paid = paidSoFar(p);
+  if (!(paid > 0)) return [];
+  return [{ at: p.paidAt || order.createdAt, amount: paid, method: p.method || '' }];
+}
+
+function orderMoneyRow(order, member) {
+  const p = order.payment || {};
+  const payments = orderPayments(order);
+  const total = round2(p.amount);
+  const paid = payments.length ? paidSoFar(p) : 0;
+  let balance = 0;
+  if (p.status === 'paid') balance = Math.max(0, round2(p.balanceDue || 0));
+  else if (p.status === 'pending' || p.status === 'processing') balance = Math.max(0, round2(total - paid));
+  const refundAmount = order.refund && order.refund.amount;
+  const refunded = p.status === 'refunded' ? round2(refundAmount !== null && refundAmount !== undefined ? refundAmount : paid) : 0;
+
+  const dates = payments.map((part) => part.at).filter(Boolean).map((at) => new Date(at)).sort((a, b) => a - b);
+  // A renewal Stripe collected later is the latest payment.
+  const last = dates.length ? new Date(Math.max(...dates, p.lastPaidAt ? new Date(p.lastPaidAt).getTime() : 0)) : null;
+  const methods = [...new Set((payments.length ? payments.map((part) => part.method) : [p.method]).filter(Boolean))];
+
+  let status = PAYMENT_STATUS_LABELS[p.status] || words(p.status);
+  if (p.status === 'paid' && balance > 0) status = 'Part paid';
+
+  const customer = order.customerInfo || {};
+  return {
+    ...order,
+    memberCode: (member && member.memberCode) || '',
+    name: customer.fullName || (member ? [member.firstName, member.lastName].filter(Boolean).join(' ') : ''),
+    phone: customer.phone || (member && member.phone) || '',
+    email: customer.email || (member && member.email) || '',
+    package: (order.packageDetails && order.packageDetails.name) || '',
+    currency: String(p.currency || '').toUpperCase(),
+    total,
+    paid,
+    balance,
+    refunded,
+    paymentStatus: status,
+    method: methods.map(methodLabel).join(' + '),
+    paidOn: dates.length ? T.dateKey(dates[0]) : '',
+    lastPaidOn: last ? T.dateKey(last) : '',
+    // Each part, when there was more than one.
+    payments: payments.length > 1
+      ? payments.map((part) => `${part.at ? T.dateKey(part.at) : '?'} ${part.amount} ${methodLabel(part.method)}`.trim()).join('; ')
+      : '',
+    membershipStatus: words(order.status)
+  };
+}
+
+const ORDER_EXPORT_COLUMNS = [
+  { key: 'orderNumber', label: 'Order' },
+  { key: 'memberCode', label: 'Member code' },
+  { key: 'name', label: 'Member' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'email', label: 'Email' },
+  { key: 'package', label: 'Package' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'total', label: 'Total' },
+  { key: 'paid', label: 'Paid' },
+  { key: 'balance', label: 'Balance due' },
+  { key: 'refunded', label: 'Refunded' },
+  { key: 'paymentStatus', label: 'Payment' },
+  { key: 'method', label: 'Method' },
+  // Blank until money has come in.
+  { key: 'paidOn', label: 'Paid on', type: 'date' },
+  { key: 'lastPaidOn', label: 'Last payment', type: 'date' },
+  { key: 'payments', label: 'Payments' },
+  { key: 'membershipStatus', label: 'Membership status' },
+  { key: 'start', label: 'Starts', type: 'date', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
+  { key: 'end', label: 'Ends', type: 'date', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
+  { key: 'invoice', label: 'Invoice', value: (r) => (r.invoice && r.invoice.number) || '' },
+  // Brought over already paid from the gym's old system: listed, but
+  // not money taken on its "Paid on" day (see the order model).
+  { key: 'imported', label: 'Imported', value: (r) => (r.imported ? 'Yes' : '') }
+];
 
 function dateBucketExpr(field, grain, timezone) {
   return { $dateToString: { format: grain === 'day' ? '%Y-%m-%d' : '%Y-%m', date: field, timezone } };
@@ -373,24 +481,12 @@ module.exports = {
 
       if (kind === 'orders') {
         const rows = await PackageOrder.find({ $expr: { $and: [{ $gte: [paidAtExpr(), range.start] }, { $lt: [paidAtExpr(), range.end] }] } }).sort({ createdAt: -1 }).limit(EXPORT_LIMIT).lean();
-        return sendExport(req, res, `orders_${stamp}`, 'Orders', [
-          { key: 'orderNumber', label: 'Order' },
-          { key: 'name', label: 'Member', value: (r) => (r.customerInfo && r.customerInfo.fullName) || '' },
-          { key: 'email', label: 'Email', value: (r) => (r.customerInfo && r.customerInfo.email) || '' },
-          { key: 'package', label: 'Package', value: (r) => (r.packageDetails && r.packageDetails.name) || '' },
-          { key: 'amount', label: 'Amount', value: (r) => r.payment && r.payment.amount },
-          { key: 'currency', label: 'Currency', value: (r) => (r.payment && r.payment.currency) || '' },
-          { key: 'method', label: 'Method', value: (r) => (r.payment && r.payment.method) || '' },
-          { key: 'paymentStatus', label: 'Payment', value: (r) => (r.payment && r.payment.status) || '' },
-          { key: 'status', label: 'Membership status' },
-          { key: 'paidAt', label: 'Paid on', type: 'date', value: (r) => (r.payment && r.payment.paidAt ? T.dateKey(r.payment.paidAt) : T.dateKey(r.createdAt)) },
-          { key: 'start', label: 'Starts', type: 'date', value: (r) => (r.subscription && r.subscription.startDate ? T.dateKey(r.subscription.startDate) : '') },
-          { key: 'end', label: 'Ends', type: 'date', value: (r) => (r.subscription && r.subscription.endDate ? T.dateKey(r.subscription.endDate) : '') },
-          { key: 'invoice', label: 'Invoice', value: (r) => (r.invoice && r.invoice.number) || '' },
-          // Brought over already paid from the gym's old system: listed, but
-          // not money taken on its "Paid on" day (see the order model).
-          { key: 'imported', label: 'Imported', value: (r) => (r.imported ? 'Yes' : '') }
-        ], rows);
+        // The member's code (and their phone or email, when the order has none).
+        const ids = [...new Set(rows.map((r) => r.userId && String(r.userId)).filter(Boolean))];
+        const members = ids.length ? await User.find({ _id: { $in: ids } }).select('memberCode firstName lastName phone email').lean() : [];
+        const byId = new Map(members.map((m) => [String(m._id), m]));
+        const shaped = rows.map((r) => orderMoneyRow(r, r.userId ? byId.get(String(r.userId)) : null));
+        return sendExport(req, res, `orders_${stamp}`, 'Orders', ORDER_EXPORT_COLUMNS, shaped);
       }
 
       if (kind === 'attendance') {

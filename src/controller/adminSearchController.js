@@ -26,6 +26,7 @@ const GymClass = require('../gymfolio/models/gymClassModel');
 const Trainer = require('../gymfolio/models/trainerModel');
 const { permissionsFor } = require('../services/roleService');
 const { grants } = require('../config/permissions');
+const { phoneSearchPattern } = require('../services/phoneMatch');
 
 const MIN_CHARS = 2;
 // Per group. The box is for jumping to something, not for browsing; a
@@ -185,9 +186,17 @@ function searchableGroups(permissions, groups = GROUPS) {
   return groups.filter((group) => grants(permissions, group.tab, 'view'));
 }
 
-/** The query for one group: what its page lists, narrowed by the terms. */
+/**
+ * The query for one group: what its page lists, narrowed by the terms. A
+ * query that is a phone number also finds it in any of its forms ("+92 301…",
+ * "0301-…", "0301…": services/phoneMatch.js) in the group's phone fields.
+ */
 function groupFilter(group, terms) {
-  return { ...group.base, ...termsFilter(terms, group.fields) };
+  const words = termsFilter(terms, group.fields);
+  const phoneRx = phoneSearchPattern(terms.join(' '));
+  const phoneFields = group.fields.filter((field) => /(^|\.)phone$/.test(field));
+  if (!phoneRx || !phoneFields.length) return { ...group.base, ...words };
+  return { ...group.base, $or: [words, ...phoneFields.map((field) => ({ [field]: phoneRx }))] };
 }
 
 /**

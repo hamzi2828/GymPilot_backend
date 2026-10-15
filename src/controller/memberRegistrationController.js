@@ -25,6 +25,15 @@
 //   → 201 { success, message, member, order (null without a membership),
 //           credentials, emailed, emailError, password? }
 //
+// The same person twice: before anything is made, the phone number (in any
+// of its forms -- 0301-1234567, 03011234567, +923011234567) and the email
+// are looked up. A member already on that phone is a 409 POSSIBLE_DUPLICATE
+// naming them (details.matches: id, name, member code), and the desk either
+// opens that member or sends the request again with `confirmDuplicate: true`
+// -- a family can share one phone. An email already on an account is a 409
+// EMAIL_IN_USE naming its owner: two accounts cannot share one address, so
+// that one cannot be confirmed past.
+//
 // `requestId` (or membership.requestId, which the website sends): the desk's
 // own id for this attempt -- 8 to 100 letters, digits, hyphens or
 // underscores, a UUID will do -- sent again unchanged when the answer never
@@ -63,6 +72,7 @@ const { publicUserView } = require('../services/userView');
 const { can } = require('../services/roleService');
 const { readDeskMethod } = require('../services/paymentMethods');
 const { parseAmount } = require('../helper/money');
+const { samePhonePattern } = require('../services/phoneMatch');
 const notify = require('../services/gymNotifications');
 const { afterResponse } = require('../services/afterResponse');
 
@@ -205,6 +215,73 @@ async function undoRegistration(user) {
   await releaseAccount(user);
 }
 
+function nameOf(user) {
+  return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email || user.username || 'A member';
+}
+
+function confirmed(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+/**
+ * Who is already on file with this email or phone number, before a second
+ * account is made for the same person. Resolves to null (nobody), or
+ * { status, body } to answer with -- or { repeat: true } when the match is
+ * the account this very request made a moment ago (two copies at once).
+ */
+async function duplicateCheck(body, requestId) {
+  const email = String(body.email || '').toLowerCase().trim();
+  const phoneRx = samePhonePattern(body.phone);
+  if (!email && !phoneRx) return null;
+
+  const fields = 'firstName lastName email phone memberCode username role isActive registrationRequestId';
+  const [byEmail, byPhone] = await Promise.all([
+    email ? User.findOne({ email }).select(fields).lean() : null,
+    phoneRx ? User.find({ role: 'user', phone: phoneRx }).select(fields).sort({ createdAt: 1 }).limit(5).lean() : []
+  ]);
+  const ours = (user) => requestId && user.registrationRequestId === requestId;
+  if ((byEmail && ours(byEmail)) || byPhone.some(ours)) return { repeat: true };
+
+  const match = (user, matchedOn) => ({
+    id: String(user._id),
+    name: nameOf(user),
+    memberCode: user.memberCode || null,
+    phone: user.phone || '',
+    email: user.email || '',
+    isActive: user.isActive !== false,
+    isMember: user.role === 'user',
+    matchedOn
+  });
+  const named = (user) => `${nameOf(user)}${user.memberCode ? ` (${user.memberCode})` : ''}`;
+
+  // An address belongs to one account: refused whatever the desk confirms.
+  if (byEmail) {
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'EMAIL_IN_USE',
+        message: `${email} is already used by ${named(byEmail)}. Open their record, or leave the email empty (or use another) to register someone new.`,
+        details: { matches: [match(byEmail, ['email'])], canRegisterAnyway: false }
+      }
+    };
+  }
+  if (byPhone.length && !confirmed(body.confirmDuplicate)) {
+    const first = byPhone[0];
+    const who = byPhone.length > 1 ? `${named(first)} and ${byPhone.length - 1} more are` : `${named(first)} is`;
+    return {
+      status: 409,
+      body: {
+        success: false,
+        code: 'POSSIBLE_DUPLICATE',
+        message: `${who} already registered with the phone number ${first.phone}. Open their record if this is the same person, or register anyway if it is someone else (a family can share one phone).`,
+        details: { matches: byPhone.map((user) => match(user, ['phone'])), canRegisterAnyway: true }
+      }
+    };
+  }
+  return null;
+}
+
 const memberRegistrationController = {
   async register(req, res) {
     const body = req.body || {};
@@ -236,6 +313,16 @@ const memberRegistrationController = {
       requestId = membership.readRequestId(present(body.requestId) ? body.requestId : block.requestId);
       const repeat = await repeatOf(requestId);
       if (repeat) return res.status(201).json(repeat);
+
+      // The same person registered twice at the desk: asked before the sale
+      // is read, so the desk hears about it first.
+      const duplicate = await duplicateCheck(body, requestId);
+      if (duplicate && duplicate.repeat) {
+        const made = await repeatOf(requestId);
+        if (made) return res.status(201).json(made);
+      } else if (duplicate) {
+        return res.status(duplicate.status).json(duplicate.body);
+      }
 
       if (selling) sale = await readSale(body.membership, { email: String(body.email || '').toLowerCase().trim() });
     } catch (error) {

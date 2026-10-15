@@ -64,11 +64,50 @@ function readDeskMethod(value, { fallback = 'cash', allowed = DESK_METHODS } = {
   return { method: null, problem: `"${value}" is not a payment method this gym records. Use one of: ${offered}.` };
 }
 
+// ---- Money going out (Accounts → Expenses) ----
+//
+// How the gym paid a bill: the desk's own methods (a JazzCash or Easypaisa
+// payment to the landlord is as common as cash), plus a cheque and "other".
+// `online` is from before JazzCash and Easypaisa were listed: rows that have
+// it keep it and still read correctly, but it is no longer offered.
+const EXPENSE_METHODS = ['cash', 'bank_transfer', 'jazzcash', 'easypaisa', 'wallet', 'card', 'cheque', 'other'];
+const LEGACY_EXPENSE_METHODS = ['online'];
+const EXPENSE_METHOD_LABELS = {
+  ...METHOD_LABELS,
+  cheque: 'Cheque',
+  other: 'Other',
+  online: 'Online (other)'
+};
+
+/** The label for how an expense was paid; an unknown value is shown as it is. */
+function expenseMethodLabel(value) {
+  return EXPENSE_METHOD_LABELS[value] || String(value || '');
+}
+
+/**
+ * How an expense was paid, read strictly: nothing sent is `fallback`, a row's
+ * own stored method (`current`, even a retired one) is kept, and anything
+ * else must be one of EXPENSE_METHODS -- never quietly filed as cash.
+ *
+ * @returns {{ method: string|null, problem: string|null }}
+ */
+function readExpenseMethod(value, { fallback = 'cash', current = null } = {}) {
+  if (value === undefined || value === null || value === '') return { method: current || fallback, problem: null };
+  if (EXPENSE_METHODS.includes(value) || (current && value === current)) return { method: value, problem: null };
+  const offered = EXPENSE_METHODS.map((method) => EXPENSE_METHOD_LABELS[method]).join(', ');
+  return { method: null, problem: `"${value}" is not a payment method for an expense. Choose one of: ${offered}.` };
+}
+
 module.exports = {
   PAYMENT_METHODS,
   METHOD_LABELS,
   DESK_METHODS,
   isPaymentMethod,
   methodLabel,
-  readDeskMethod
+  readDeskMethod,
+  EXPENSE_METHODS,
+  LEGACY_EXPENSE_METHODS,
+  EXPENSE_METHOD_LABELS,
+  expenseMethodLabel,
+  readExpenseMethod
 };

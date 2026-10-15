@@ -13,6 +13,8 @@ const L = require('../services/ledger');
 const categories = require('../services/categories');
 const reminders = require('../services/assetReminders');
 const T = require('../../attendance/services/timeUtils');
+const { readExpenseMethod } = require('../../services/paymentMethods');
+const { parseAmount } = require('../../helper/money');
 
 const CONDITIONS = ['new', 'good', 'fair', 'poor', 'unusable'];
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
@@ -129,12 +131,17 @@ function text(value, current) {
 
 // A non-negative number from the body, or what is stored when it is absent
 // (an empty string from a cleared input counts as zero, as it always did).
+// Money is read as a package price is: "1,50,000" and "Rs 5,000" included.
 function amount(value, current) {
-  return value !== undefined ? Math.max(0, Number(value) || 0) : Number(current) || 0;
+  return value !== undefined ? Math.max(0, parseAmount(value) || 0) : Number(current) || 0;
 }
 
 async function readBody(body, existing = {}, heads = null) {
   if (!body.name || !String(body.name).trim()) throw new Error('Give the asset a name');
+  // A cost typed but unreadable is refused rather than recorded as nothing.
+  if (body.unitCost !== undefined && body.unitCost !== null && String(body.unitCost).trim() !== '' && parseAmount(body.unitCost) === null) {
+    throw new Error('Enter a valid cost, like 5000 or 1,50,000');
+  }
 
   // A built-in head or one of the gym's own that is not archived; an asset
   // already filed under an archived head keeps it.
@@ -145,7 +152,7 @@ async function readBody(body, existing = {}, heads = null) {
     name: String(body.name).trim(),
     category,
     quantity: Math.max(1, Number(body.quantity) || 1),
-    unitCost: Math.max(0, Number(body.unitCost) || 0),
+    unitCost: amount(body.unitCost, existing.unitCost),
     currency: String(body.currency || existing.currency || (await L.recordCurrency())).toUpperCase(),
     purchasedOn,
     // Partial-update semantics for the optional details: a body that does
@@ -297,6 +304,10 @@ module.exports = {
     try {
       const heads = await categories.headsFor('asset');
       const patch = await readBody(req.body || {}, {}, heads);
+      // How the purchase was paid, checked before anything is saved: an
+      // unknown method is refused, not filed as something else.
+      const paidBy = readExpenseMethod((req.body || {}).recordExpense ? req.body.paymentMethod : undefined, { fallback: 'bank_transfer' });
+      if (paidBy.problem) return res.status(400).json({ message: paidBy.problem });
       const asset = await Asset.create({
         ...patch,
         tag: await nextTag(),
@@ -327,7 +338,7 @@ module.exports = {
           incurredOn,
           paidOn: incurredOn,
           status: 'paid',
-          paymentMethod: req.body.paymentMethod || 'bank_transfer',
+          paymentMethod: paidBy.method,
           vendor: asset.supplier || '',
           assetId: asset._id,
           notes: 'Recorded with the asset register entry.',

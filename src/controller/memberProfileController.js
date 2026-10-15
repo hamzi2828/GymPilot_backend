@@ -14,6 +14,9 @@ const Attendance = require('../attendance/models/attendanceModel');
 const { primaryAddress, oneLine } = require('../services/memberFields');
 const guards = require('../services/roleGuards');
 const { actorAccess, permissionsFor } = require('../services/roleService');
+const verification = require('../services/emailVerification');
+const { needsEmail, isStaff } = require('../services/twoFactorService');
+const { afterResponse } = require('../services/afterResponse');
 
 const USE_BLOB_STORAGE = !!process.env.BLOB_READ_WRITE_TOKEN;
 const blobUpload = require('../helper/blobUpload');
@@ -55,6 +58,45 @@ async function reachRefusal(req, target) {
   const wider = guards.widerTab(actor.actorPermissions, await permissionsFor(target.role));
   if (wider) return `This account has more access than yours (${wider}), so ask an administrator to change its profile.`;
   return null;
+}
+
+// What staff asked to do to a member's email address: nothing (not sent,
+// or the address already there), change it, or remove it. Resolves to
+// { change: { email|null } } or { problem: [status, sentence] }. The address
+// is the one sign-in, reset and receipt emails go to, so it is checked as
+// the account screens check it: one account per address in the gym.
+async function emailEdit(req, user, value) {
+  if (value === undefined) return {};
+  const email = value === null ? '' : String(value).toLowerCase().trim();
+  if (email === (user.email || '')) return {};
+
+  // Your own address is changed from your account page, where the password
+  // is asked for: whoever controls the address controls the account.
+  if (actorId(req) && String(actorId(req)) === String(user._id)) {
+    return { problem: [403, 'Change your own email address from your account page.'] };
+  }
+  if (!email) {
+    if (needsEmail(user)) {
+      return {
+        problem: [409, isStaff(user)
+          ? 'Staff accounts keep an email address: two-factor sign-in sends the sign-in code to it.'
+          : 'This member has two-factor sign-in on, which sends a code to this address. It cannot be removed while that is on.']
+      };
+    }
+    if (user.provider === 'google' || user.googleId || !user.password) {
+      return { problem: [409, 'This member signs in with Google using this address, so it cannot be removed.'] };
+    }
+    return { change: { email: null } };
+  }
+  if (email.length > 254 || !verification.looksLikeEmail(email)) {
+    return { problem: [400, `"${String(value).trim()}" is not a valid email address.`] };
+  }
+  const owner = await User.findOne({ email, _id: { $ne: user._id } }).select('firstName lastName memberCode username').lean();
+  if (owner) {
+    const who = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || owner.username || 'another account';
+    return { problem: [409, `${email} is already used by ${who}${owner.memberCode ? ` (${owner.memberCode})` : ''}. Each account needs its own email address.`] };
+  }
+  return { change: { email } };
 }
 
 async function waiverSettings() {
@@ -289,12 +331,37 @@ module.exports = {
       const refusal = await reachRefusal(req, user);
       if (refusal) return fail(res, 403, refusal);
       const body = req.body || {};
+      const reachable = !!(user.email || user.phone);
+      const previousEmail = user.email || null;
+
+      // Checked before anything is changed, so a refusal saves nothing.
+      for (const [key, label] of [['firstName', 'First name'], ['lastName', 'Last name']]) {
+        if (body[key] !== undefined && !text(body[key], 80)) return fail(res, 400, `${label} cannot be left empty.`);
+      }
+      const emailResult = await emailEdit(req, user, body.email);
+      if (emailResult.problem) return fail(res, ...emailResult.problem);
 
       for (const key of ['firstName', 'lastName']) {
         const value = text(body[key], 80);
         if (value) user[key] = value;
       }
       if (body.phone !== undefined) user.phone = text(body.phone, 40) || null;
+      if (emailResult.change) {
+        // Typed by staff for the member in front of them: vouched for, as an
+        // account the desk creates is (services/emailVerification.js). Links
+        // already out -- a reset, a confirmation -- went to the old address
+        // and stop working with it.
+        user.email = emailResult.change.email || undefined;
+        user.emailVerified = true;
+        user.emailVerifyTokenHash = null;
+        user.emailVerifyExpiresAt = null;
+        user.passwordResetTokenHash = null;
+        user.passwordResetExpiresAt = null;
+      }
+      // A member needs one way to be reached and found: an email or a phone.
+      if (user.role === 'user' && reachable && !user.email && !user.phone) {
+        return fail(res, 400, emailResult.change ? 'Add a phone number before removing the email address: the gym needs one way to reach them.' : 'A member without an email address needs a phone number.');
+      }
       if (body.address !== undefined) {
         // The primary address's line, kept in the member's own address book
         // (addresses[]) rather than a second field that could disagree with it.
@@ -320,8 +387,20 @@ module.exports = {
         user.medical.notes = text(body.medicalNotes) || '';
       }
       await user.save();
-      return res.json({ success: true, message: 'Profile saved.' });
+
+      let message = 'Profile saved.';
+      if (emailResult.change) {
+        // The address it was is told: if this was not what the member
+        // wanted, that message is how they find out.
+        if (previousEmail) afterResponse(() => verification.sendChangeNotice(previousEmail, user, { removed: !user.email }), 'email change notice');
+        message = user.email
+          ? `Profile saved. Their email address is now ${user.email}.`
+          : `Profile saved. Their email address was removed: they sign in with their username${user.username ? `, ${user.username},` : ''} from now on.`;
+      }
+      return res.json({ success: true, message, data: { email: user.email || null, phone: user.phone || '' } });
     } catch (error) {
+      // Another account took the address in the moment between the check and the save.
+      if (error && error.code === 11000) return fail(res, 409, 'That email address is already used by another account.');
       console.error('[profile] admin update failed:', error);
       return fail(res, 500, 'Could not save the profile');
     }

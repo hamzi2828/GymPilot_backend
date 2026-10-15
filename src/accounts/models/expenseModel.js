@@ -13,6 +13,7 @@
 // row may use.
 
 const mongoose = require('mongoose');
+const { EXPENSE_METHODS, LEGACY_EXPENSE_METHODS } = require('../../services/paymentMethods');
 const { tenantModel } = require('../../platform/modelRegistry');
 
 // The things a gym actually spends money on, in the order they usually matter.
@@ -77,9 +78,11 @@ const expenseSchema = new mongoose.Schema(
       index: true
     },
 
+    // services/paymentMethods.js EXPENSE_METHODS (JazzCash and Easypaisa
+    // included), and the retired 'online' that older rows carry.
     paymentMethod: {
       type: String,
-      enum: ['cash', 'bank_transfer', 'card', 'cheque', 'online', 'other'],
+      enum: [...EXPENSE_METHODS, ...LEGACY_EXPENSE_METHODS],
       default: 'cash'
     },
 

@@ -366,13 +366,17 @@ test('Add member sent again with the same request id adds nobody and sells nothi
   assert.equal(emailAgain.body.repeated, true);
   assert.equal(await count({ email: 'emma@register.test' }), 1);
 
-  // A new id is a new member, even with the same name and phone; so is no id.
-  const next = await post(receptionist, { ...body, membership: { ...body.membership, requestId: 'register-0004-a1b2c3d4' } });
+  // A new id is a new member, even with the same name and phone, once the
+  // desk confirms it past the duplicate warning; so is no id.
+  const warned = await post(receptionist, { ...body, membership: { ...body.membership, requestId: 'register-0004-a1b2c3d4' } });
+  assert.equal(warned.statusCode, 409, JSON.stringify(warned.body));
+  assert.equal(warned.body.code, 'POSSIBLE_DUPLICATE');
+  const next = await post(receptionist, { ...body, confirmDuplicate: true, membership: { ...body.membership, requestId: 'register-0004-a1b2c3d4' } });
   assert.equal(next.statusCode, 201, JSON.stringify(next.body));
   assert.equal(next.body.repeated, undefined);
   assert.equal(await count({ phone: '0300 8800001' }), 2);
   const { requestId: _dropped, ...noId } = body.membership;
-  assert.equal((await post(receptionist, { ...body, membership: noId })).body.repeated, undefined);
+  assert.equal((await post(receptionist, { ...body, confirmDuplicate: true, membership: noId })).body.repeated, undefined);
   assert.equal(await count({ phone: '0300 8800001' }), 3);
 
   // Something that is not an id is refused before anybody is made.
@@ -404,4 +408,46 @@ test('Add member sent again with the same request id adds nobody and sells nothi
   const retried = await post(receptionist, failing);
   assert.equal(retried.statusCode, 201, JSON.stringify(retried.body));
   assert.equal(retried.body.repeated, undefined);
+});
+
+test('the same person twice at the desk: warned by phone in any form, refused by email, and registered anyway on purpose', async () => {
+  const count = (filter) => inGym(() => User.countDocuments(filter));
+  const first = await post(receptionist, { firstName: 'Bilal', lastName: 'Ahmed', phone: '0301-7654321', email: 'bilal@register.test', credentials: 'show' });
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  const code = first.body.member.memberCode;
+  assert.ok(code);
+
+  // The same number however it is typed.
+  for (const phone of ['03017654321', '+923017654321', '+92 301 7654321', '0092-301-7654321', '0301 765 4321']) {
+    const again = await post(receptionist, { firstName: 'Bilal', lastName: 'Ahmed', phone, credentials: 'show' });
+    assert.equal(again.statusCode, 409, `${phone}: ${JSON.stringify(again.body)}`);
+    assert.equal(again.body.code, 'POSSIBLE_DUPLICATE');
+    assert.ok(again.body.message.includes(`Bilal Ahmed (${code}) is already registered`), again.body.message);
+    assert.equal(again.body.details.canRegisterAnyway, true);
+    assert.deepEqual(again.body.details.matches.map((m) => [m.id, m.name, m.memberCode]), [[String(first.body.member._id), 'Bilal Ahmed', code]]);
+  }
+  // A different number is nobody's duplicate (one digit apart).
+  const other = await post(receptionist, { firstName: 'Bilal', lastName: 'Other', phone: '0301-7654322', credentials: 'show' });
+  assert.equal(other.statusCode, 201, JSON.stringify(other.body));
+
+  // A sale is not read, nor anything made, while the desk is being warned.
+  const withSale = await post(receptionist, { firstName: 'Bilal', lastName: 'Ahmed', phone: '+923017654321', credentials: 'show', membership: { packageId: String(monthly._id) } });
+  assert.equal(withSale.statusCode, 409);
+  assert.equal(await count({ firstName: 'Bilal', lastName: 'Ahmed' }), 1);
+
+  // The same email is refused outright, naming its owner; confirming does not get past it.
+  const sameEmail = await post(receptionist, { firstName: 'B', lastName: 'Ahmed', email: ' Bilal@Register.TEST ', phone: '0399 1111111', confirmDuplicate: true, credentials: 'show' });
+  assert.equal(sameEmail.statusCode, 409, JSON.stringify(sameEmail.body));
+  assert.equal(sameEmail.body.code, 'EMAIL_IN_USE');
+  assert.equal(sameEmail.body.details.canRegisterAnyway, false);
+  assert.ok(sameEmail.body.message.includes(`bilal@register.test is already used by Bilal Ahmed (${code})`), sameEmail.body.message);
+
+  // Somebody else on the same phone (a brother): registered on purpose.
+  const brother = await post(receptionist, { firstName: 'Hamza', lastName: 'Ahmed', phone: '+92 301 7654321', confirmDuplicate: true, credentials: 'show' });
+  assert.equal(brother.statusCode, 201, JSON.stringify(brother.body));
+  // Both are named the next time.
+  const third = await post(receptionist, { firstName: 'Zara', lastName: 'Ahmed', phone: '03017654321', credentials: 'show' });
+  assert.equal(third.statusCode, 409);
+  assert.equal(third.body.details.matches.length, 2);
+  assert.match(third.body.message, /and 1 more are already registered/);
 });

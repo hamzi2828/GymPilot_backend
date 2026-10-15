@@ -253,7 +253,8 @@ test('every export also comes as a real .xlsx: the CSV\'s rows, amounts as numbe
 
     const orders = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'orders' }, query: { ...AUGUST, format: 'xlsx' } })).body));
     const r1 = orders.find((row) => row.Order === 'R-1');
-    assert.equal(r1.Amount, 100, 'an amount is a number cell');
+    assert.equal(r1.Total, 100, 'an amount is a number cell');
+    assert.equal(r1.Paid, 100);
     assert.equal(r1['Paid on'], dateSerial('2026-08-03'), 'a date is a date cell');
 
     const expenses = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'expenses' }, query: { ...AUGUST, format: 'xlsx' } })).body));

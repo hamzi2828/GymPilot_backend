@@ -24,6 +24,7 @@ const User = require('../../models/user');
 const Settings = require('../../models/settings');
 const { parseAmount, resolveCurrency } = require('../../helper/money');
 const { round2, paidSoFar } = require('./orderMoney');
+const { phoneSearchPattern } = require('../../services/phoneMatch');
 const { LIVE_STATUSES } = require('./membershipExpiry');
 const { willAutoRenew } = require('../../services/reminderJobs');
 const { MembershipError, stripeBilled, joiningFeeDue, provenEmail } = require('./membershipService');
@@ -41,12 +42,11 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// A phone number matches by its digits with anything between them, as the
-// accounts sales search does.
+// A phone number matches by its digits with anything between them, and in
+// any of its forms: "+92 301…", "0301-…" and "0301…" find the same member
+// (services/phoneMatch.js).
 function phonePattern(term) {
-  if (!/^[\d\s+().-]+$/.test(term)) return null;
-  const digits = term.replace(/\D/g, '');
-  return digits.length >= 4 ? new RegExp(digits.split('').join('\\D*')) : null;
+  return phoneSearchPattern(term);
 }
 
 /**
