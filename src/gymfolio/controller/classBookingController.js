@@ -142,6 +142,111 @@ function cancelOutcome(booking, rules, { byStaff = false, now = new Date() } = {
   };
 }
 
+/**
+ * Gives a booking's place up: the cancel itself, the credit back (unless it
+ * was a late cancel) and the waiting list moved up. Shared by a member or the
+ * desk cancelling and by an account being deleted, so a deleted member's
+ * place reaches the next in line exactly as a cancelled one does.
+ *
+ * Resolves to { cancelled, promoted }; `cancelled` is null when somebody else
+ * changed the booking first.
+ */
+async function givePlaceUp(booking, rules, outcome, { actorId = null, reason = '' } = {}) {
+  // One conditional update from the status read above to cancelled. Two
+  // cancels arriving together (a double tap, the member and the desk)
+  // used to both get through -- the credit went back twice and two people
+  // were promoted into one freed place. Only the one that makes the
+  // change carries on.
+  const cancelled = await ClassBooking.findOneAndUpdate(
+    { _id: booking._id, status: booking.status },
+    {
+      $set: {
+        status: 'cancelled',
+        cancelledAt: new Date(),
+        cancelledBy: actorId || null,
+        cancelReason: reason,
+        waitlistPosition: null,
+        lateCancel: outcome.late
+      }
+    },
+    { new: true }
+  );
+  if (!cancelled) return { cancelled: null, promoted: null };
+
+  if (!cancelled.lateCancel) await giveCreditBack(cancelled);
+
+  // Only a real place frees a place. Cancelling from the waiting list
+  // promotes nobody, and neither does the desk cancelling a booking on
+  // a class that has already started.
+  let promoted = null;
+  if (outcome.promote) {
+    // The freed place is taken by its seat number, which needs the
+    // class's capacity to know which numbers there are.
+    const gymClass = await GymClass.findById(cancelled.classId).select('capacity').lean();
+    promoted = await ClassBooking.promoteFromWaitlist(
+      cancelled.classId,
+      cancelled.sessionDate,
+      cancelled.sessionStart,
+      Number(gymClass && gymClass.capacity) || 0
+    );
+    // The promoted member's pack pays for the place now that they have it.
+    if (promoted) {
+      try {
+        const promotedUser = await User.findById(promoted.userId);
+        if (promotedUser) {
+          const credit = await takeCredit(await membershipFor(promotedUser), rules, actorId, `${promoted.className} ${promoted.sessionDate} ${promoted.sessionStart} (from waiting list)`);
+          if (credit.creditUsed) {
+            promoted.creditUsed = true;
+            promoted.orderId = credit.orderId;
+            await promoted.save();
+          }
+        }
+      } catch (error) {
+        // An empty pack does not lose them the place they waited for; the
+        // desk sees the booking without a credit and can sort it out.
+        console.error('[bookings] credit on promotion failed:', error.message);
+      }
+    }
+  }
+  return { cancelled, promoted };
+}
+
+function tellPromoted(promoted) {
+  afterResponse(
+    User.findById(promoted.userId)
+      .select('firstName lastName email')
+      .lean()
+      .then((member) => notify.bookingPromoted(promoted, member)),
+    'booking promoted notice'
+  );
+}
+
+/**
+ * An account being deleted gives up every class place it still holds or is
+ * waiting for, so the class is not left "full" for somebody who can never
+ * come and the waiting list moves up. Treated as the desk cancelling: never
+ * refused, never late. Sessions already started are left as they were.
+ * Returns how many bookings were cancelled.
+ */
+async function cancelUpcomingFor(userId, { by = null } = {}) {
+  const rules = await sessions.rules();
+  const now = new Date();
+  const live = await ClassBooking.find({
+    userId,
+    status: { $in: ['booked', 'waitlisted'] },
+    sessionDate: { $gte: T.dateKey(now) }
+  });
+  let count = 0;
+  for (const booking of live) {
+    if (sessions.localInstant(booking.sessionDate, booking.sessionStart).getTime() <= now.getTime()) continue;
+    const outcome = cancelOutcome(booking, rules, { byStaff: true, now });
+    const { cancelled, promoted } = await givePlaceUp(booking, rules, outcome, { actorId: by, reason: 'Account deleted' });
+    if (cancelled) count += 1;
+    if (promoted) tellPromoted(promoted);
+  }
+  return count;
+}
+
 function bookingView(booking) {
   return {
     id: String(booking._id),
@@ -481,25 +586,10 @@ module.exports = {
         return fail(res, 409, 'This class has already started, so the booking can no longer be cancelled. Please speak to the front desk if something is wrong.');
       }
 
-      // One conditional update from the status read above to cancelled. Two
-      // cancels arriving together (a double tap, the member and the desk)
-      // used to both get through -- the credit went back twice and two people
-      // were promoted into one freed place. Only the one that makes the
-      // change carries on.
-      const cancelled = await ClassBooking.findOneAndUpdate(
-        { _id: booking._id, status: booking.status },
-        {
-          $set: {
-            status: 'cancelled',
-            cancelledAt: new Date(),
-            cancelledBy: actorId || null,
-            cancelReason: req.body && req.body.reason ? String(req.body.reason).trim() : '',
-            waitlistPosition: null,
-            lateCancel: outcome.late
-          }
-        },
-        { new: true }
-      );
+      const { cancelled, promoted } = await givePlaceUp(booking, rules, outcome, {
+        actorId,
+        reason: req.body && req.body.reason ? String(req.body.reason).trim() : ''
+      });
       if (!cancelled) {
         const current = await ClassBooking.findById(booking._id).select('status').lean();
         const status = current ? current.status : 'cancelled';
@@ -511,42 +601,6 @@ module.exports = {
         return fail(res, 409, `This booking is already ${status.replace('_', ' ')}.`);
       }
       booking = cancelled;
-
-      if (!booking.lateCancel) await giveCreditBack(booking);
-
-      // Only a real place frees a place. Cancelling from the waiting list
-      // promotes nobody, and neither does the desk cancelling a booking on
-      // a class that has already started.
-      let promoted = null;
-      if (outcome.promote) {
-        // The freed place is taken by its seat number, which needs the
-        // class's capacity to know which numbers there are.
-        const gymClass = await GymClass.findById(booking.classId).select('capacity').lean();
-        promoted = await ClassBooking.promoteFromWaitlist(
-          booking.classId,
-          booking.sessionDate,
-          booking.sessionStart,
-          Number(gymClass && gymClass.capacity) || 0
-        );
-        // The promoted member's pack pays for the place now that they have it.
-        if (promoted) {
-          try {
-            const promotedUser = await User.findById(promoted.userId);
-            if (promotedUser) {
-              const credit = await takeCredit(await membershipFor(promotedUser), rules, actorId, `${promoted.className} ${promoted.sessionDate} ${promoted.sessionStart} (from waiting list)`);
-              if (credit.creditUsed) {
-                promoted.creditUsed = true;
-                promoted.orderId = credit.orderId;
-                await promoted.save();
-              }
-            }
-          } catch (error) {
-            // An empty pack does not lose them the place they waited for; the
-            // desk sees the booking without a credit and can sort it out.
-            console.error('[bookings] credit on promotion failed:', error.message);
-          }
-        }
-      }
 
       // Two people to tell: whoever gave the place up, and whoever just got
       // it. The second matters more -- a member on a waiting list has no way
@@ -561,15 +615,7 @@ module.exports = {
         'booking cancelled notice'
       );
 
-      if (promoted) {
-        afterResponse(
-          User.findById(promoted.userId)
-            .select('firstName lastName email')
-            .lean()
-            .then((member) => notify.bookingPromoted(promoted, member)),
-          'booking promoted notice'
-        );
-      }
+      if (promoted) tellPromoted(promoted);
 
       return res.json({
         success: true,
@@ -709,3 +755,5 @@ module.exports = {
 
 // Exported for the tests.
 module.exports.cancelOutcome = cancelOutcome;
+// For account deletion (userController.releaseAccount).
+module.exports.cancelUpcomingFor = cancelUpcomingFor;

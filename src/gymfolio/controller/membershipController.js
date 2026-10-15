@@ -124,14 +124,14 @@ module.exports = {
     }
   },
 
-  // POST /api/gymfolio/package-orders/:id/proof   multipart: proof (image) + note, reference
+  // POST /api/gymfolio/package-orders/:id/proof   multipart: proof (image or PDF) + note, reference
   submitProof: async (req, res) => {
     try {
       const { order } = await loadOrder(req, { staffLevel: 'manage' });
       let url = '';
       if (req.file) {
         url = USE_BLOB_STORAGE
-          ? await blobUpload.uploadToBlob(req.file.buffer, req.file.originalname, req.file.mimetype, 'payment-proofs')
+          ? await blobUpload.uploadToBlob(req.file.buffer, req.file.originalname, req.file.mimetype, 'payment-proofs', { kind: 'proof' })
           : `/uploads/${req.file.filename}`;
       }
       if (!url && !(req.body && (req.body.reference || req.body.note))) {

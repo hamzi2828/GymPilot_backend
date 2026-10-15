@@ -133,6 +133,8 @@ async function cardPaymentsAvailable() {
   return (await cardPaymentsStatus()).available;
 }
 
+const CARD_CHECKOUT_UNAVAILABLE = "Card payment isn't available at this gym — please choose bank transfer, or pay at the front desk.";
+
 /**
  * Throws StripeNotConfiguredError unless a new card sale may start. Only
  * new sales are gated: verifying, refunding and cancelling what was already
@@ -141,13 +143,15 @@ async function cardPaymentsAvailable() {
 async function assertCardPaymentsAvailable() {
   const { available, code } = await cardPaymentsStatus();
   if (available) return;
-  if (code === 'STRIPE_WEBHOOK_NOT_CONFIGURED') {
-    throw new StripeNotConfiguredError(
-      'Card payments are not available yet: this gym has not finished connecting Stripe (the webhook signing secret is missing under Settings → Stripe).',
-      code
-    );
-  }
-  throw new StripeNotConfiguredError();
+  // A member at checkout reads this, so it says what they can do instead;
+  // what the gym's staff must fix goes to the log only.
+  console.warn(
+    '[stripe] card checkout refused:',
+    code === 'STRIPE_WEBHOOK_NOT_CONFIGURED'
+      ? 'the webhook signing secret is missing under Settings → Stripe'
+      : 'no Stripe keys (or card payments switched off) under Settings → Stripe'
+  );
+  throw new StripeNotConfiguredError(CARD_CHECKOUT_UNAVAILABLE, code || 'STRIPE_NOT_CONFIGURED');
 }
 
 module.exports = {

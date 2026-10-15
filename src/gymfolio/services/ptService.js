@@ -232,7 +232,29 @@ async function cancel(session, { by, reason = '', byStaff = false }) {
   return cancelled;
 }
 
-const isSet = (value) => value !== null && value !== undefined && value !== '';
+/**
+ * An account being deleted gives up its personal-training sessions still to
+ * come, so the trainer's slot is free to book again. As the desk cancelling:
+ * never late. Returns how many were cancelled.
+ */
+async function cancelUpcomingFor(memberId, { by = null } = {}) {
+  const now = Date.now();
+  const upcoming = await PtSession.find({ memberId, status: 'scheduled', date: { $gte: T.dateKey() } });
+  let count = 0;
+  for (const session of upcoming) {
+    if (localInstant(session.date, session.startTime).getTime() <= now) continue;
+    try {
+      await cancel(session, { by, reason: 'Account deleted', byStaff: true });
+      count += 1;
+    } catch (error) {
+      // Cancelled by somebody else a moment ago: nothing left to do.
+      if (!(error instanceof PtError)) throw error;
+    }
+  }
+  return count;
+}
+
+const isSet =(value) => value !== null && value !== undefined && value !== '';
 
 /**
  * What a trainer earns per completed session: `{ basis: 'percent', value }`
@@ -334,4 +356,4 @@ async function summary(from, to) {
   return [...byTrainer.values()].sort((a, b) => a.trainer_name.localeCompare(b.trainer_name));
 }
 
-module.exports = { PtError, availability, book, cancel, complete, noShow, summary, ptPackFor, perSessionValue, commissionTerms, commissionFor };
+module.exports = { PtError, availability, book, cancel, cancelUpcomingFor, complete, noShow, summary, ptPackFor, perSessionValue, commissionTerms, commissionFor };

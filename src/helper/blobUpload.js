@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { put, del } = require('@vercel/blob');
 const { currentTenant } = require('../platform/tenantContext');
-const { EXTENSION_FOR_MIME, UPLOADS_DIR, localUploadPath } = require('./upload');
+const { EXTENSION_FOR_MIME, UPLOADS_DIR, localUploadPath, startsLike, ALLOWED_PROOF_MIME_TYPES } = require('./upload');
 
 // Every gym's files sit under their own prefix in the store, named by the
 // gym's slug, so listings and clean-ups can be scoped to one customer.
@@ -83,6 +83,14 @@ const KINDS = {
   image: { mimes: ALLOWED_IMAGE_MIME_TYPES, maxBytes: MAX_FILE_SIZE, refusal: 'Only image files are allowed' },
   document: { mimes: ALLOWED_DOCUMENT_MIME_TYPES, maxBytes: MAX_DOCUMENT_SIZE, refusal: 'Only PDF, JPEG or PNG files are allowed' },
   video: { mimes: ALLOWED_VIDEO_MIME_TYPES, maxBytes: MAX_VIDEO_SIZE, refusal: 'Only video files are allowed (mp4, webm, mov)' },
+  // Payment receipts: an image or the PDF a bank app exports, at the image
+  // ceiling, and only when the bytes themselves match the claimed type.
+  proof: {
+    mimes: ALLOWED_PROOF_MIME_TYPES,
+    maxBytes: MAX_FILE_SIZE,
+    refusal: 'Upload the receipt as a photo (JPG, PNG, WebP) or a PDF.',
+    checkBytes: true,
+  },
 };
 
 // When a caller says nothing about the kind, the mimetype decides: a PDF is
@@ -102,7 +110,7 @@ function inferKind(mimetype) {
  * @param {string} mimetype - File mimetype
  * @param {string} folder - Folder path (e.g., 'products', 'categories')
  * @param {object} [options]
- * @param {'image'|'document'|'video'} [options.kind]  what is being stored; inferred from the mimetype when absent
+ * @param {'image'|'document'|'video'|'proof'} [options.kind]  what is being stored; inferred from the mimetype when absent
  * @param {number} [options.maxBytes]  a caller's own ceiling (hero images may be larger than the default)
  * @returns {Promise<string>} - Public URL of uploaded file
  */
@@ -122,6 +130,9 @@ async function uploadToBlob(buffer, filename, mimetype, folder = 'uploads', opti
   const maxBytes = options && Number(options.maxBytes) > 0 ? Number(options.maxBytes) : rule.maxBytes;
   if (buffer.length > maxBytes) {
     throw new Error(`File size exceeds ${Math.round(maxBytes / MB)}MB limit`);
+  }
+  if (rule.checkBytes && !startsLike(buffer.subarray(0, 16), mimetype)) {
+    throw new Error(rule.refusal);
   }
 
   // Generate unique filename. The extension follows the type checked above,

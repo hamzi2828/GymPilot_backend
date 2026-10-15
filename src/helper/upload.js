@@ -202,8 +202,77 @@ const documentUpload = multer({
 });
 const documentUploadSingle = (fieldName) => sizeLimited(documentUpload.single(fieldName), MAX_DOCUMENT_FILE_BYTES);
 
+// The first bytes every allowed kind of file starts with. A type is only the
+// browser's word; these say what the file really is.
+function startsLike(head, mimetype) {
+  const b = Buffer.isBuffer(head) ? head : Buffer.alloc(0);
+  const at = (offset, text) => b.length >= offset + text.length && b.subarray(offset, offset + text.length).toString('latin1') === text;
+  switch (mimetype) {
+    case 'application/pdf': return at(0, '%PDF-');
+    case 'image/jpeg': return b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+    case 'image/png': return at(0, '\x89PNG\r\n\x1a\n');
+    case 'image/gif': return at(0, 'GIF87a') || at(0, 'GIF89a');
+    case 'image/webp': return at(0, 'RIFF') && at(8, 'WEBP');
+    default: return false;
+  }
+}
+
+// The first bytes of an uploaded file, from memory or from disk.
+function headOf(file, length = 16) {
+  if (file.buffer) return file.buffer.subarray(0, length);
+  if (!file.path) return Buffer.alloc(0);
+  const fd = fs.openSync(file.path, 'r');
+  try {
+    const head = Buffer.alloc(length);
+    const read = fs.readSync(fd, head, 0, length, 0);
+    return head.subarray(0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Payment receipts: a photo or screenshot, or the PDF that Pakistani bank
+// and wallet apps usually export. The same size limit as any other image,
+// and the file's own first bytes must match the type it claims -- a "PDF"
+// that is really something else is refused (and removed from disk).
+const ALLOWED_PROOF_MIME_TYPES = new Set([...ALLOWED_IMAGE_MIME_TYPES, 'application/pdf']);
+const PROOF_REFUSAL = 'Upload the receipt as a photo (JPG, PNG, WebP) or a PDF.';
+const proofUpload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_PROOF_MIME_TYPES.has(file.mimetype)) return cb(null, true);
+    const error = new Error(PROOF_REFUSAL);
+    error.code = 'PROOF_TYPE_NOT_ALLOWED';
+    cb(error);
+  },
+  limits: { fileSize: MAX_FILE_BYTES }
+});
+function proofUploadSingle(fieldName) {
+  const read = sizeLimited(proofUpload.single(fieldName), MAX_FILE_BYTES);
+  return function proofUploadChecked(req, res, next) {
+    read(req, res, (error) => {
+      if (error && error.code === 'PROOF_TYPE_NOT_ALLOWED') {
+        return res.status(400).json({ success: false, code: 'FILE_NOT_ALLOWED', message: PROOF_REFUSAL });
+      }
+      if (error) return next(error);
+      const file = req.file;
+      if (!file) return next();
+      let ok = false;
+      try {
+        ok = startsLike(headOf(file), file.mimetype);
+      } catch {
+        ok = false;
+      }
+      if (ok) return next();
+      if (file.path) fs.promises.unlink(file.path).catch(() => {});
+      req.file = undefined;
+      return res.status(400).json({ success: false, code: 'FILE_NOT_ALLOWED', message: `That file does not look like a real photo or PDF. ${PROOF_REFUSAL}` });
+    });
+  };
+}
+
 // Convenience wrappers
-const uploadSingle = (fieldName) => sizeLimited(upload.single(fieldName), MAX_FILE_BYTES);
+const uploadSingle =(fieldName) => sizeLimited(upload.single(fieldName), MAX_FILE_BYTES);
 const uploadArray = (fieldName, maxCount) => sizeLimited(upload.array(fieldName, maxCount), MAX_FILE_BYTES);
 const uploadFields = (fields) => sizeLimited(upload.fields(fields), MAX_FILE_BYTES);
 
@@ -244,6 +313,9 @@ module.exports = {
   videoUploadSingle,
   csvUploadSingle,
   documentUploadSingle,
+  proofUploadSingle,
+  startsLike,
+  ALLOWED_PROOF_MIME_TYPES,
   ensureUploadsDir,
   toPublicPath,
   localUploadPath,

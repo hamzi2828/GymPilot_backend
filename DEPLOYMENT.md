@@ -120,7 +120,7 @@ after the API: an older build keeps working with this release.
 
 ## 5. After the first deploy
 
-1. Deploy `GymPilot_marketing` (marketing site + platform panel) with `NEXT_PUBLIC_BACKEND_URL` and `NEXT_PUBLIC_SITE_URL` set, and put its origin in the API's `PLATFORM_ADMIN_ORIGIN`. Sign in at `<that origin>/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor once SMTP works.
+1. Deploy `GymPilot_marketing` (marketing site + platform panel) with `NEXT_PUBLIC_BACKEND_URL` and `NEXT_PUBLIC_SITE_URL` set, and put its origin in the API's `PLATFORM_ADMIN_ORIGIN`. Sign in at `<that origin>/super-admin` with the super admin you created (`scripts/platform/createSuperAdmin.js`); change the password under **My account** and turn on two-factor there: with an authenticator app (works without SMTP; save the backup codes it shows once) or by emailed code once SMTP works.
 2. Create your platform plans (**Plans**) and put the demo gym on one.
 3. Provision new gyms from **Gyms → New gym**; each owner lands in the setup
    wizard at `/admin/setup`. Gyms can also sign up and pay on their own at

@@ -225,8 +225,12 @@ app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 app.use(
   '/uploads',
   express.static(path.resolve(__dirname, 'uploads'), {
-    setHeaders: (res) => {
+    setHeaders: (res, filePath) => {
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // Browsers will not show a PDF (a bank receipt, a member's document)
+      // inside a sandbox. A .pdf is served as application/pdf with nosniff,
+      // so it opens in the PDF viewer and never as a page.
+      if (/\.pdf$/i.test(filePath)) return;
       res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     }
   })

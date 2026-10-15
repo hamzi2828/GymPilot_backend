@@ -311,6 +311,27 @@ test('a fresh link can be asked for, and a link that cannot be sent leaves nothi
   assert.equal((await membershipOf(pat._id)).status, 'none');
 });
 
+test('sign-up says whether the confirmation email really went', async () => {
+  const sent = await signUp('gil@verify.test');
+  assert.equal(sent.statusCode, 201, JSON.stringify(sent.body));
+  assert.equal(sent.body.verificationEmailSent, true);
+  assert.match(sent.body.message, /emailed you a link/);
+  assert.ok(confirmationTo('gil@verify.test'), 'sent before the answer');
+
+  h.setEmailFailure('SMTP is down');
+  try {
+    const failed = await signUp('hal@verify.test');
+    assert.equal(failed.statusCode, 201, JSON.stringify(failed.body));
+    assert.equal(failed.body.verificationEmailSent, false);
+    assert.doesNotMatch(failed.body.message, /emailed you/);
+    assert.match(failed.body.message, /couldn't send the confirmation email right now/);
+  } finally {
+    h.setEmailFailure(null);
+  }
+  // The account works all the same.
+  assert.equal((await inGym(() => h.call(users.loginUser, { body: { email: 'hal@verify.test', password: PASSWORD } }))).statusCode, 200);
+});
+
 test('a password reset through the emailed link confirms the address it was sent to', async () => {
   await guestOrder('rex@verify.test');
   const res = await signUp('rex@verify.test');

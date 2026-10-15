@@ -154,3 +154,33 @@ test('a member who has no email can still save the rest of their profile', async
   assert.equal(stored.phone, '0300 1110005');
   assert.equal('email' in stored, false);
 });
+
+test('a phone number on the profile has to look like one', async () => {
+  const pia = await account({ firstName: 'Pia', lastName: 'Phone', email: 'pia@account-email.test', phone: '0300 1110006' });
+  for (const typed of ['abc', '12', '0301 abc 1234', '+92+301']) {
+    const res = await updateMe(pia, { phone: typed });
+    assert.equal(res.statusCode, 400, `${typed}: ${JSON.stringify(res.body)}`);
+    assert.equal(res.body.field, 'phone');
+    assert.equal((await storedOf(pia)).phone, '0300 1110006', `${typed} was not saved`);
+  }
+  for (const typed of ['0301-1234567', '+92 301 1234567', '0092 301 1234567', ' 03011234567 ']) {
+    const res = await updateMe(pia, { phone: typed });
+    assert.equal(res.statusCode, 200, `${typed}: ${JSON.stringify(res.body)}`);
+    assert.equal((await storedOf(pia)).phone, typed.trim());
+  }
+});
+
+test('the profile says whether the gym has the member app, so the app username is offered only then', async () => {
+  const uma = await account({ firstName: 'Uma', lastName: 'Username', email: 'uma@account-email.test' });
+  const profile = (tenant) => h.inGym(gym, () => h.call(users.getUserDetailForProfile, { headers: { authorization: bearer(uma) }, tenant }));
+
+  const noPlan = await profile({ _id: 'gym-no-plan' });
+  assert.equal(noPlan.statusCode, 200, JSON.stringify(noPlan.body));
+  assert.equal(noPlan.body.memberApp, true);
+  assert.ok(noPlan.body.data.username);
+
+  const withoutApp = await profile({ _id: 'gym-starter', plan: { slug: 'starter', price: 10, includedAddons: [] } });
+  assert.equal(withoutApp.body.memberApp, false);
+  const withApp = await profile({ _id: 'gym-pro', plan: { slug: 'pro', price: 50, includedAddons: ['member-app'] } });
+  assert.equal(withApp.body.memberApp, true);
+});

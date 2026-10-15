@@ -8,7 +8,7 @@ const auth = require('../../middleware/auth');
 const requirePermission = require('../../middleware/requirePermission');
 const optionalAuth = require('../../middleware/optionalAuth');
 const { tenantFromStripeWebhook, tenantFromSlugParam } = require('../../platform/middleware/tenantFromPayload');
-const { uploadSingle, uploadArray, uploadFields } = require('../../helper/upload');
+const { uploadSingle, uploadArray, uploadFields, proofUploadSingle } = require('../../helper/upload');
 const rateLimit = require('../../middleware/rateLimit');
 
 // Request ceilings on the endpoints the public can hit without signing in:
@@ -245,7 +245,7 @@ router.get('/package-orders/:id/subscription-status', auth, gymfolioPaymentContr
 // Member-or-staff routes: the handler checks whether the caller owns the
 // order or holds the package-orders permission, and applies the member-side
 // limits (freeze length, whether cancelling online is allowed) accordingly.
-router.post('/package-orders/:id/proof', publicWriteLimiter, auth, uploadSingle('proof'), membershipController.submitProof);
+router.post('/package-orders/:id/proof', publicWriteLimiter, auth, proofUploadSingle('proof'), membershipController.submitProof);
 router.post('/package-orders/:id/freeze', auth, membershipController.freeze);
 router.post('/package-orders/:id/unfreeze', auth, membershipController.unfreeze);
 router.post('/package-orders/:id/cancel', auth, membershipController.cancel);

@@ -203,3 +203,19 @@ test('an order assigned at the desk and left pending is confirmed the same way',
     assert.equal(res.body.data.status, 'active');
   });
 });
+
+test("the member's own order list carries why their receipt was not accepted", async () => {
+  await h.inGym(gym, async () => {
+    const order = await awaitingReview();
+    const rejected = await reject(order, 'Amount does not match');
+    assert.equal(rejected.statusCode, 200, JSON.stringify(rejected.body));
+
+    const payments = h.src('gymfolio/controller/gymfolioPaymentController');
+    const mine = await h.call(payments.getUserOrders, { user: { id: String(order.userId) }, query: {} });
+    assert.equal(mine.statusCode, 200, JSON.stringify(mine.body));
+    const row = JSON.parse(JSON.stringify(mine.body.data)).find((o) => String(o._id) === String(order._id));
+    assert.ok(row, 'the rejected order is in the list');
+    assert.equal(row.payment.status, 'failed');
+    assert.equal(row.payment.proof.rejectionReason, 'Amount does not match');
+  });
+});

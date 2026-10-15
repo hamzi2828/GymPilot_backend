@@ -84,3 +84,17 @@ test('the invoice of a wallet payment renders', async () => {
     assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
   });
 });
+
+test('a member at a gym without card payments is told what to do, not about Stripe keys', async () => {
+  await h.inGym(gym, async () => {
+    const res = await h.call(orders.createPackageCheckoutSession, {
+      body: { packageId: String(pkg._id), customerInfo: { email: member.email, fullName: 'Wallet Payer' } },
+      user: { id: String(member._id) }
+    });
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'STRIPE_NOT_CONFIGURED');
+    assert.match(res.body.message, /Card payment isn't available at this gym — please choose bank transfer/);
+    assert.doesNotMatch(res.body.message, /Stripe|Settings/);
+    assert.equal(await PackageOrder.countDocuments({ 'payment.method': 'stripe' }), 0);
+  });
+});

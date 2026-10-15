@@ -34,6 +34,9 @@ const SIGN_IN_REJECTED = `That email or username and password do not match. ${si
 const SESSION_TTL = '7d';
 const REMEMBERED_SESSION_TTL = '30d';
 
+// How long sign-up waits for the confirmation email before answering.
+const SIGNUP_EMAIL_WAIT_MS = 8000;
+
 function wantsRemember(body) {
   const value = body && body.remember;
   return value === true || value === 'true' || value === 1 || value === '1';
@@ -55,7 +58,7 @@ async function activeAdminCount() {
 // fingerprint templates -- biometric data that must not outlive the person --
 // are removed. None of these may block the deletion itself; a failure is
 // logged and the account is still gone.
-async function releaseAccount(user) {
+async function releaseAccount(user, { by = null } = {}) {
     const id = user._id || user.id;
     try {
         const MemberDirectory = require('../platform/models/memberDirectoryModel');
@@ -83,6 +86,17 @@ async function releaseAccount(user) {
         await Promise.all([MobilePushToken.deleteMany({ userId: id }), PushSubscription.deleteMany({ userId: id })]);
     } catch (error) {
         console.error('[users] could not delete push registrations of', String(id), '-', error.message);
+    }
+    // Its class places and PT sessions still to come are given up, so a class
+    // is not left full for somebody who can never come: the waiting list
+    // moves up exactly as when a booking is cancelled.
+    try {
+        const { cancelUpcomingFor: cancelClassBookings } = require('../gymfolio/controller/classBookingController');
+        const { cancelUpcomingFor: cancelPtSessions } = require('../gymfolio/services/ptService');
+        await cancelClassBookings(id, { by });
+        await cancelPtSessions(id, { by });
+    } catch (error) {
+        console.error('[users] could not cancel the bookings of', String(id), '-', error.message);
     }
     // Nor may what was uploaded for the account outlive it: its photo and its
     // documents (ID scans, medical letters). `documents` is `select: false`,
@@ -640,10 +654,30 @@ const userController = {
             // The welcome email carries their username for the phone app,
             // which they are told nowhere else. Not waited for.
             afterResponse(() => notify.memberWelcome(user), 'welcome email');
-            afterResponse(() => verification.sendLink(user, { origin: verification.apiOrigin(req) }), 'confirmation email');
+
+            // The confirmation link is waited for (a few seconds at most), so
+            // the page can say truthfully whether it went: sign-up used to
+            // promise "we have emailed you a link" when the send had failed.
+            // A send still going after that carries on after the response
+            // and is reported as not sent (yet).
+            const sending = verification.sendLink(user, { origin: verification.apiOrigin(req) });
+            let timer;
+            const outcome = await Promise.race([
+                sending,
+                new Promise((resolve) => { timer = setTimeout(() => resolve(null), SIGNUP_EMAIL_WAIT_MS); })
+            ]);
+            clearTimeout(timer);
+            if (!outcome) afterResponse(sending, 'confirmation email');
+            const verificationEmailSent = !!(outcome && outcome.sent);
 
             // Sanitize output
-            return res.status(201).json({ message: 'User created successfully', data: publicUserView(user) });
+            return res.status(201).json({
+                message: verificationEmailSent
+                    ? 'Your account is ready. We have emailed you a link to confirm your address.'
+                    : "Your account is ready. We couldn't send the confirmation email right now — you can still sign in.",
+                verificationEmailSent,
+                data: publicUserView(user)
+            });
         } catch (error) {
             // Handle duplicate key error from unique index
             if (error && error.code === 11000) {
@@ -1207,6 +1241,13 @@ const userController = {
                 if (userData[key] !== undefined) safeUpdates[key] = userData[key];
             }
             if (typeof safeUpdates.email === 'string') safeUpdates.email = safeUpdates.email.toLowerCase().trim();
+            // A phone number has to look like one ("abc" was saved as-is);
+            // an empty box still clears it.
+            if (safeUpdates.phone !== undefined) {
+                const phoneRefusal = require('../services/phoneMatch').phoneProblem(safeUpdates.phone);
+                if (phoneRefusal) return res.status(400).json({ message: phoneRefusal, field: 'phone' });
+                if (typeof safeUpdates.phone === 'string') safeUpdates.phone = safeUpdates.phone.trim();
+            }
 
             // What the request does to the address: nothing (not sent, or
             // the one already on the account), removes it, or changes it.
@@ -1336,7 +1377,7 @@ const userController = {
             if (billing) return res.status(409).json(billing);
 
             await User.findByIdAndDelete(currentUser.id);
-            await releaseAccount(user);
+            await releaseAccount(user, { by: currentUser.id });
             res.status(200).json({ message: 'User deleted successfully', id: currentUser.id });
         } catch (error) {
             res.status(400).json({ message: 'Error deleting user', error: error.message });
@@ -1356,11 +1397,23 @@ const userController = {
                 return res.status(404).json({ message: 'User not found' });
             }
 
+            // Whether this gym's plan includes the phone app, so the profile
+            // only offers the app username where there is an app to use it
+            // in. Not knowing is no reason to hide it.
+            let memberApp = true;
+            try {
+                const gym = req.tenant || require('../platform/tenantContext').currentTenant();
+                if (gym) memberApp = !!(await require('../platform/entitlements').gymHasAddon(gym, 'member-app'));
+            } catch (error) {
+                console.warn('[users] member-app check failed:', error.message);
+            }
+
             // The same view every sign-in returns: no credentials, and none
             // of the staff-only notes, which are about the member, not for
             // them (services/userView.js).
             res.status(200).json({
                 message: 'User details retrieved successfully',
+                memberApp,
                 data: publicUserView(user)
             });
         } catch (error) {
@@ -1652,7 +1705,7 @@ const userController = {
             if (!deleted) {
                 return res.status(404).json({ message: 'User not found' });
             }
-            await releaseAccount(deleted);
+            await releaseAccount(deleted, { by: currentUser.id });
 
             return res.status(200).json({ message: 'User deleted successfully', id });
         } catch (error) {
