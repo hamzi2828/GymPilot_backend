@@ -15,6 +15,7 @@
 const mongoose = require('mongoose');
 const { EXPENSE_METHODS, LEGACY_EXPENSE_METHODS } = require('../../services/paymentMethods');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { recordCurrencyDefault } = require('../../services/currency');
 
 // The things a gym actually spends money on, in the order they usually matter.
 const CATEGORIES = [
@@ -64,7 +65,8 @@ const expenseSchema = new mongoose.Schema(
     // Stored per row rather than assumed. A gym that buys equipment abroad has
     // costs in two currencies, and a report that silently adds them is worse
     // than one that admits it cannot.
-    currency: { type: String, default: 'PKR', uppercase: true, trim: true },
+    // Defaults to the gym's currency when the row is created (services/currency.js).
+    currency: { type: String, default: '', uppercase: true, trim: true },
 
     // The period this cost belongs to -- what the P&L files it under.
     incurredOn: { type: Date, required: true, index: true },
@@ -123,5 +125,7 @@ expenseSchema.index({ category: 1, incurredOn: -1 });
 
 expenseSchema.statics.CATEGORIES = CATEGORIES;
 expenseSchema.statics.CATEGORY_LABELS = CATEGORY_LABELS;
+
+expenseSchema.plugin(recordCurrencyDefault);
 
 module.exports = tenantModel('Expense', expenseSchema);

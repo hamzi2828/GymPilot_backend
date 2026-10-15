@@ -302,6 +302,7 @@ module.exports = {
 
       const monthLabel = L.rangeLabel(range.from, range.to);
       const created = [];
+      const payCurrency = await L.recordCurrency();
 
       for (const person of staff) {
         const payroll = (person.employment && person.employment.payroll) || {};
@@ -331,7 +332,8 @@ module.exports = {
           title: `Salary — ${name} (${monthLabel})`,
           category: 'salaries',
           amount,
-          currency: String(payroll.currency || 'PKR').toUpperCase(),
+          // The gym's currency, like the payslip it stands for.
+          currency: payCurrency,
           incurredOn: new Date(range.end.getTime() - 1),
           status: 'pending',
           paidOn: null,

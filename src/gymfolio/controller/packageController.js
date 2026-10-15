@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Package = require('../models/packageModel');
 const PackageOrder = require('../models/packageOrderModel');
-const { currencyOr } = require('../../services/currency');
+const { defaultCurrency } = require('../../services/currency');
 const { parseAmount } = require('../../helper/money');
 const { periodProblem } = require('../services/membershipService');
 
@@ -138,8 +138,9 @@ const createPackage = async (req, res) => {
     const packageData = {
       name,
       price,
-      // The gym's own currency (Settings → General) unless one was given.
-      currency: await currencyOr(currency),
+      // Always the gym's own currency (Settings → General): a code the form
+      // sends is ignored, so one gym never sells in two currencies.
+      currency: await defaultCurrency(),
       period,
       features: parsedFeatures,
       theme: theme || 'light',
@@ -227,7 +228,7 @@ const updatePackage = async (req, res) => {
       // findByIdAndUpdate skips the model's pre-save hook, which is what
       // normally keeps the numeric price in step with the display string.
       priceAmount: parseAmount(price || package.price),
-      currency: currency || package.currency,
+      currency: await defaultCurrency(),
       period: period || package.period,
       features: parsedFeatures || package.features,
       theme: theme !== undefined ? theme : package.theme,

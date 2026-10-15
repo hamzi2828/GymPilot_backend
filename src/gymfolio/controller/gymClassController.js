@@ -1,5 +1,5 @@
 const GymClass = require('../models/gymClassModel');
-const { currencyOr } = require('../../services/currency');
+const { defaultCurrency } = require('../../services/currency');
 const { checkLimit } = require('../../platform/planLimits');
 const { cancelBookings } = require('./classExceptionController');
 const T = require('../../attendance/services/timeUtils');
@@ -334,7 +334,8 @@ const createClass = async (req, res) => {
       isFeatured: isFeatured !== undefined ? isFeatured === 'true' || isFeatured === true : false,
       order: order ? parseInt(order) : undefined,
       price: price ? parseFloat(price) : 0,
-      currency: await currencyOr(currency)
+      // The gym's currency, never one the form sent (services/currency.js).
+      currency: await defaultCurrency()
     };
 
     // The gym's platform plan may cap how many classes it can run.
@@ -474,7 +475,7 @@ const updateClass = async (req, res) => {
       isFeatured: isFeatured !== undefined ? (isFeatured === 'true' || isFeatured === true) : gymClass.isFeatured,
       order: order !== undefined ? parseInt(order) : gymClass.order,
       price: price !== undefined ? parseFloat(price) : gymClass.price,
-      currency: currency || gymClass.currency
+      currency: await defaultCurrency()
     };
 
     const updatedClass = await GymClass.findByIdAndUpdate(id, updateData, {

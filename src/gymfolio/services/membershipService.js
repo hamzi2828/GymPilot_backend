@@ -51,13 +51,17 @@ async function membershipSettings() {
 
 /* ------------------------------ packages ------------------------------- */
 
-/** The snapshot of a package that lives on the order for the rest of its life. */
-function packageSnapshot(pkg) {
+/**
+ * The snapshot of a package that lives on the order for the rest of its life.
+ * `currency` is the one the order is booked in (resolveCurrency: the gym's),
+ * so the snapshot never carries a package's stale label.
+ */
+function packageSnapshot(pkg, currency) {
   const billing = pkg.billing || {};
   return {
     name: pkg.name,
     price: String(pkg.price),
-    currency: pkg.currency,
+    currency: currency || pkg.currency,
     period: pkg.period || (billing.mode === 'recurring' ? billing.interval : 'month'),
     features: Array.isArray(pkg.features) ? pkg.features : [],
     kind: pkg.kind || 'membership',
@@ -656,7 +660,7 @@ async function createManualOrder({
   const { method, problem } = readDeskMethod(paymentMethod);
   if (problem) throw new MembershipError(problem, 422, 'PAYMENT_METHOD_INVALID');
   const currency = resolveCurrency(pkg.currency, settings && settings.currency);
-  const snapshot = packageSnapshot(pkg);
+  const snapshot = packageSnapshot(pkg, currency);
   const feeDue = chargeJoiningFee === undefined ? await joiningFeeDue({ userId: user._id, email: provenEmail(user) }) : !!chargeJoiningFee;
   const joiningFee = feeDue ? round2(snapshot.joiningFee) : 0;
 
@@ -1059,7 +1063,7 @@ async function createBankTransferOrder({ user, pkg, customerInfo = {}, couponCod
   const listPrice = parseAmount(pkg.price);
   if (listPrice === null || listPrice <= 0) throw new MembershipError('This package cannot be bought online', 422);
   const currency = resolveCurrency(pkg.currency, settings && settings.currency);
-  const snapshot = packageSnapshot(pkg);
+  const snapshot = packageSnapshot(pkg, currency);
 
   const { coupon, discount } = await applyCoupon(couponCode, pkg, listPrice);
   // Charged once: not to a member coming back (joiningFeeDue).

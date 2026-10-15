@@ -18,6 +18,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { recordCurrencyDefault } = require('../../services/currency');
 
 const CATEGORIES = [
   'cardio',
@@ -77,7 +78,8 @@ const assetSchema = new mongoose.Schema(
     // so editing the count of a rack of dumbbells does not require restating
     // what one pair cost.
     unitCost: { type: Number, default: 0, min: 0 },
-    currency: { type: String, default: 'PKR', uppercase: true, trim: true },
+    // Defaults to the gym's currency when the row is created (services/currency.js).
+    currency: { type: String, default: '', uppercase: true, trim: true },
 
     purchasedOn: { type: Date, default: null, index: true },
     supplier: { type: String, default: '', trim: true },
@@ -129,5 +131,7 @@ assetSchema.index({ status: 1, category: 1 });
 assetSchema.statics.CATEGORIES = CATEGORIES;
 assetSchema.statics.CATEGORY_LABELS = CATEGORY_LABELS;
 assetSchema.statics.DEFAULT_LIFE_YEARS = DEFAULT_LIFE_YEARS;
+
+assetSchema.plugin(recordCurrencyDefault);
 
 module.exports = tenantModel('Asset', assetSchema);

@@ -6,6 +6,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { recordCurrencyDefault } = require('../services/currency');
 
 const saleItemSchema = new mongoose.Schema(
   {
@@ -30,7 +31,8 @@ const saleSchema = new mongoose.Schema(
     taxRate: { type: Number, default: 0 },
     taxAmount: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
-    currency: { type: String, default: 'USD', uppercase: true },
+    // No default here: a new row gets the gym's currency (services/currency.js).
+    currency: { type: String, default: '', uppercase: true },
     // Mobile wallets beside cash and card: JazzCash, Easypaisa, or another
     // wallet ('wallet'). The same values package orders take. Kept in step
     // with METHODS in controller/posController.js.
@@ -54,5 +56,7 @@ const saleSchema = new mongoose.Schema(
     collection: 'gym_sales'
   }
 );
+
+saleSchema.plugin(recordCurrencyDefault);
 
 module.exports = tenantModel('Sale', saleSchema);

@@ -32,7 +32,8 @@ function applyBody(coupon, body) {
   if (body.description !== undefined) coupon.description = String(body.description || '').trim();
   if (body.type !== undefined) coupon.type = body.type;
   if (body.value !== undefined) coupon.value = Number(body.value) || 0;
-  if (body.currency !== undefined) coupon.currency = String(body.currency || '').toUpperCase().trim();
+  // No currency from the body: a coupon is in the gym's currency, which the
+  // model sets on save (services/currency.js catalogueCurrency).
   if (body.packageIds !== undefined) {
     coupon.packageIds = (Array.isArray(body.packageIds) ? body.packageIds : []).filter((id) => mongoose.Types.ObjectId.isValid(id));
   }

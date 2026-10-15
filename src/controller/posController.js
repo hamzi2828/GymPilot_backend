@@ -237,7 +237,8 @@ module.exports = {
         category: String(b.category || 'general').trim().toLowerCase() || 'general',
         price: round(b.price),
         cost: round(b.cost),
-        currency: String(b.currency || '').toUpperCase().trim(),
+        // The gym's currency, whatever the body says (the model sets it).
+        currency: await gymCurrency(),
         trackStock: b.trackStock !== false && b.trackStock !== 'false',
         stock: Math.max(0, parseInt(b.stock, 10) || 0),
         lowStockAt: Math.max(0, parseInt(b.lowStockAt, 10) || 0),
@@ -268,7 +269,6 @@ module.exports = {
       if (b.category !== undefined) product.category = String(b.category).trim().toLowerCase() || 'general';
       if (b.price !== undefined && Number(b.price) >= 0) product.price = round(b.price);
       if (b.cost !== undefined) product.cost = round(b.cost);
-      if (b.currency !== undefined) product.currency = String(b.currency).toUpperCase().trim();
       if (b.trackStock !== undefined) product.trackStock = b.trackStock === true || b.trackStock === 'true';
       if (b.lowStockAt !== undefined) product.lowStockAt = Math.max(0, parseInt(b.lowStockAt, 10) || 0);
       if (b.taxable !== undefined) product.taxable = b.taxable === true || b.taxable === 'true';

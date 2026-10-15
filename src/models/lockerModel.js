@@ -5,6 +5,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { catalogueCurrency } = require('../services/currency');
 
 const lockerSchema = new mongoose.Schema(
   {
@@ -17,6 +18,7 @@ const lockerSchema = new mongoose.Schema(
     // Local calendar date the rental runs to; null = open-ended.
     until: { type: String, default: null },
     fee: { type: Number, default: 0 },
+    // The gym's currency, whatever was sent (services/currency.js).
     currency: { type: String, default: '', uppercase: true },
     notes: { type: String, default: '', trim: true },
     order: { type: Number, default: 0 }
@@ -28,5 +30,6 @@ const lockerSchema = new mongoose.Schema(
 );
 
 lockerSchema.index({ zone: 1, number: 1 }, { unique: true });
+lockerSchema.plugin(catalogueCurrency);
 
 module.exports = tenantModel('Locker', lockerSchema);

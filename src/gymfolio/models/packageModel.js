@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { catalogueCurrency } = require('../../services/currency');
 
 const packageSchema = new mongoose.Schema({
   name: {
@@ -13,10 +14,10 @@ const packageSchema = new mongoose.Schema({
     required: [true, 'Price is required'],
     trim: true
   },
+  // Always the gym's currency (Settings → General); see catalogueCurrency.
   currency: {
     type: String,
     required: [true, 'Currency is required'],
-    default: 'PKR',
     trim: true
   },
   period: {
@@ -119,6 +120,8 @@ packageSchema.pre('save', async function(next) {
   }
   next();
 });
+
+packageSchema.plugin(catalogueCurrency);
 
 const Package = tenantModel('Package', packageSchema);
 

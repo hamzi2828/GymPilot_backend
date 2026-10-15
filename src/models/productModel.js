@@ -6,6 +6,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { catalogueCurrency } = require('../services/currency');
 
 const productSchema = new mongoose.Schema(
   {
@@ -15,6 +16,7 @@ const productSchema = new mongoose.Schema(
     price: { type: Number, required: true, min: 0 },
     // What it cost the gym, for the margin on the sales report.
     cost: { type: Number, default: 0, min: 0 },
+    // The gym's currency, whatever was sent (services/currency.js).
     currency: { type: String, default: '', uppercase: true, trim: true },
     trackStock: { type: Boolean, default: true },
     stock: { type: Number, default: 0 },
@@ -31,5 +33,6 @@ const productSchema = new mongoose.Schema(
 );
 
 productSchema.index({ name: 1 });
+productSchema.plugin(catalogueCurrency);
 
 module.exports = tenantModel('Product', productSchema);

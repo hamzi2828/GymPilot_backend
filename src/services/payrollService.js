@@ -20,6 +20,7 @@ const Payslip = require('../models/payslipModel');
 const Counter = require('../gymfolio/models/counterModel');
 const Settings = require('../models/settings');
 const L = require('../accounts/services/ledger');
+const { defaultCurrency } = require('./currency');
 const T = require('../attendance/services/timeUtils');
 
 function round(n) {
@@ -71,7 +72,9 @@ async function draftFor(person, range, { createdBy = null } = {}) {
 
   const payroll = (person.employment && person.employment.payroll) || {};
   const basis = payroll.basis || 'salaried';
-  const currency = String(payroll.currency || 'PKR').toUpperCase();
+  // Pay is in the gym's currency (Settings → General), not whatever code a
+  // staff record was saved with before the gym changed it.
+  const currency = await defaultCurrency();
 
   // Hours: punches filed against the staff account and against a trainer
   // profile linked to it. A visit an administrator voided pays nothing --

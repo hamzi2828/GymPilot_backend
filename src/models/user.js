@@ -91,7 +91,9 @@ const payrollSchema = new mongoose.Schema({
     basis: { type: String, enum: ['salaried', 'hourly'], default: 'salaried' },
     salary: { type: Number, default: 0, min: 0 },
     hourlyRate: { type: Number, default: 0, min: 0 },
-    currency: { type: String, default: 'PKR', trim: true },
+    // Empty = the gym's currency. The staff form stamps the gym's; a change
+    // of currency in Settings relabels it (services/currency.js).
+    currency: { type: String, default: '', trim: true },
     cycle: { type: String, enum: ['monthly', 'biweekly', 'weekly'], default: 'monthly' },
     contractHoursPerWeek: { type: Number, default: 0, min: 0 },
     // Where the money goes. Kept alongside the rate because payroll is run

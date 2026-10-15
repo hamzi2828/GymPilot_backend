@@ -187,6 +187,12 @@ async function resolveCurrency() {
   return value;
 }
 
+// Drops this gym's cached answer, for when its Settings currency has just
+// changed: a sale rung up a second later must be in the new one.
+function forgetCurrency() {
+  currencyCaches.delete(tenantKey());
+}
+
 async function baseCurrency() {
   return (await resolveCurrency()).effective;
 }
@@ -645,6 +651,7 @@ module.exports = {
   bucketKeyFor,
   baseCurrency,
   recordCurrency,
+  forgetCurrency,
   currencyNotice,
   addTo,
   sumOf,

@@ -8,6 +8,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { recordCurrencyDefault } = require('../services/currency');
 
 const lineSchema = new mongoose.Schema(
   {
@@ -28,7 +29,8 @@ const payslipSchema = new mongoose.Schema(
       to: { type: String, required: true },
       label: { type: String, default: '' }
     },
-    currency: { type: String, default: 'PKR', uppercase: true },
+    // No default here: a new row gets the gym's currency (services/currency.js).
+    currency: { type: String, default: '', uppercase: true },
     basis: { type: String, enum: ['salaried', 'hourly'], default: 'salaried' },
     // The base pay and what it was worked out from.
     base: { type: Number, default: 0 },
@@ -90,5 +92,7 @@ payslipSchema.methods.recalculate = function () {
   this.net = round(this.gross - (Number(this.unpaidLeaveDeduction) || 0) - sum(this.deductions));
   return this;
 };
+
+payslipSchema.plugin(recordCurrencyDefault);
 
 module.exports = tenantModel('Payslip', payslipSchema);

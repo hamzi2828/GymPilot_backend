@@ -107,7 +107,8 @@ async function payrollFor(range) {
 
   for (const person of staff) {
     const payroll = (person.employment && person.employment.payroll) || {};
-    const currency = String(payroll.currency || 'PKR').toUpperCase();
+    // The gym's currency, like the payslip (services/payrollService.js).
+    const currency = trainerCurrency;
     let cost = 0;
     let basis = payroll.basis || 'salaried';
 

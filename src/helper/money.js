@@ -163,8 +163,10 @@ function normaliseCurrency(value) {
 
 /**
  * The currency an order should be booked in, in the order the answer should
- * be trusted: what the package says, then what the gym's settings say, then
- * the fallback.
+ * be trusted: what the gym's settings say (the one currency the whole gym
+ * sells in), then what the package says, then the fallback. The package's
+ * own field is only a fallback: it can be a label from before the gym
+ * changed its currency.
  *
  * Callers pass the settings currency rather than this module reading Settings
  * itself, so this file stays synchronous and free of database access -- it is
@@ -176,8 +178,8 @@ function normaliseCurrency(value) {
  */
 function resolveCurrency(packageCurrency, settingsCurrency) {
   return (
-    normaliseCurrency(packageCurrency) ||
     normaliseCurrency(settingsCurrency) ||
+    normaliseCurrency(packageCurrency) ||
     FALLBACK_CURRENCY
   );
 }

@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { catalogueCurrency } = require('../../services/currency');
 
 const scheduleSchema = new mongoose.Schema({
   day: {
@@ -145,9 +146,10 @@ const gymClassSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  // Always the gym's currency (Settings → General); see catalogueCurrency.
   currency: {
     type: String,
-    default: 'PKR',
+    default: '',
     trim: true
   }
 }, {
@@ -212,6 +214,8 @@ gymClassSchema.statics.getClassesByCategory = function(category) {
     .populate('schedule.instructor', 'name role image')
     .sort({ order: 1, createdAt: 1 });
 };
+
+gymClassSchema.plugin(catalogueCurrency);
 
 const GymClass = tenantModel('GymClass', gymClassSchema);
 

@@ -104,7 +104,9 @@ function cleanPayroll(input = {}, fallbackCurrency = FALLBACK_CURRENCY) {
     basis,
     salary: Math.max(0, Number(input.salary) || 0),
     hourlyRate: Math.max(0, Number(input.hourlyRate) || 0),
-    currency: String(input.currency || fallbackCurrency).trim().toUpperCase().slice(0, 8),
+    // Always the gym's currency: one currency for the whole gym, so a code
+    // the form sends (or an old record carried) is not kept.
+    currency: String(fallbackCurrency).trim().toUpperCase().slice(0, 8),
     cycle: PAY_CYCLES.includes(input.cycle) ? input.cycle : 'monthly',
     contractHoursPerWeek: Math.max(0, Number(input.contractHoursPerWeek) || 0),
     bankName: String(input.bankName || '').trim(),
@@ -192,7 +194,8 @@ function scheduleSummary(schedule) {
   };
 }
 
-function shapeStaff(user, roleName, stats) {
+// `currency` is the gym's: what this person is paid in.
+function shapeStaff(user, roleName, stats, currency) {
   const employment = user.employment || {};
   const payroll = employment.payroll || {};
 
@@ -222,7 +225,7 @@ function shapeStaff(user, roleName, stats) {
       basis: payroll.basis || 'salaried',
       salary: payroll.salary || 0,
       hourly_rate: payroll.hourlyRate || 0,
-      currency: payroll.currency || 'PKR',
+      currency: currency || payroll.currency || FALLBACK_CURRENCY,
       cycle: payroll.cycle || 'monthly',
       contract_hours_per_week: payroll.contractHoursPerWeek || 0,
       bank_name: payroll.bankName || '',
@@ -288,6 +291,7 @@ module.exports = {
 
       const roles = await Role.find().select('slug name').lean();
       const roleNames = new Map(roles.map((role) => [role.slug, role.name]));
+      const currency = await defaultCurrency();
 
       // This month's hours per person, in one pass -- the number a payroll
       // conversation actually starts from.
@@ -377,7 +381,7 @@ module.exports = {
           active: staff.filter((row) => row.isActive !== false).length,
           on_shift: [...statsById.values()].filter((entry) => entry.still_in).length
         },
-        staff: staff.map((row) => shapeStaff(row, roleNames.get(row.role), statsById.get(String(row._id))))
+        staff: staff.map((row) => shapeStaff(row, roleNames.get(row.role), statsById.get(String(row._id)), currency))
       });
     } catch (error) {
       console.error('[staff] list failed:', error);
@@ -515,7 +519,7 @@ module.exports = {
         emailError,
         credentials: initial.mode,
         ...(reveal ? { password } : {}),
-        staff: shapeStaff(user.toObject(), roleDoc.name)
+        staff: shapeStaff(user.toObject(), roleDoc.name, undefined, await defaultCurrency())
       });
     } catch (error) {
       if (error && error.code === 11000) {
@@ -649,7 +653,7 @@ module.exports = {
       return res.json({
         success: true,
         message: 'Staff member updated',
-        staff: shapeStaff(user.toObject(), roleDoc ? roleDoc.name : user.role)
+        staff: shapeStaff(user.toObject(), roleDoc ? roleDoc.name : user.role, undefined, await defaultCurrency())
       });
     } catch (error) {
       console.error('[staff] update failed:', error);

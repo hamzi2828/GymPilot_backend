@@ -6,6 +6,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { catalogueCurrency } = require('../../services/currency');
 
 const couponSchema = new mongoose.Schema(
   {
@@ -21,6 +22,7 @@ const couponSchema = new mongoose.Schema(
     type: { type: String, enum: ['percent', 'amount'], required: true },
     // Percent: 1-100. Amount: in the gym's currency, major units.
     value: { type: Number, required: true, min: 0 },
+    // The gym's currency, whatever was sent (services/currency.js).
     currency: { type: String, default: '', uppercase: true, trim: true },
     // Empty = every package.
     packageIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Package' }], default: [] },
@@ -42,6 +44,7 @@ const couponSchema = new mongoose.Schema(
 );
 
 couponSchema.index({ isActive: 1, validUntil: 1 });
+couponSchema.plugin(catalogueCurrency);
 
 /**
  * Why this coupon cannot be used right now, or null when it can.

@@ -704,10 +704,25 @@ const settingsController = {
       // Update settings
       const updatedSettings = await Settings.updateSettings(updateData);
 
+      // The gym's currency is the currency of everything it sells: relabel
+      // the catalogue (packages, classes, PT packs, coupons, products,
+      // lockers, staff pay) to it. Amounts are not converted, and orders,
+      // sales, payments and payslips keep the currency they were recorded
+      // in. Run on every save that carries the currency -- rows already in
+      // it are not matched, so an unchanged currency changes nothing. The
+      // save itself is audit-logged by requirePermission, currency included.
+      let currencyRelabelled;
+      if (updateData.currency !== undefined) {
+        const { relabelCatalogue } = require('../services/currency');
+        currencyRelabelled = await relabelCatalogue(updateData.currency);
+        require('../accounts/services/ledger').forgetCurrency();
+      }
+
       return res.status(200).json({
         success: true,
         message: warnings.length ? 'Settings updated, with warnings' : 'Settings updated successfully',
         data: sanitizeSettings(updatedSettings),
+        ...(currencyRelabelled ? { currency_relabelled: currencyRelabelled } : {}),
         warnings
       });
     } catch (error) {
@@ -970,7 +985,9 @@ const settingsController = {
         marketingEmails: false,
         securityAlerts: true,
         twoFactorAuth: false,
-        currency: 'USD',
+        // The gym's currency is not a display preference: resetting it would
+        // relabel every price. It stays what it is.
+        currency: currentSettings.currency || 'USD',
         taxRate: 0,
         paymentMethods: ['credit_card', 'paypal'],
         topSliderText: '',

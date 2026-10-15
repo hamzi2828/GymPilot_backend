@@ -205,7 +205,7 @@ class GymfolioPaymentService {
 
     const settings = await Settings.getSettings().catch(() => null);
     const currency = resolveCurrency(packageData.currency, settings && settings.currency).toLowerCase();
-    const snapshot = membership.packageSnapshot(packageData);
+    const snapshot = membership.packageSnapshot(packageData, currency.toUpperCase());
     const recurring = snapshot.billing.mode === 'recurring';
     // Charged once, with the first membership: a member coming back is not
     // charged it again (membershipService.joiningFeeDue). Who is coming back
