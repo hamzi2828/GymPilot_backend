@@ -189,3 +189,25 @@ test('a new sale or payslip with no currency given is in the gym currency, not a
     assert.equal(slip.currency, 'PKR');
   });
 });
+
+test('reports and the dashboard use the chosen currency at once, even when every sale so far is in another', async () => {
+  const L = h.src('accounts/services/ledger');
+  const dashboard = h.src('controller/dashboardController');
+  const switched = await h.createGym('switched-gym', { currency: 'PKR' });
+  await h.inGym(switched, async () => {
+    // Taken before the switch, in pounds: history, never added in.
+    await PackageOrder.collection.insertOne({ payment: { status: 'paid', currency: 'GBP', amount: 39 }, createdAt: new Date(), updatedAt: new Date() });
+    L.forgetCurrency();
+    assert.equal(await L.baseCurrency(), 'PKR');
+    assert.equal(await L.currencyNotice(), null, 'no "update Settings" banner after a deliberate switch');
+    const res = await h.call(dashboard.overview, { user: { id: String(ids.staff), role: 'admin' } });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body).slice(0, 200));
+    assert.equal(res.body.base_currency, 'PKR');
+    // The tile shows rupees -- nothing taken in them yet -- and the pounds
+    // from before the switch are listed on their own, not added in.
+    assert.equal(res.body.revenue.headline_currency, 'PKR');
+    assert.equal(res.body.revenue.headline_amount, 0);
+    assert.deepEqual(res.body.revenue.by_currency, [{ currency: 'GBP', amount: 39 }]);
+    assert.equal(res.body.revenue.mixed, true);
+  });
+});

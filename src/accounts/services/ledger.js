@@ -141,13 +141,13 @@ const currencyCaches = new Map(); // tenantKey -> { at, value }
 
 // Which currency to report in.
 //
-// The setting is the intended answer -- but a setting is a claim, and the
-// package prices are a fact. When they disagree AND nothing has ever been taken
-// in the configured currency, reporting in it would put a confident zero
-// against every figure while the money sits one row down under another code.
-// So the money wins, and the disagreement is surfaced rather than buried:
-// see currencyNotice(), which the screens render as a banner pointing at the
-// setting that needs fixing.
+// The one set in Settings, whenever the gym has chosen one: the owner picked
+// it, every price now follows it, and the whole admin must show it -- even on
+// the day of the switch, before anything has been taken in it. Money recorded
+// earlier in another currency is history: it is listed under its own code
+// (addTo keeps currencies apart) and never added in. Only a gym that has never
+// chosen a currency is reported in whatever its sales are in, with a banner
+// (currencyNotice) asking it to choose.
 async function resolveCurrency() {
   const cacheKey = tenantKey();
   const currencyCache = currencyCaches.get(cacheKey) || { at: 0, value: null };
@@ -178,9 +178,9 @@ async function resolveCurrency() {
     configured,
     // Whether the gym has actually chosen one, as opposed to the fallback.
     chosen: !!(settings && settings.currency),
-    effective: !configuredHasMoney && dominant ? dominant : configured,
+    effective: settings && settings.currency ? configured : !configuredHasMoney && dominant ? dominant : configured,
     dominant,
-    mismatch: !!dominant && !configuredHasMoney && dominant !== configured
+    mismatch: !(settings && settings.currency) && !!dominant && !configuredHasMoney && dominant !== configured
   };
 
   currencyCaches.set(cacheKey, { at: Date.now(), value });
@@ -198,10 +198,8 @@ async function baseCurrency() {
 }
 
 // The currency a NEW sale, expense or asset is written in: the one set in
-// Settings. baseCurrency() may be reading history in another currency while
-// the setting disagrees -- stamping new rows with that would keep the old
-// currency alive after the owner fixed the setting. The history-based answer
-// is only the fallback for a gym that has never chosen one.
+// Settings, the same as baseCurrency() whenever the gym has chosen one. The
+// history-based answer is only the fallback for a gym that has never chosen.
 async function recordCurrency() {
   const resolved = await resolveCurrency();
   return resolved.chosen ? resolved.configured : resolved.effective;
@@ -218,8 +216,7 @@ async function currencyNotice() {
     reporting_in: resolved.effective,
     message:
       `Reporting in ${resolved.effective} because that is what the gym's sales are recorded in. ` +
-      `Settings says ${resolved.configured}, which has no transactions against it — update it under ` +
-      `Settings so the two agree.`
+      `Choose your currency under Settings → General → Money and every screen will use it.`
   };
 }
 
@@ -242,19 +239,19 @@ function presentTotals(totals, base) {
     .filter(([, amount]) => amount !== 0)
     .sort((a, b) => (a[0] === base ? -1 : b[0] === base ? 1 : b[1] - a[1]));
 
-  // What a single tile should print. Normally the base currency -- but a figure
-  // whose money is ENTIRELY in another currency (staff paid in rupees while the
-  // gym reports in pounds) would otherwise headline a confident zero over a real
-  // number. Showing it in its own currency, labelled, beats showing nothing.
+  // What a single tile prints: always the gym's own currency, the one chosen in
+  // Settings -- every screen of the admin is in it, even on the day of a switch
+  // when nothing has been taken in it yet. Money in any other currency (history
+  // from before the switch) is listed in by_currency and flagged by `mixed`,
+  // never shown as the headline and never added in.
   const baseAmount = round(totals[base] || 0);
-  const fallback = entries.find(([currency]) => currency !== base);
 
   return {
     by_currency: entries.map(([currency, amount]) => ({ currency, amount: round(amount) })),
     base_currency: base,
     base_amount: baseAmount,
-    headline_amount: baseAmount || (fallback ? round(fallback[1]) : 0),
-    headline_currency: baseAmount || !fallback ? base : fallback[0],
+    headline_amount: baseAmount,
+    headline_currency: base,
     // True when there is money in this figure the headline does not show.
     mixed: entries.some(([currency]) => currency !== base)
   };
