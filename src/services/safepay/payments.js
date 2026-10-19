@@ -140,6 +140,38 @@ async function customerFor(config, order, customer = {}) {
   });
 }
 
+/* ------------------------------ hosted checkout ------------------------------ */
+
+/**
+ * The Safepay calls every hosted checkout makes, with the keys it is given:
+ * a payment session (tracker) for `amountMinor`, our reference on it for
+ * Safepay's dashboard (the payment works without it), and the time-based
+ * token the hosted page opens with. Knows nothing of whose keys these are
+ * -- a gym's (createCheckout below) or GymsPilotPro's own
+ * (platform/services/platformSafepay.js).
+ *
+ * @param {object} config  { environment, publicKey, secretKey }
+ * @returns {Promise<{ token: string, tbt: string }>}
+ */
+async function openHostedSession(config, { amountMinor, currency, orderRef, customer = null, mode = 'payment' }) {
+  const { token } = await api.createTracker(config, { amount: amountMinor, currency, mode, customer, orderRef });
+  await api.addMetadata(config, token, orderRef).catch((error) => {
+    console.warn(`[safepay] metadata for ${token} (${orderRef}) not saved: ${error.message}`);
+  });
+  const tbt = await api.createPassport(config);
+  return { token, tbt };
+}
+
+/**
+ * The hosted page's address for a session. {TRACKER} in the return and
+ * cancel addresses becomes this payment's reference (as Stripe's
+ * {CHECKOUT_SESSION_ID}), for a page that must ask about this one payment.
+ */
+function hostedCheckoutUrl(config, { token, tbt, returnUrl, cancelUrl, orderRef, customer = null, saveCard = false }) {
+  const withRef = (address) => String(address).split('{TRACKER}').join(encodeURIComponent(token));
+  return api.checkoutUrl(config, { tracker: token, tbt, redirectUrl: withRef(returnUrl), cancelUrl: withRef(cancelUrl), orderRef, customer, saveCard });
+}
+
 /* --------------------------------- checkout -------------------------------- */
 
 /**
@@ -190,12 +222,7 @@ async function createCheckout({ order: orderOrId, amount, currency, customer = {
   const customerToken = saving ? await customerFor(config, order, customer) : null;
 
   const orderRef = orderRefOf(order);
-  const { token } = await api.createTracker(config, { amount: amountMinor, currency: code, mode: 'payment', customer: customerToken, orderRef });
-  // For Safepay's dashboard and its webhooks; the payment works without it.
-  await api.addMetadata(config, token, orderRef).catch((error) => {
-    console.warn(`[safepay] metadata for ${token} (${orderRef}) not saved: ${error.message}`);
-  });
-  const tbt = await api.createPassport(config);
+  const { token, tbt } = await openHostedSession(config, { amountMinor, currency: code, customer: customerToken, orderRef });
 
   await PackageOrder.updateOne(
     { _id: order._id },
@@ -219,10 +246,7 @@ async function createCheckout({ order: orderOrId, amount, currency, customer = {
     }
   );
 
-  // {TRACKER} in an address is this payment's reference (as Stripe's
-  // {CHECKOUT_SESSION_ID}), for a page that must ask about this one payment.
-  const withRef = (address) => String(address).split('{TRACKER}').join(encodeURIComponent(token));
-  const url = api.checkoutUrl(config, { tracker: token, tbt, redirectUrl: withRef(returnUrl), cancelUrl: withRef(cancelUrl), orderRef, customer: customerToken, saveCard: saving });
+  const url = hostedCheckoutUrl(config, { token, tbt, returnUrl, cancelUrl, orderRef, customer: customerToken, saveCard: saving });
   return { url, tracker: token, saveCard: saving, purpose: due.purpose, amount: due.amount, currency: code };
 }
 
@@ -404,15 +428,18 @@ async function markTrackerFailed(orderOrId, token, message = '') {
 /**
  * What Safepay says about a tracker now: 'paid' | 'failed' | 'pending'.
  * Uses the gym's keys even after it switched Safepay off (the money may
- * already have been taken).
+ * already have been taken) -- or `options.config`, keys given explicitly.
  */
-async function fetchTrackerStatus(tracker) {
-  return (await trackerDetails(tracker)).status;
+async function fetchTrackerStatus(tracker, options = {}) {
+  return (await trackerDetails(tracker, options)).status;
 }
 
-/** fetchTrackerStatus with the money and card Safepay reports. */
-async function trackerDetails(tracker) {
-  const config = await getSafepayConfig({ includeDisabled: true });
+/**
+ * fetchTrackerStatus with the money and card Safepay reports. With
+ * `{ config }` it asks with those keys; without, with the gym's in context.
+ */
+async function trackerDetails(tracker, { config: given = null } = {}) {
+  const config = given || (await getSafepayConfig({ includeDisabled: true }));
   if (!config) throw new SafepayError('This gym has no Safepay keys saved.', 'SAFEPAY_NOT_CONFIGURED', 409);
   const body = await api.fetchTracker(config, tracker);
   const found = shapes.trackerOf(body) || {};
@@ -666,6 +693,8 @@ async function handleWebhookEvent(event) {
 
 module.exports = {
   MAX_TRACKERS_PER_ORDER,
+  openHostedSession,
+  hostedCheckoutUrl,
   createCheckout,
   chargeSavedMethod,
   fetchTrackerStatus,

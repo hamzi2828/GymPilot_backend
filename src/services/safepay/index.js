@@ -16,6 +16,16 @@
 //                                 -> { status: 'paid'|'failed'|'pending', tracker, reason }
 //   fetchTrackerStatus(tracker)   -> 'paid'|'failed'|'pending'
 //   verifyWebhook(rawBody, headers, secret)  -> the event, or throws
+//
+// The core calls take their keys explicitly, for whoever's account it is --
+// a gym's, or GymsPilotPro's own (platform/services/platformSafepay.js):
+//
+//   openHostedSession(config, { amountMinor, currency, orderRef })  -> { token, tbt }
+//   hostedCheckoutUrl(config, { token, tbt, returnUrl, cancelUrl, orderRef })
+//   trackerDetails(tracker, { config })    -> { status, state, amountMinor, ... }
+//   getSafepayConfig({ settings })         keys from any settings document
+//                                          with a `safepay` block
+//   api.*                                  the HTTP calls, config first
 
 const shapes = require('./shapes');
 const api = require('./api');
@@ -30,6 +40,8 @@ module.exports = {
   chargeSavedMethod: payments.chargeSavedMethod,
   fetchTrackerStatus: payments.fetchTrackerStatus,
   verifyWebhook: shapes.verifyWebhook,
+  openHostedSession: payments.openHostedSession,
+  hostedCheckoutUrl: payments.hostedCheckoutUrl,
 
   // The rest of the connector.
   storedSafepay,

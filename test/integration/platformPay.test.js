@@ -402,3 +402,185 @@ test("a card checkout from a gym's Billing tab follows the way chosen; a gym Str
   assert.equal(back.body.data.stripe.enabled, true);
   assert.equal((await billing('GET', '/subscription?usage=0', { user: stripeAdmin, forGym: stripeGym })).body.data.stripeConfigured, true);
 });
+
+/* ------------------------- paying through Safepay ------------------------- */
+
+const gymNow = (forGym = gym) => Gym.findById(forGym._id).lean();
+
+// What Safepay's servers send: no website, no tenant header, the signed bytes.
+function deliver({ body, signature }) {
+  return send('POST', '/api/platform/safepay/webhook', { body, headers: { 'X-SFPY-SIGNATURE': signature } });
+}
+
+async function payNow(body = {}, options = {}) {
+  const res = await billing('POST', '/pay', { body, ...options });
+  assert.equal(res.status, 200, res.text);
+  const url = new URL(res.body.data.url);
+  return { url, tracker: url.searchParams.get('tracker') };
+}
+
+test("Pay now opens Safepay's page with GymsPilotPro's keys, returning to the gym's own site", async () => {
+  const before = await gymNow();
+  const { url, tracker } = await payNow();
+  assert.equal(url.origin, fake.base, 'the stand-in Safepay');
+  assert.equal(url.pathname, '/embedded/');
+  assert.equal(url.searchParams.get('redirect_url'), 'http://pay-gym.test/admin/settings?tab=billing&paid=1');
+  assert.equal(url.searchParams.get('cancel_url'), 'http://pay-gym.test/admin/settings?tab=billing');
+  assert.equal(url.searchParams.get('environment'), 'sandbox');
+  // The platform's keys (the gym has none), the gym's agreed amount in paisa.
+  const created = fake.callsTo('POST', '/order/payments/v3/').filter((c) => c.path === '/order/payments/v3/').pop();
+  assert.equal(created.headers['x-sfpy-merchant-secret'], SECRET);
+  assert.equal(created.body.merchant_api_key, PUBLIC);
+  assert.deepEqual([created.body.amount, created.body.currency], [800000, 'PKR']);
+  assert.equal(fake.tracker(tracker).amount, 800000);
+
+  const PlatformSafepayCheckout = h.src('platform/models/platformSafepayCheckoutModel');
+  const row = await PlatformSafepayCheckout.findOne({ tracker }).lean();
+  assert.deepEqual([row.gymSlug, row.amount, row.currency, row.status, row.billingCycle, row.change], ['pay-gym', 8000, 'PKR', 'pending', 'monthly', null]);
+  assert.equal(row.openedBy.email, admin.email);
+  // Opening the page changes nothing yet.
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, before.subscription.currentPeriodEnd);
+});
+
+test("Safepay's signed webhook records the payment and extends the subscription once, however often it comes", async () => {
+  const before = await gymNow();
+  await Gym.updateOne({ _id: gym._id }, { $set: { 'subscription.status': 'past_due', 'subscription.pastDueSince': new Date() } });
+  const { tracker } = await payNow();
+  fake.pay(tracker);
+  const event = fake.event(tracker, 'payment.succeeded', { secret: WEBHOOK });
+
+  // Signed with anything but the platform's secret: refused, nothing changes.
+  const forged = await deliver({ body: event.body, signature: fake.event(tracker, 'payment.succeeded', { secret: 'whsec_a_gyms_own' }).signature });
+  assert.equal(forged.status, 400, forged.text);
+  assert.equal(forged.body.received, false);
+  assert.equal((await deliver({ body: event.body, signature: '' })).status, 400);
+  assert.equal((await gymNow()).subscription.status, 'past_due');
+
+  const first = await deliver(event);
+  assert.equal(first.status, 200, first.text);
+  assert.deepEqual(first.body, { received: true, applied: true, duplicate: false });
+  const { addCycle } = h.src('platform/services/manualPayments');
+  const expected = addCycle(before.subscription.currentPeriodEnd, 'monthly');
+  const after = await gymNow();
+  assert.deepEqual(after.subscription.currentPeriodEnd, expected);
+  assert.equal(after.subscription.status, 'active');
+  assert.equal(after.subscription.pastDueSince, null);
+
+  const again = await deliver(event);
+  assert.equal(again.status, 200, again.text);
+  assert.deepEqual(again.body, { received: true, applied: false, duplicate: true });
+  // Safepay sends one event per attempt; another for the same payment changes nothing either.
+  assert.equal((await deliver(fake.event(tracker, 'payment.succeeded', { secret: WEBHOOK }))).body.applied, false);
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, expected);
+
+  const PlatformPayment = h.src('platform/models/platformPaymentModel');
+  const payments = await PlatformPayment.find({ gymId: gym._id, method: 'safepay' }).lean();
+  assert.equal(payments.length, 1);
+  assert.deepEqual([payments[0].amount, payments[0].currency, payments[0].reference, payments[0].statusBefore, payments[0].recordedBy.email], [8000, 'PKR', tracker, 'past_due', 'safepay']);
+  assert.ok(await PlatformAuditLog.exists({ action: 'platform_safepay_event', gymSlug: 'pay-gym' }));
+
+  // The super admin's payment history lists it, and the "Record payment"
+  // form still offers only what is typed in by hand.
+  const history = await panel('GET', `/gyms/${gym._id}/payments`);
+  assert.equal(history.status, 200, history.text);
+  assert.equal(history.body.data[0].methodLabel, 'Safepay');
+  assert.deepEqual(history.body.next.methods.map((m) => m.value), ['bank_transfer', 'jazzcash', 'easypaisa', 'cash', 'other']);
+});
+
+test('a failed attempt, a short payment and an event for no GymsPilotPro payment change nothing', async () => {
+  const before = await gymNow();
+  const PlatformSafepayCheckout = h.src('platform/models/platformSafepayCheckoutModel');
+
+  const failed = await payNow();
+  const declined = await deliver(fake.event(failed.tracker, 'payment.failed', { secret: WEBHOOK, message: 'Card declined' }));
+  assert.equal(declined.status, 200, declined.text);
+  assert.equal((await PlatformSafepayCheckout.findOne({ tracker: failed.tracker }).lean()).status, 'failed');
+
+  const short = await payNow();
+  fake.pay(short.tracker);
+  const less = await deliver(fake.event(short.tracker, 'payment.succeeded', { secret: WEBHOOK, amount: 100 }));
+  assert.equal(less.status, 200, less.text);
+  assert.equal(less.body.applied, false);
+  assert.match((await PlatformSafepayCheckout.findOne({ tracker: short.tracker }).lean()).error, /Not recorded/);
+
+  const stranger = await deliver(fake.event('track_not_ours', 'payment.succeeded', { secret: WEBHOOK }));
+  assert.equal(stranger.status, 200, stranger.text);
+  assert.equal(stranger.body.ignored, 'no GymsPilotPro payment for it');
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, before.subscription.currentPeriodEnd);
+});
+
+test('an event of a kind not known here is checked with Safepay, with the platform keys, and recorded as Safepay says', async () => {
+  const before = await gymNow();
+  const { tracker } = await payNow();
+  fake.pay(tracker);
+  const asked = fake.callsTo('GET', `/reporter/api/v1/payments/${tracker}`).length;
+  const res = await deliver(fake.event(tracker, 'tracker.updated', { secret: WEBHOOK }));
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.body.applied, true);
+  const call = fake.callsTo('GET', `/reporter/api/v1/payments/${tracker}`)[asked];
+  assert.equal(call.headers['x-sfpy-merchant-secret'], SECRET);
+  const { addCycle } = h.src('platform/services/manualPayments');
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, addCycle(before.subscription.currentPeriodEnd, 'monthly'));
+});
+
+test('paying yearly, or for another plan, is priced on the server and moves the subscription to it once paid', async () => {
+  const PlatformPlan = h.src('platform/models/platformPlanModel');
+  await PlatformPlan.create({ slug: 'pro', name: 'Pro', price: { monthly: 12000, yearly: 120000, currency: 'PKR' } });
+  const before = await gymNow();
+  const { addCycle } = h.src('platform/services/manualPayments');
+
+  const yearly = await payNow({ billingCycle: 'yearly' });
+  assert.equal(fake.tracker(yearly.tracker).amount, 8000000, 'the plan list price for a year');
+  fake.pay(yearly.tracker);
+  assert.equal((await deliver(fake.event(yearly.tracker, 'payment.succeeded', { secret: WEBHOOK }))).body.applied, true);
+  let after = await gymNow();
+  assert.deepEqual([after.subscription.billingCycle, after.subscription.amount], ['yearly', 80000]);
+  assert.deepEqual(after.subscription.currentPeriodEnd, addCycle(before.subscription.currentPeriodEnd, 'yearly'));
+
+  const pro = await payNow({ planSlug: 'pro', billingCycle: 'monthly' });
+  assert.equal(fake.tracker(pro.tracker).amount, 1200000);
+  fake.pay(pro.tracker);
+  assert.equal((await deliver(fake.event(pro.tracker, 'payment.succeeded', { secret: WEBHOOK }))).body.applied, true);
+  after = await gymNow();
+  const proPlan = await PlatformPlan.findOne({ slug: 'pro' }).lean();
+  assert.equal(String(after.plan), String(proPlan._id));
+  assert.deepEqual([after.subscription.billingCycle, after.subscription.amount, after.subscription.planAmount], ['monthly', 12000, 12000]);
+
+  for (const [body, status, code] of [
+    [{ billingCycle: 'weekly' }, 400, 'INVALID_CYCLE'],
+    [{ planSlug: 'nope' }, 404, 'PLAN_NOT_FOUND']
+  ]) {
+    const res = await billing('POST', '/pay', { body });
+    assert.equal(res.status, status, res.text);
+    assert.equal(res.body.code, code);
+  }
+  // Back on Growth for what follows.
+  await Gym.updateOne({ _id: gym._id }, { $set: { plan: plan._id, 'subscription.amount': 8000, 'subscription.planAmount': 8000 } });
+});
+
+test('Pay now answers which way to pay when it is not Safepay; the gym Stripe bills is sent to Stripe', async () => {
+  const card = await billing('POST', '/pay', { body: {}, user: stripeAdmin, forGym: stripeGym });
+  assert.equal(card.status, 409, card.text);
+  assert.equal(card.body.code, 'STRIPE_CHECKOUT');
+
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'generic' } } });
+  const bank = await billing('POST', '/pay', { body: {} });
+  assert.equal(bank.status, 409, bank.text);
+  assert.equal(bank.body.code, 'BANK_TRANSFER_ONLY');
+
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'none' } } });
+  const off = await billing('POST', '/pay', { body: {} });
+  assert.equal(off.status, 409, off.text);
+  assert.equal(off.body.code, 'ONLINE_PAYMENT_OFF');
+
+  // A payment opened while Safepay was the way is still recorded after it stops being it.
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'safepay' } } });
+  const late = await payNow();
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'generic' } } });
+  fake.pay(late.tracker);
+  assert.equal((await deliver(fake.event(late.tracker, 'payment.succeeded', { secret: WEBHOOK }))).body.applied, true);
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'safepay' } } });
+
+  // Signed in or nothing.
+  assert.equal((await send('POST', '/api/billing/pay', { body: {}, headers: { 'x-tenant-slug': gym.slug } })).status, 401);
+});

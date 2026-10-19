@@ -1,15 +1,20 @@
 // src/platform/models/platformPaymentModel.js
 //
 // A gym's payments to the platform that did not come through Stripe: a bank
-// transfer, JazzCash, Easypaisa, cash. Recorded by hand from the panel
-// (services/manualPayments.js), one row per payment, and never edited
-// afterwards -- this is the gym's payment history. Card payments are not
-// here: Stripe keeps those.
+// transfer, JazzCash, Easypaisa, cash -- recorded by hand from the panel, or
+// by approving a receipt the gym uploaded -- and a payment through
+// GymsPilotPro's own Safepay account, recorded by its webhook (all through
+// services/manualPayments.js), one row per payment, and never edited
+// afterwards -- this is the gym's payment history. Stripe card payments are
+// not here: Stripe keeps those.
 
 const mongoose = require('mongoose');
 const { platformModel } = require('../platformDb');
 
-const METHODS = ['bank_transfer', 'jazzcash', 'easypaisa', 'cash', 'other'];
+const METHODS = ['bank_transfer', 'jazzcash', 'easypaisa', 'cash', 'other', 'safepay'];
+// What the panel's "Record payment" form offers: Safepay payments are
+// recorded by Safepay's webhook, not typed in.
+const MANUAL_METHODS = METHODS.filter((method) => method !== 'safepay');
 
 const platformPaymentSchema = new mongoose.Schema(
   {
@@ -58,5 +63,6 @@ platformPaymentSchema.index(
 );
 
 platformPaymentSchema.statics.METHODS = METHODS;
+platformPaymentSchema.statics.MANUAL_METHODS = MANUAL_METHODS;
 
 module.exports = platformModel('PlatformPayment', platformPaymentSchema);

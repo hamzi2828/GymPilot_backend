@@ -291,3 +291,35 @@ test('the payments carry a unique index on the reference, for payments that have
   assert.equal(byReference[1].unique, true);
   assert.deepEqual(byReference[1].partialFilterExpression, { reference: { $gt: '' } });
 });
+
+test('a payment for another plan or cycle moves the subscription to it, in the same write as the date', async () => {
+  const gym = gymBilledByHand({ status: 'active', currentPeriodEnd: day('2026-10-20') });
+  const planId = new mongoose.Types.ObjectId();
+  const change = { plan: planId, billingCycle: 'yearly', planAmount: 120000, addons: [{ slug: 'member-app', name: 'Member app', amount: 0 }], amount: 120000, currency: 'pkr' };
+  const w = world();
+  try {
+    const { payment } = await recordPayment({ gym, input: form({ amount: 120000, method: 'safepay', reference: 'track_0001', requestId: 'safepay:track_0001' }), actor: { _id: null, email: 'safepay' }, now, change });
+    // The date is a year on, in the cycle paid for.
+    assert.deepEqual(payment.periodTo, day('2027-10-20'));
+    assert.equal(payment.billingCycle, 'yearly');
+    assert.equal(payment.method, 'safepay');
+    assert.equal(payment.recordedBy.email, 'safepay');
+    const set = w.calls.gymWrites[0].update.$set;
+    assert.equal(String(set.plan), String(planId));
+    assert.equal(set['subscription.billingCycle'], 'yearly');
+    assert.equal(set['subscription.amount'], 120000);
+    assert.equal(set['subscription.planAmount'], 120000);
+    assert.equal(set['subscription.currency'], 'PKR');
+    assert.deepEqual(set['subscription.addons'], change.addons);
+    assert.deepEqual(set['subscription.currentPeriodEnd'], day('2027-10-20'));
+  } finally {
+    w.restore();
+  }
+});
+
+test('Safepay payments need their tracker as the reference, and are not offered on the form typed in by hand', () => {
+  const gym = gymBilledByHand();
+  assert.match(validatePayment(form({ method: 'safepay', reference: '' }), gym, now).errors[0], /Safepay reference/);
+  assert.deepEqual(validatePayment(form({ method: 'safepay', reference: 'track_1' }), gym, now).errors, []);
+  assert.ok(!paymentTerms(gym, now).methods.some((m) => m.value === 'safepay'));
+});

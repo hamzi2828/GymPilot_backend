@@ -182,13 +182,15 @@ const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
 // The platform's own webhook (GymsPilotPro charging gyms) needs the same
 // untouched body as a gym's does.
 const PLATFORM_WEBHOOK_PATH = '/api/platform/stripe/webhook';
+// ...and so does the platform's Safepay webhook (gyms paying GymsPilotPro).
+const PLATFORM_SAFEPAY_WEBHOOK_PATH = '/api/platform/safepay/webhook';
 // Safepay signs the bytes it sent as well (src/routes/paymentWebhookRoutes.js).
 const SAFEPAY_WEBHOOK_PREFIX = '/api/payments/safepay/webhook/';
 
 app.use((req, res, next) => {
   const path = req.originalUrl.split('?')[0];
   // Both the legacy path and the per-gym one (/webhook/<slug>).
-  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/') || path === PLATFORM_WEBHOOK_PATH || path.startsWith(SAFEPAY_WEBHOOK_PREFIX)) {
+  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/') || path === PLATFORM_WEBHOOK_PATH || path === PLATFORM_SAFEPAY_WEBHOOK_PATH || path.startsWith(SAFEPAY_WEBHOOK_PREFIX)) {
     next();
   } else {
     express.json({ limit: BODY_LIMIT })(req, res, next);

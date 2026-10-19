@@ -8,6 +8,11 @@
 // (trialing, past due, expired, cancelled), so a gym that lapsed for not
 // paying is served again the moment its payment is typed in.
 //
+// The same path records a receipt the super admin approves
+// (services/paymentRequests.js) and a payment through GymsPilotPro's own
+// Safepay account (services/platformSafepay.js, method 'safepay'): each has
+// a request id of its own, so it is recorded once however often it arrives.
+//
 // The daily roll-over (jobs.js rollFilters) needs nothing more: a gym with
 // no Stripe subscription goes past due when `currentPeriodEnd` passes, and
 // this is what moves that date -- to the next cycle, each time it pays.
@@ -25,11 +30,12 @@ const METHOD_LABELS = {
   jazzcash: 'JazzCash',
   easypaisa: 'Easypaisa',
   cash: 'Cash',
-  other: 'Other'
+  other: 'Other',
+  safepay: 'Safepay'
 };
 // These always come with a transaction id; without it the payment cannot be
-// found again on the statement.
-const REFERENCE_REQUIRED = new Set(['bank_transfer', 'jazzcash', 'easypaisa']);
+// found again on the statement. (Safepay's is its tracker.)
+const REFERENCE_REQUIRED = new Set(['bank_transfer', 'jazzcash', 'easypaisa', 'safepay']);
 const DAY_MS = 86400000;
 const MAX_AMOUNT = 1e9;
 const HISTORY_LIMIT = 100;
@@ -116,7 +122,7 @@ function paymentTerms(gym, now = new Date()) {
     billingCycle: sub.billingCycle === 'yearly' ? 'yearly' : 'monthly',
     paidFrom: next.from,
     paidUntil: next.paidUntil,
-    methods: PlatformPayment.schema.statics.METHODS.map((value) => ({ value, label: METHOD_LABELS[value] }))
+    methods: PlatformPayment.schema.statics.MANUAL_METHODS.map((value) => ({ value, label: METHOD_LABELS[value] }))
   };
 }
 
@@ -173,6 +179,32 @@ function validatePayment(body, gym, now = new Date()) {
 }
 
 /**
+ * The gym as a payment with `change` would find it: the cycle (and currency)
+ * it moves to are what the paid-until date and the payment are worked out in.
+ */
+function billedAs(gym, change) {
+  if (!change) return gym;
+  const sub = (gym && gym.subscription) || {};
+  return {
+    ...gym,
+    subscription: { ...sub, billingCycle: change.billingCycle || sub.billingCycle, currency: change.currency || sub.currency }
+  };
+}
+
+/** The subscription fields a payment with `change` writes beside the date. */
+function changeFields(change) {
+  if (!change) return {};
+  const set = {};
+  if (change.plan) set.plan = change.plan;
+  if (change.billingCycle) set['subscription.billingCycle'] = change.billingCycle;
+  if (change.planAmount !== undefined) set['subscription.planAmount'] = Number(change.planAmount) || 0;
+  if (Array.isArray(change.addons)) set['subscription.addons'] = change.addons;
+  if (change.amount !== undefined) set['subscription.amount'] = Number(change.amount) || 0;
+  if (change.currency) set['subscription.currency'] = String(change.currency).toUpperCase();
+  return set;
+}
+
+/**
  * Records one payment for a gym and brings its subscription up to date.
  *
  * The same `requestId` again is the same payment: the row already stored is
@@ -188,10 +220,14 @@ function validatePayment(body, gym, now = new Date()) {
  * @param {object} args.gym    the gym document (lean or not)
  * @param {object} args.input  the request body
  * @param {object} [args.actor] the super admin: { _id, email }
+ * @param {object} [args.change] what else the payment moves the subscription
+ *   to -- the owner paid for another plan or cycle: { plan, billingCycle,
+ *   planAmount, addons, amount, currency }, written in the same update as
+ *   the date (and the date worked out in that cycle)
  * @returns {Promise<{payment: object, duplicate: boolean}>}
  * @throws {ManualPaymentError} with `status` and `code`
  */
-async function recordPayment({ gym, input, actor = null, now = new Date() }) {
+async function recordPayment({ gym, input, actor = null, now = new Date(), change = null }) {
   const refusal = refusalFor(gym);
   if (refusal) throw new ManualPaymentError(refusal, 409, 'STRIPE_BILLED');
 
@@ -199,7 +235,7 @@ async function recordPayment({ gym, input, actor = null, now = new Date() }) {
   const already = requestId ? await PlatformPayment.findOne({ gymId: gym._id, requestId }).lean() : null;
   if (already) return { payment: already, duplicate: true };
 
-  const { errors, data } = validatePayment(input, gym, now);
+  const { errors, data } = validatePayment(input, billedAs(gym, change), now);
   if (errors.length) throw new ManualPaymentError(errors[0], 400, 'INVALID_PAYMENT');
 
   // The same transfer typed into a second form is refused -- but a row with
@@ -238,6 +274,7 @@ async function recordPayment({ gym, input, actor = null, now = new Date() }) {
   }
 
   const set = {
+    ...changeFields(change),
     'subscription.status': 'active',
     'subscription.currentPeriodEnd': data.periodTo,
     'subscription.pastDueSince': null,
@@ -284,6 +321,7 @@ function publicPayment(row) {
 module.exports = {
   ManualPaymentError,
   METHOD_LABELS,
+  dayLabel,
   addCycle,
   nextPaidUntil,
   paymentTerms,

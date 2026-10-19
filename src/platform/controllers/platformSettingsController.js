@@ -20,6 +20,8 @@ const { handlePlatformStripeEvent } = require('../services/platformWebhook');
 const gateways = require('../services/payments');
 const bankAccounts = require('../services/platformBankAccounts');
 const { platformEmailConfigured } = require('../services/platformEmail');
+const platformSafepay = require('../services/platformSafepay');
+const safepay = require('../../services/safepay');
 
 const MASK_CHAR = '•';
 
@@ -594,6 +596,51 @@ module.exports = {
     } catch (error) {
       console.error('[platform] webhook:', error);
       return res.status(500).json({ success: false, message: 'Webhook failed' });
+    }
+  },
+
+  // POST /api/platform/safepay/webhook  (public, raw body)
+  //
+  // Safepay telling GymsPilotPro about a payment a gym made from its Billing
+  // tab, into GymsPilotPro's own Safepay account. Believed only when signed
+  // (X-SFPY-SIGNATURE) with the PLATFORM's webhook secret -- a gym's secret
+  // proves nothing here. Answers:
+  //   200 { received: true, applied?, duplicate?, ignored? }  acknowledged;
+  //       a payment delivered twice is recorded once
+  //   400 bad or missing signature, or not JSON -- not acknowledged
+  //   500 no webhook secret saved, or recording failed: Safepay sends it again
+  safepayWebhook: async (req, res) => {
+    try {
+      const settings = await PlatformSettings.getSettings();
+      const secret = settings.safepay && settings.safepay.webhookSecret;
+      if (!secret) {
+        console.error('[platform-safepay] webhook refused: no Safepay webhook secret saved under System → Payments');
+        return res.status(500).json({ received: false, message: 'Webhook secret not configured' });
+      }
+      let event;
+      try {
+        event = safepay.verifyWebhook(req.body, req.headers, secret);
+      } catch (error) {
+        console.warn(`[platform-safepay] webhook refused: ${error.message}`);
+        return res.status(400).json({ received: false, message: error.message });
+      }
+
+      const outcome = await platformSafepay.handleEvent(event, { settings });
+      const info = safepay.readEvent(event);
+      PlatformAuditLog.record({
+        actorId: null,
+        actorEmail: 'safepay',
+        action: 'platform_safepay_event',
+        gymId: outcome.gymId || null,
+        gymSlug: outcome.gymSlug || '',
+        meta: { type: info.type, id: info.id, tracker: info.tracker, result: outcome.result || outcome.ignored || '' }
+      });
+      const answer = { received: true };
+      for (const key of ['applied', 'duplicate', 'ignored']) if (outcome[key] !== undefined) answer[key] = outcome[key];
+      return res.json(answer);
+    } catch (error) {
+      console.error('[platform-safepay] webhook failed:', error);
+      return res.status(500).json({ received: false, message: 'Webhook handler failed' });
     }
   },
 

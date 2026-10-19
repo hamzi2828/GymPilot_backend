@@ -61,6 +61,9 @@ router.get('/public/config', async (req, res) => {
 // Stripe's callback. Public by necessity -- the signature is the proof --
 // and raw, because a parsed body no longer matches what was signed.
 router.post('/stripe/webhook', express.raw({ type: 'application/json' }), platformSettingsController.webhook);
+// Safepay's, for gyms paying GymsPilotPro's own Safepay account: the same
+// reasons, whatever content type Safepay labels the bytes with.
+router.post('/safepay/webhook', express.raw({ type: () => true, limit: '1mb' }), platformSettingsController.safepayWebhook);
 router.post('/public/demo-requests', demoRequestLimiter, demoRequestsController.submit);
 // Sign up and pay in one go. Limited like the other payment starts: each
 // one opens a Stripe page. The status is polled by the success page.

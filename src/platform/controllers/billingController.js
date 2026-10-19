@@ -23,6 +23,9 @@
 //                                   409 { code: 'CHECKOUT_COMPLETED' } when the page opened last was
 //                                   paid a moment ago and the webhook has not recorded it yet
 //   POST /api/billing/portal        -> { success, data: { url } }
+//   POST /api/billing/pay           { billingCycle?, planSlug? } -> { success, data: { url } }: Safepay's
+//                                   page, with GymsPilotPro's own keys, when that is how gyms pay;
+//                                   409 STRIPE_CHECKOUT / BANK_TRANSFER_ONLY / ONLINE_PAYMENT_OFF otherwise
 //   GET  /api/billing/plans         -> { success, data: [{ slug, name, description, price, limits,
 //                                        features, trialDays, current }] } -- what the gym can move to
 //   POST /api/billing/change-plan   { planSlug, billingCycle? } -> { success, message, data: { plan,
@@ -48,14 +51,21 @@ const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { frontendOrigin } = require('../tenantContext');
 const { LIMIT_KINDS } = require('../planLimits');
 
+const PlatformSettings = require('../models/platformSettingsModel');
+// Paying GymsPilotPro another way than Stripe: which way, and for what.
+const platformPay = require('../services/platformPay');
+const platformSafepay = require('../services/platformSafepay');
+const { SafepayError } = require('../../services/safepay');
+
 const { PlatformBillingError, PlatformStripeNotConfiguredError } = platformBilling;
 const { SubscriptionSyncError } = subscriptionSync;
+const { PlatformPayError } = platformPay;
 
 function fail(res, error) {
   if (error instanceof PlatformStripeNotConfiguredError) {
     return res.status(409).json({ success: false, code: error.code, message: error.message });
   }
-  if (error instanceof PlatformBillingError || error instanceof SubscriptionSyncError) {
+  if (error instanceof PlatformBillingError || error instanceof SubscriptionSyncError || error instanceof PlatformPayError || error instanceof SafepayError) {
     return res.status(error.status).json({ success: false, code: error.code, message: error.message });
   }
   console.error('[billing]', error);
@@ -295,6 +305,38 @@ module.exports = {
         cancelUrl: billingTabUrl(origin, 'cancelled')
       });
       await Gym.updateOne({ _id: gym._id }, { $set: { 'subscription.checkoutSessionId': id || '' } });
+      return res.json({ success: true, data: { url } });
+    } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // POST /api/billing/pay   { billingCycle?: 'monthly' | 'yearly', planSlug?: string }
+  //
+  // "Pay now" when gyms pay GymsPilotPro through its Safepay account: a
+  // Safepay hosted checkout with the PLATFORM's keys for what the gym owes
+  // (platformPay.payTerms: its agreed amount, or another cycle or plan
+  // priced from the list), returning to <gym's primary site>/admin/
+  // settings?tab=billing&paid=1 (cancel: ...?tab=billing). The webhook
+  // records the payment and moves the paid-until date. Any other way is a
+  // 409 that says which: STRIPE_CHECKOUT (use /checkout and /portal),
+  // BANK_TRANSFER_ONLY (upload a receipt), ONLINE_PAYMENT_OFF.
+  pay: async (req, res) => {
+    try {
+      const gym = await freshGym(req);
+      const settings = await PlatformSettings.getSettings();
+      const provider = await platformPay.providerIdFor(gym, settings);
+      if (provider === 'stripe') {
+        return res.status(409).json({ success: false, code: 'STRIPE_CHECKOUT', message: 'This gym pays by card through Stripe: use Subscribe or Manage billing.' });
+      }
+      if (provider === 'generic') {
+        return res.status(409).json({ success: false, code: 'BANK_TRANSFER_ONLY', message: 'Pay by bank transfer to a GymsPilotPro account, then upload the receipt.' });
+      }
+      if (provider !== 'safepay') {
+        return res.status(409).json({ success: false, code: 'ONLINE_PAYMENT_OFF', message: `Online payment is not available. Contact ${process.env.PLATFORM_CONTACT_EMAIL || 'GymsPilotPro'} to pay.` });
+      }
+      const terms = await platformPay.payTerms(gym, req.body || {});
+      const { url } = await platformSafepay.openCheckout({ gym, terms, settings, actor: req.user });
       return res.json({ success: true, data: { url } });
     } catch (error) {
       return fail(res, error);
