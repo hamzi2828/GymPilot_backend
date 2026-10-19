@@ -26,10 +26,13 @@ const T = require('../services/timeUtils');
 const { tenantKey } = require('../../platform/tenantContext');
 const { loginFilter } = require('../../services/username');
 const signInLock = require('../../services/signInLock');
+const twoFactor = require('../../services/twoFactorService');
 
 // One answer for a wrong password, a name nobody has, an account switched
 // off and one whose password is paused, in the website's words.
 const SIGN_IN_REJECTED = `That email or username and password do not match. ${signInLock.PAUSE_NOTE}`;
+
+const NOT_ALLOWED_AT_DESK = 'This account is not allowed to use the attendance app.';
 
 // The 1:N false-accept target the desktop matcher scales by candidate count.
 // 1-in-100,000 is the DigitalPersona default and what the reference reader
@@ -141,6 +144,53 @@ async function openDeskSession(user, device, extra = {}) {
   };
 }
 
+// An account without the front-desk grant, recorded and answered the same
+// way at the password and at the code step. Not a failed sign-in: it does
+// not count toward the throttle, or a confused operator locks out an account
+// that would never work.
+function refuseWithoutGrant(res, user, device) {
+  AttendanceLog.record({
+    event: 'login_denied',
+    userId: user._id,
+    userName: sessionPayload(user).name,
+    userEmail: user.email,
+    success: false,
+    message: 'Account lacks allowAttendanceApp',
+    device: device.deviceLabel,
+    osUser: device.osUser,
+    clientApp: device.clientApp,
+    ip: device.ip
+  });
+  return res.status(403).json({ success: false, message: NOT_ALLOWED_AT_DESK });
+}
+
+// The website's second sign-in step (services/twoFactorService.js), asked of
+// the desk too: the same rule for who needs it, the same emailed code and the
+// same challenge, finished at POST /login/2fa. Null when the account signs
+// straight in. Gym accounts have the emailed code only, so `method` is always
+// "email" (the authenticator app is the platform panel's).
+async function deskTwoFactorStep(user) {
+  if (!(await twoFactor.required(user))) return null;
+  const challenge = await twoFactor.startChallenge(user);
+  // Nothing is broken, the account just has no address: said as the website
+  // says it (409), not "try later".
+  if (challenge.noEmail) return { status: 409, body: { success: false, message: twoFactor.NO_EMAIL_SIGN_IN } };
+  // No silent way round: no code sent means no token.
+  if (!challenge.emailed) {
+    return { status: 503, body: { success: false, message: 'We could not email your sign-in code. Please contact the gym.' } };
+  }
+  return {
+    status: 200,
+    body: {
+      success: false,
+      requires2fa: true,
+      challenge_id: challenge.challengeId,
+      method: 'email',
+      message: `Enter the 6-digit code we emailed to ${twoFactor.maskEmail(user.email)}.`
+    }
+  };
+}
+
 // What a client is told about a punch, from recordPunch's result. A phone
 // checking in with the desk code (deskCodeController) is answered in exactly
 // this shape, so the desk, the kiosk and the phone read one kind of reply.
@@ -209,6 +259,11 @@ module.exports = {
   // -- there is no separate credential store. What differs is the grant: an account without
   // allowAttendanceApp is refused with 403 even when the password is right,
   // so the desk is told to ask an admin rather than retyping it.
+  //
+  // An account the website puts through two-step sign-in is put through it
+  // here too: no token, but `{ success: false, requires2fa: true,
+  // challenge_id, method: "email", message }`, and the code goes to
+  // POST /login/2fa (loginTwoFactor).
   login: async (req, res) => {
     const device = deviceContext(req);
     const { email, password } = req.body || {};
@@ -241,33 +296,85 @@ module.exports = {
         return res.status(401).json({ success: false, message: SIGN_IN_REJECTED });
       }
 
-      if (!user.allowAttendanceApp) {
-        // Not a failed sign-in -- do not count it toward the throttle, or a
-        // confused operator locks out an account that would never work.
-        AttendanceLog.record({
-          event: 'login_denied',
-          userId: user._id,
-          userName: sessionPayload(user).name,
-          userEmail: user.email,
-          success: false,
-          message: 'Account lacks allowAttendanceApp',
-          device: device.deviceLabel,
-          osUser: device.osUser,
-          clientApp: device.clientApp,
-          ip: device.ip
-        });
-
-        return res.status(403).json({
-          success: false,
-          message: 'This account is not allowed to use the attendance app.'
-        });
-      }
+      if (!user.allowAttendanceApp) return refuseWithoutGrant(res, user, device);
 
       clearFailures(key);
+
+      // Only once the password and the grant are right, so nobody is
+      // emailed a code for a sign-in that could never finish.
+      const step = await deskTwoFactorStep(user);
+      if (step) return res.status(step.status).json(step.body);
 
       return res.json(await openDeskSession(user, device));
     } catch (err) {
       console.error('[attendance] login failed:', err);
+      return res.status(500).json({ success: false, message: 'Sign in failed. Try again.' });
+    }
+  },
+
+  // POST /api/desktop/login/2fa   { challenge_id, code, client_app, device_label, ... }
+  //
+  // The second half of a sign-in that answered `requires2fa`. The code is
+  // checked by the website's own service (single use, ten minutes, five
+  // tries), and a right one is answered exactly as /login answers a sign-in
+  // with no second step. A wrong code is 401 TWO_FACTOR_INVALID while the
+  // challenge still has tries left; one that is used up, out of time or out
+  // of tries is 401 TWO_FACTOR_EXPIRED -- sign in again.
+  loginTwoFactor: async (req, res) => {
+    const device = deviceContext(req);
+    const body = req.body || {};
+    const challengeId = String(body.challenge_id || '').trim();
+
+    try {
+      if (!challengeId) {
+        return res.status(400).json({ success: false, message: 'Sign in with your password first.' });
+      }
+
+      // Read first, for the audit trail: verify() clears the challenge.
+      const pending = await User.findOne({ 'twoFactor.pending.challengeId': challengeId })
+        .select('firstName lastName email')
+        .lean();
+
+      let user;
+      try {
+        user = await twoFactor.verify(challengeId, body.code);
+      } catch (error) {
+        if (!error.status) throw error;
+        // A code not even six digits leaves the challenge as it was; any
+        // other refusal is "over" when verify() has let the challenge go.
+        const over =
+          error.status !== 400 && !(await User.exists({ 'twoFactor.pending.challengeId': challengeId }));
+        if (pending) {
+          AttendanceLog.record({
+            event: 'login_denied',
+            userId: pending._id,
+            userName: sessionPayload(pending).name,
+            userEmail: pending.email,
+            success: false,
+            message: over ? 'Sign-in code expired or out of tries' : 'Wrong sign-in code',
+            device: device.deviceLabel,
+            osUser: device.osUser,
+            clientApp: device.clientApp,
+            ip: device.ip
+          });
+        }
+        return res.status(401).json({
+          success: false,
+          code: over ? 'TWO_FACTOR_EXPIRED' : 'TWO_FACTOR_INVALID',
+          message: error.message
+        });
+      }
+
+      // Read again now: switched off, or the grant taken away, in the minutes
+      // since the password was typed.
+      if (user.isActive === false) {
+        return res.status(403).json({ success: false, message: 'This account has been deactivated.' });
+      }
+      if (!user.allowAttendanceApp) return refuseWithoutGrant(res, user, device);
+
+      return res.json(await openDeskSession(user, device, { meta: { twoFactor: true } }));
+    } catch (err) {
+      console.error('[attendance] login 2fa failed:', err);
       return res.status(500).json({ success: false, message: 'Sign in failed. Try again.' });
     }
   },

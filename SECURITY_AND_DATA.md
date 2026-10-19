@@ -134,7 +134,16 @@ An emailed six-digit code (`src/services/twoFactorService.js`), single-use,
 `POST /user/login/2fa { challengeId, code }` completes it. Switching it on is
 refused while outgoing email is not working, because the code cannot arrive.
 The Windows attendance app and the web kiosk sign in through
-`/api/desktop/login`, which is gated by `allowAttendanceApp` instead.
+`/api/desktop/login`, which is gated by `allowAttendanceApp` as well and
+asks for the same code: an account that needs it gets `200 { success: false,
+requires2fa: true, challenge_id, method: "email", message }` and no token
+(`503` when the code cannot be emailed, `409` with no address to send it
+to), and `POST /api/desktop/login/2fa { challenge_id, code, client_app,
+device_label }` answers exactly what a plain desk sign-in answers. A wrong
+code is `401 TWO_FACTOR_INVALID`; a used, stale or tried-out one is `401
+TWO_FACTOR_EXPIRED` (sign in again). A desk linked with a code from the
+admin panel signs in as the account that made the code, which had to sign in
+to the website to make it.
 
 ## Admin audit log
 

@@ -17,7 +17,16 @@ const {
   notOnKiosk,
   refuseRemovedMethods
 } = require('../middleware/desktopAuth');
-const { desktopLoginLimiter } = require('../../middleware/rateLimit');
+const { desktopLoginLimiter, twoFactorLimiter } = require('../../middleware/rateLimit');
+
+// The website's code-step limiter reads the challenge from `challengeId`; the
+// desk sends `challenge_id`, the one field loginTwoFactor reads. Copied over
+// it (whatever else was sent there), so the limiter counts the challenge the
+// handler checks and a decoy in the other field buys no fresh count.
+function challengeForLimiter(req, res, next) {
+  if (req.body && typeof req.body === 'object') req.body.challengeId = req.body.challenge_id;
+  next();
+}
 
 // Unauthenticated -- this is what issues the token, and the palette the
 // sign-in window paints itself with before it has one.
@@ -27,7 +36,12 @@ const { desktopLoginLimiter } = require('../../middleware/rateLimit');
 // them out because one receptionist mistyped a password would stop the counter
 // working. /theme is left open -- it returns a colour scheme and nothing else,
 // and the sign-in window needs it before it can draw itself.
+//
+// The emailed-code step shares the desk's limiter (a wrong password and a
+// wrong code are one allowance) and is held to the website's code-step
+// limiter as well, per address and per challenge.
 router.post('/login', desktopLoginLimiter, controller.login);
+router.post('/login/2fa', desktopLoginLimiter, challengeForLimiter, twoFactorLimiter, controller.loginTwoFactor);
 router.post('/theme', controller.theme);
 
 // Everything past here needs a live desktop token AND an account that still
