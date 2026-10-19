@@ -31,7 +31,9 @@ function auditAfter(req, res, tab, slug) {
       tab,
       status: res.statusCode,
       body: AdminAuditLog.summariseBody(req.body),
-      ip: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim(),
+      // req.ip: the hop Vercel's proxy wrote (index.js trusts exactly one).
+      // The first X-Forwarded-For entry is whatever the caller sent.
+      ip: String(req.ip || (req.socket && req.socket.remoteAddress) || ''),
       userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
       durationMs: Date.now() - startedAt
     });

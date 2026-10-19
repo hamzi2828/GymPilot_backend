@@ -34,7 +34,11 @@ const PlatformAuditLog = require('../../src/platform/models/platformAuditLogMode
 const { platformAuth, signPlatformToken } = require('../../src/platform/middleware/platformAuth');
 const controller = require('../../src/platform/controllers/platformAuthController');
 
-PlatformAuditLog.record = async () => null;
+const audited = [];
+PlatformAuditLog.record = async (row) => {
+  audited.push(row);
+  return null;
+};
 
 // The platform's own mail server, set (sendEmail above is what is called).
 const PLATFORM_SMTP = { SMTP_HOST: 'smtp.platform.test', SMTP_USER: 'platform@gympilot.test', SMTP_PASS: 'unit' };
@@ -282,6 +286,26 @@ test('with no platform mail server, forgot-password says so before looking anyon
     assert.equal(admin.passwordReset.tokenHash, null, 'no reset token was made');
   } finally {
     watch();
+    restore();
+  }
+});
+
+test("the audit log keeps the address express trusts, not the first X-Forwarded-For entry the caller wrote", async () => {
+  const admin = await adminDoc();
+  const restore = accountIs(admin);
+  const forged = { headers: { 'x-forwarded-for': '6.6.6.6, 203.0.113.9' }, ip: '203.0.113.9' };
+  audited.length = 0;
+  try {
+    const login = await call(controller.login, { ...forged, body: { email: admin.email, password: 'not the password' } });
+    assert.equal(login.statusCode, 401);
+    // Wrong password on a second-step change (platformTwoFactorController).
+    const change = await call(controller.setTwoFactor, { ...forged, superAdmin: admin, body: { enabled: true, currentPassword: 'not the password' } });
+    assert.equal(change.statusCode, 400);
+    assert.equal(change.body.code, 'PASSWORD_INCORRECT');
+
+    assert.deepEqual(audited.map((row) => row.action), ['login_failed', 'two_factor_change_failed']);
+    for (const row of audited) assert.equal(row.ip, '203.0.113.9', row.action);
+  } finally {
     restore();
   }
 });

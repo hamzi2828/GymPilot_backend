@@ -35,8 +35,11 @@ const openSecret = (value) => storage.run(undefined, () => open(value));
 // Fields a check reads that are hidden by default.
 const SECRET_FIELDS = '+twoFactor.totp.secret +twoFactor.totp.backupCodes';
 
+// req.ip, which express takes from the hop Vercel's proxy wrote (index.js
+// trusts exactly one), never the first X-Forwarded-For entry: the caller
+// writes that one, and could put anyone's address in the audit log.
 function clientIp(req) {
-  return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+  return String((req && (req.ip || (req.socket && req.socket.remoteAddress))) || '');
 }
 
 function publicAdmin(admin) {
