@@ -383,6 +383,16 @@ async function runDaily(options = {}) {
   // run, so a member resuming today is not told their membership is lapsed.
   const { resumeDueFreezes } = require('../gymfolio/services/membershipService');
   const freezes = options.dryRun ? { resumed: 0 } : await resumeDueFreezes();
+  // Renewal orders, payment links and due-date charges (services/billing/),
+  // before the expiry notices so those can tell which terms it now covers.
+  // On its own: a gateway that is down must not cost the gym its reminders.
+  let billing;
+  try {
+    billing = await require('./billing/billingJob').runBillingJob(options);
+  } catch (error) {
+    console.error('[jobs] billing reminders failed:', error);
+    billing = { error: error.message };
+  }
   const memberships = await sendExpiryReminders(options);
   const classes = await sendClassReminders(options);
   const ptSessions = await sendPtReminders(options);
@@ -392,12 +402,13 @@ async function runDaily(options = {}) {
   const { runAutomations } = require('./automations');
   const automations = await runAutomations(options);
 
-  return { expired, freezes, memberships, classes, ptSessions, missed, automations };
+  return { expired, freezes, billing, memberships, classes, ptSessions, missed, automations };
 }
 
 module.exports = {
   EXPIRY_NOTICE_DAYS,
   willAutoRenew,
+  hasFollowingTerm,
   sessionWindow,
   visitCoversSession,
   sendExpiryReminders,
