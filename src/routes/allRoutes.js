@@ -446,6 +446,10 @@ router.put('/admin/messaging/announcements/:id', auth, requirePermission('messag
 router.delete('/admin/messaging/announcements/:id', auth, requirePermission('messaging', 'manage'), messagingController.deleteAnnouncement);
 router.post('/admin/messaging/automations/run', auth, requirePermission('messaging', 'manage'), messagingController.runAutomationsNow);
 
+// Payment links (public, the link is the key) and the member's saved cards
+// for automatic payments -- see routes/payLinkRoutes.js.
+router.use(require('./payLinkRoutes'));
+
 // Contact routes
 router.post('/api/contact/submit', contactLimiter, contactController.submitContact); // Public route
 router.get('/api/contact', auth, requirePermission('contact-queries'), contactController.getAllContacts); // Admin only

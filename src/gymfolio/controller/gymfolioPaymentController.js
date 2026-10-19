@@ -253,7 +253,10 @@ const gymfolioPaymentController = {
         status,
         sort
       });
-      return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });
+      // A renewal waiting on its payment link carries the link, for the
+      // portal's and the app's "Pay now" (services/billing/payLinks.js).
+      const { withPayLinks } = require('../../services/billing/payLinks');
+      return res.status(200).json({ success: true, data: withPayLinks(result.orders), pagination: result.pagination });
     } catch (error) {
       return fail(res, error, 'Failed to fetch orders');
     }
