@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../../platform/modelRegistry');
+const { emailValidator } = require('../../helper/emailShape');
 
 const packageRegistrationSchema = new mongoose.Schema(
   {
@@ -22,10 +23,7 @@ const packageRegistrationSchema = new mongoose.Schema(
       required: [true, 'Email is required'],
       trim: true,
       lowercase: true,
-      match: [
-        /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/,
-        'Please provide a valid email address'
-      ]
+      validate: emailValidator('Please provide a valid email address')
     },
     platform: {
       type: String,

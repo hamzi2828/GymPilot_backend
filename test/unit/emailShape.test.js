@@ -16,6 +16,7 @@ const Contact = require('../../src/models/contactModel');
 const Newsletter = require('../../src/models/newsletterModel');
 const Author = require('../../src/models/authorModel');
 const Trainer = require('../../src/gymfolio/models/trainerModel');
+const PackageRegistration = require('../../src/gymfolio/models/packageRegistrationModel');
 
 const gym = { _id: '00000000000000000000e001', slug: 'unit-email-shape', database: { name: 'gympilot_unit_email_shape' } };
 
@@ -65,13 +66,15 @@ test('as a model validator an empty value is left to `required`', () => {
   assert.equal(validator('nope'), false);
 });
 
-test('the contact, newsletter, author and trainer models all use it', async () => {
+test('the contact, newsletter, author, trainer and package registration models all use it', async () => {
   await runWithTenant(gym, async () => {
     const cases = [
       [Contact, 'emailAddress', { fullName: 'Sam', message: 'Hello' }, 'Please provide a valid email address'],
       [Newsletter, 'email', {}, 'Please enter a valid email'],
       [Author, 'email', { name: 'Sam' }, 'Please enter a valid email'],
-      [Trainer, 'email', {}, 'Please enter a valid email']
+      [Trainer, 'email', {}, 'Please enter a valid email'],
+      // The public "register for a package" form.
+      [PackageRegistration, 'email', {}, 'Please provide a valid email address']
     ];
     for (const [Model, field, rest, message] of cases) {
       for (const ok of ['x@gym.info', 'a@b.fitness', '  Sam@Gym.Fitness  ']) {
