@@ -115,6 +115,26 @@ The Windows app sends one with every punch and, when a punch got no answer
 (or a 5xx), re-sends the same id if that person is scanned or picked again
 within two minutes.
 
+## A punch sent late — `scanned_at`
+
+With no connection the Windows desk keeps matching, saves each punch with its
+`request_id` and the moment it was scanned, and sends them oldest-first once
+it is back, each with `scanned_at` (only from the Windows desk, only with a
+`request_id`, at most 72 hours old — `ATTENDANCE_OFFLINE_MAX_HOURS`). Other
+desks and the daily job may have recorded this person in the meantime, so the
+punch is placed by its own time (`punchService` → *A scan sent late*):
+
+* a visit open at the scan time is closed at the scan time — including one the
+  daily job marked "No check-out" after it, which then loses that mark;
+* within a minute of another punch on either side, it is that punch's repeat
+  (`ignored: true`);
+* inside a visit recorded in and out around it, nothing is recorded:
+  `ignored: true, code: "INSIDE_RECORDED_VISIT"`, with the times;
+* otherwise it is a check-in at the scan time. Before the person's latest
+  visit it is an earlier visit of its own — recorded, never the open one, shown
+  as "No check-out" (`autoClosed`, from the moment the next visit began) unless
+  a later punch in the queue closes it.
+
 ## Gone
 
 * `GET /api/attendance/me/qr` → `410 { code: "QR_CHECKIN_REMOVED" }`, kept for

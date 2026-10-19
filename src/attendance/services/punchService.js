@@ -14,7 +14,7 @@ const Attendance = require('../models/attendanceModel');
 const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const Settings = require('../../models/settings');
 const { resolvePerson, membershipFor } = require('./peopleDirectory');
-const { OPEN_VISIT_HOURS, openVisitMatch, staffOpenUntil } = require('./staleVisits');
+const { OPEN_VISIT_HOURS, openVisitMatch, openVisitAtMatch, staffOpenUntil } = require('./staleVisits');
 const { defaultCurrency } = require('../../services/currency');
 const T = require('./timeUtils');
 
@@ -463,6 +463,23 @@ async function alreadyCheckedOut(record, person) {
   };
 }
 
+// A queued scan whose moment falls inside a visit another desk recorded from
+// start to finish while this one was offline: they were already inside then,
+// in and out on record. Nothing to add -- not a new visit, and not the
+// check-out of one that has its own -- so nothing is recorded, and the answer
+// says why in its own words and `code` rather than "a moment ago".
+async function alreadyOnRecord(record, person) {
+  const detail = await buildReceipt(record, 'ignore', person);
+  return {
+    success: false,
+    ignored: true,
+    code: 'INSIDE_RECORDED_VISIT',
+    message: `Already on record: checked in at ${T.timeLabel(record.checkInAt)} and out at ${T.timeLabel(record.checkOutAt)}.`,
+    detail,
+    person
+  };
+}
+
 // What the desk says out loud when a gym has not worded it itself (Settings
 // attendance.voice). Also what a message left blank goes back to, so clearing
 // a field can never leave the desk announcing an empty string.
@@ -641,6 +658,24 @@ async function repeatedPunch(requestId, { personType, personIds, person, now, se
 // refuses it from a web kiosk), only with a request_id (so a queue sent twice
 // records once), and only inside a window: not more than a few minutes ahead
 // of this server's clock, and not older than OFFLINE_MAX_HOURS.
+//
+// By the time it arrives other desks may have recorded this person since, and
+// the daily job may have closed a visit as forgotten. So a queued scan is
+// placed among what is on record by its own time, never by "now":
+//
+//   * a visit open at the scan time closes at the scan time -- even one the
+//     daily job marked auto-closed after it (staleVisits.openVisitAtMatch),
+//     whose marks the check-out then clears;
+//   * a scan within MIN_PUNCH_GAP_SECONDS of a punch on either side of it is
+//     that punch's repeat, as a live double scan is;
+//   * a scan inside a visit recorded in and out around it adds nothing:
+//     nothing recorded, answered INSIDE_RECORDED_VISIT (alreadyOnRecord);
+//   * otherwise it is a check-in at the scan time. When the person has a
+//     visit that began after it, this is an earlier, separate visit: it is
+//     recorded, but closed as "No check-out" (auto-closed from the moment the
+//     next visit began) rather than left open -- the next visit is the one a
+//     scan now would close. A later queued scan before that moment still
+//     closes it properly.
 // ---------------------------------------------------------------------------
 
 const OFFLINE_MAX_HOURS = Number(process.env.ATTENDANCE_OFFLINE_MAX_HOURS || 72);
@@ -799,11 +834,15 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   const repeat = await repeatedPunch(requestId, { personType, personIds, person, now, settings: gymSettings });
   if (repeat) return repeat;
 
-  let openRecord = await Attendance.findOne({
-    personType,
-    personId: { $in: personIds },
-    ...openVisitMatch(now)
-  }).sort({ checkInAt: -1 });
+  // Open at the punch's own time: for a queued scan, as things stood when it
+  // was scanned (see "A scan sent late").
+  const openMatch = scannedAt ? openVisitAtMatch(now) : openVisitMatch(now);
+  const mine = { personType, personId: { $in: personIds } };
+
+  let openRecord = await Attendance.findOne({ ...mine, ...openMatch }).sort({ checkInAt: -1 });
+
+  // A queued scan's next visit: the first that began after it, if any.
+  let nextVisit = null;
 
   // ---- Double-scan guard ----
   if (openRecord) {
@@ -812,14 +851,29 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
       return alreadyCheckedIn(openRecord, person);
     }
   } else {
+    // Closed by the punch's time: a queued scan is not the repeat of a
+    // check-out that came after it.
     const lastClosed = await Attendance.findOne({
-      personType,
-      personId: { $in: personIds },
-      checkOutAt: { $ne: null }
+      ...mine,
+      checkOutAt: scannedAt ? { $ne: null, $lte: now } : { $ne: null }
     }).sort({ checkOutAt: -1 });
 
     if (lastClosed && (now.getTime() - new Date(lastClosed.checkOutAt).getTime()) / 1000 < MIN_PUNCH_GAP_SECONDS) {
       return alreadyCheckedOut(lastClosed, person);
+    }
+
+    if (scannedAt) {
+      // In and out on record around the scan: nothing to add.
+      const around = await Attendance.findOne({ ...mine, checkInAt: { $lte: now }, checkOutAt: { $gt: now } }).sort({
+        checkInAt: -1
+      });
+      if (around) return alreadyOnRecord(around, person);
+
+      nextVisit = await Attendance.findOne({ ...mine, checkInAt: { $gt: now } }).sort({ checkInAt: 1 });
+      // Checked in at another desk seconds after this scan: the same arrival.
+      if (nextVisit && (new Date(nextVisit.checkInAt).getTime() - now.getTime()) / 1000 < MIN_PUNCH_GAP_SECONDS) {
+        return alreadyCheckedIn(nextVisit, person);
+      }
     }
   }
 
@@ -841,13 +895,18 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   // The one still open is closed the way the daily job closes a forgotten
   // visit -- no check-out time and no duration invented -- which also gives
   // up its one-open-visit slot for the check-in below. Conditional, so a
-  // visit another desk has just closed is left as that desk left it.
+  // visit another desk has just closed is left as that desk left it. (A
+  // queued scan may find the visit marked auto-closed after its own time;
+  // it ended at this scan, which is said instead.)
   if (openRecord && personType === 'member' && !(await gymSettings()).memberScanOut) {
     await Attendance.updateOne(
-      { _id: openRecord._id, checkOutAt: null, autoClosed: { $ne: true } },
+      { _id: openRecord._id, checkOutAt: null, $or: [{ autoClosed: { $ne: true } }, { autoClosedAt: { $gt: now } }] },
       { $set: { autoClosed: true, autoClosedAt: now }, $unset: { open: '' } }
     );
     openRecord = null;
+    if (scannedAt) {
+      nextVisit = await Attendance.findOne({ ...mine, checkInAt: { $gt: now } }).sort({ checkInAt: 1 });
+    }
   }
 
   // ---- Check out ----
@@ -857,6 +916,12 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     // The visit is over: it gives up the one-open-visit slot, so the next
     // check-in can take it. (Absent rather than false -- see the model.)
     openRecord.open = undefined;
+    // Closed by a queued scan after the daily job had given up on it: it has
+    // its check-out now, so it is no longer one without.
+    if (openRecord.autoClosed) {
+      openRecord.autoClosed = false;
+      openRecord.autoClosedAt = null;
+    }
     openRecord.workedMinutes = Math.round(
       (now.getTime() - new Date(openRecord.checkInAt).getTime()) / 60000
     );
@@ -915,6 +980,15 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
     open: true
   });
 
+  // A queued scan from before the person's latest visit: an earlier visit of
+  // its own, never the open one (see "A scan sent late").
+  const placeBefore = (later) => {
+    record.open = undefined;
+    record.autoClosed = true;
+    record.autoClosedAt = later.checkInAt;
+  };
+  if (nextVisit) placeBefore(nextVisit);
+
   if (personType === 'member') {
     // Read above, before the entry rules were asked (see memberStanding).
     const { membership, verdict } = standing || (await memberStanding(person));
@@ -940,24 +1014,37 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   // The lookup has already ruled it over, so it lets go. Exactly the lookup's
   // complement ($nor): a row inside the window is never released, because
   // that is another scan that has just checked this person in. It is not
-  // marked auto-closed here; that stays the job's call.
-  await Attendance.updateMany(
-    { personType, personId: person.id, open: true, $nor: [openVisitMatch(now)] },
-    { $unset: { open: '' } }
-  );
+  // marked auto-closed here; that stays the job's call. (Not for an earlier
+  // visit placed behind a later one: that takes no slot, and the later one
+  // keeps its own.)
+  if (record.open) {
+    await Attendance.updateMany(
+      { personType, personId: person.id, open: true, $nor: [openMatch] },
+      { $unset: { open: '' } }
+    );
+  }
 
   try {
     await record.save();
   } catch (error) {
     // Another scan for this person checked them in between the lookup above
-    // and this insert. Theirs is the visit; this scan is the repeat. Anything
-    // else -- including a clash whose winner cannot be found -- is a real
-    // failure and goes up.
+    // and this insert. Theirs is the visit; this scan is the repeat -- unless
+    // this is a queued scan from before theirs, which is still its own,
+    // earlier visit. Anything else -- including a clash whose winner cannot
+    // be found -- is a real failure and goes up.
     if (error && error.code === 11000) {
       const winner = await Attendance.findOne({ personType, personId: person.id, open: true });
-      if (winner) return alreadyCheckedIn(winner, person);
+      if (winner && scannedAt && new Date(winner.checkInAt).getTime() - now.getTime() >= MIN_PUNCH_GAP_SECONDS * 1000) {
+        placeBefore(winner);
+        await record.save();
+      } else if (winner) {
+        return alreadyCheckedIn(winner, person);
+      } else {
+        throw error;
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
 
   const detail = await buildReceipt(record, 'check_in', person);
@@ -967,7 +1054,9 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   return {
     success: true,
     action: 'check_in',
-    message: 'Check-in recorded.',
+    message: record.autoClosed
+      ? 'Check-in recorded as an earlier visit, with no check-out: they have been checked in since.'
+      : 'Check-in recorded.',
     detail,
     person,
     record

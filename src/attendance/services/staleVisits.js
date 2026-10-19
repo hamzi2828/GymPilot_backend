@@ -100,6 +100,24 @@ function openVisitMatch(now = new Date()) {
   };
 }
 
+// Visits that were open at `at`, a moment already past, as far as the rows
+// can tell now -- for a punch the desk queued while offline and sent later
+// (punchService readScannedAt). openVisitMatch(at), with two differences:
+//
+//   * a visit marked auto-closed AFTER `at` still counts. The mark only says
+//     nobody had closed it by then; the daily job may well have run between
+//     the scan and its upload, and the queued scan is the check-out it was
+//     waiting for;
+//   * a visit that began after `at` does not: it was not open yet.
+function openVisitAtMatch(at) {
+  const { autoClosed, checkInAt, ...rest } = openVisitMatch(at);
+  return {
+    ...rest,
+    checkInAt: { ...checkInAt, $lte: at },
+    $or: [{ autoClosed }, { autoClosedAt: { $gt: at } }]
+  };
+}
+
 // The same test as an aggregation expression, for a $cond inside a $group.
 // ($ifNull because a missing field compares below every date here, where in
 // a find it simply fails to match.)
@@ -173,6 +191,7 @@ module.exports = {
   staffOpenUntil,
   openVisitCutoff,
   openVisitMatch,
+  openVisitAtMatch,
   openVisitExpr,
   missedCheckOutMatch,
   isOpenVisit,

@@ -206,7 +206,9 @@ function punchReply(result) {
     message: result.message,
     detail: result.detail || null,
     ...(result.repeated ? { repeated: true } : {}),
-    ...(result.ignored ? { ignored: true } : {}),
+    // A queued scan inside a visit already on record says so with a `code`
+    // (punchService.alreadyOnRecord); a plain repeat has none.
+    ...(result.ignored ? { ignored: true, ...(result.code ? { code: result.code } : {}) } : {}),
     // Turned away under the gym's entry rules: nothing was recorded.
     ...(result.refused ? { refused: true, code: 'ENTRY_REFUSED', reason: result.reason } : {})
   };
