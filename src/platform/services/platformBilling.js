@@ -14,7 +14,7 @@
 // The webhook (controllers/platformSettingsController.js) is what records the
 // outcome on the gym: this file only starts things.
 
-const { getPlatformStripe, platformBillingAvailable, PlatformStripeNotConfiguredError } = require('./platformStripe');
+const { getPlatformStripe, platformBillingAvailable, platformStripeAvailable, PlatformStripeNotConfiguredError } = require('./platformStripe');
 const PlatformPlan = require('../models/platformPlanModel');
 const PlatformAddon = require('../models/platformAddonModel');
 // fromMinorUnits is Stripe's integer back to major units, for the amounts
@@ -42,8 +42,11 @@ function intervalFor(billingCycle) {
   return billingCycle === 'yearly' ? 'year' : 'month';
 }
 
-async function assertAvailable() {
-  const { available, reason } = await platformBillingAvailable();
+// A gym starting to pay by card needs Stripe to be the way gyms pay
+// (platformBillingAvailable); what Stripe already bills, and self-serve
+// sign-up, only need it usable (`existing`: platformStripeAvailable).
+async function assertAvailable({ existing = false } = {}) {
+  const { available, reason } = await (existing ? platformStripeAvailable() : platformBillingAvailable());
   if (!available) throw new PlatformStripeNotConfiguredError(reason);
 }
 
@@ -173,7 +176,7 @@ async function createCheckoutSession({ gym, billingCycle, successUrl, cancelUrl 
  * @returns {Promise<{url: string, id: string}>}
  */
 async function createSignupCheckoutSession({ signupId, email, plan, addons, billingCycle, successUrl, cancelUrl }) {
-  await assertAvailable();
+  await assertAvailable({ existing: true });
   const stripe = await getPlatformStripe();
   // Required here rather than at the top: provisioning pulls in the tenant
   // models, which nothing else in this file needs.
@@ -317,7 +320,7 @@ async function subscriptionForPlanChange(gym, plan, billingCycle) {
  * card, see invoices, cancel.
  */
 async function createPortalSession({ gym, returnUrl }) {
-  await assertAvailable();
+  await assertAvailable({ existing: true });
   const customer = gym.subscription && gym.subscription.stripeCustomerId;
   if (!customer) throw new PlatformBillingError('This gym has not paid through Stripe yet, so there is no billing account to open.', 409, 'NO_STRIPE_CUSTOMER');
   const stripe = await getPlatformStripe();

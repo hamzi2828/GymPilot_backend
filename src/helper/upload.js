@@ -237,22 +237,28 @@ function headOf(file, length = 16) {
 // that is really something else is refused (and removed from disk).
 const ALLOWED_PROOF_MIME_TYPES = new Set([...ALLOWED_IMAGE_MIME_TYPES, 'application/pdf']);
 const PROOF_REFUSAL = 'Upload the receipt as a photo (JPG, PNG, WebP) or a PDF.';
-const proofUpload = multer({
-  storage,
-  fileFilter: (req, file, cb) => {
-    if (ALLOWED_PROOF_MIME_TYPES.has(file.mimetype)) return cb(null, true);
-    const error = new Error(PROOF_REFUSAL);
-    error.code = 'PROOF_TYPE_NOT_ALLOWED';
-    cb(error);
-  },
-  limits: { fileSize: MAX_FILE_BYTES }
-});
-function proofUploadSingle(fieldName) {
-  const read = sizeLimited(proofUpload.single(fieldName), MAX_FILE_BYTES);
-  return function proofUploadChecked(req, res, next) {
+
+/**
+ * One file in `fieldName`, of the types in `mimes`, at most `maxBytes`, and
+ * only when its own first bytes match the type it claims; anything else is
+ * a 400 FILE_NOT_ALLOWED saying `refusal` (and a file on disk is removed).
+ */
+function checkedUploadSingle(fieldName, { mimes, maxBytes, refusal, notReal }) {
+  const reader = multer({
+    storage,
+    fileFilter: (req, file, cb) => {
+      if (mimes.has(file.mimetype)) return cb(null, true);
+      const error = new Error(refusal);
+      error.code = 'PROOF_TYPE_NOT_ALLOWED';
+      cb(error);
+    },
+    limits: { fileSize: maxBytes }
+  });
+  const read = sizeLimited(reader.single(fieldName), maxBytes);
+  return function uploadChecked(req, res, next) {
     read(req, res, (error) => {
       if (error && error.code === 'PROOF_TYPE_NOT_ALLOWED') {
-        return res.status(400).json({ success: false, code: 'FILE_NOT_ALLOWED', message: PROOF_REFUSAL });
+        return res.status(400).json({ success: false, code: 'FILE_NOT_ALLOWED', message: refusal });
       }
       if (error) return next(error);
       const file = req.file;
@@ -266,9 +272,27 @@ function proofUploadSingle(fieldName) {
       if (ok) return next();
       if (file.path) fs.promises.unlink(file.path).catch(() => {});
       req.file = undefined;
-      return res.status(400).json({ success: false, code: 'FILE_NOT_ALLOWED', message: `That file does not look like a real photo or PDF. ${PROOF_REFUSAL}` });
+      return res.status(400).json({ success: false, code: 'FILE_NOT_ALLOWED', message: `${notReal} ${refusal}` });
     });
   };
+}
+
+function proofUploadSingle(fieldName) {
+  return checkedUploadSingle(fieldName, { mimes: ALLOWED_PROOF_MIME_TYPES, maxBytes: MAX_FILE_BYTES, refusal: PROOF_REFUSAL, notReal: 'That file does not look like a real photo or PDF.' });
+}
+
+// A gym's receipt for its GymsPilotPro subscription: a photo or a PDF, 4 MB
+// at most wherever this runs (it is what Vercel would allow anyway).
+const PLATFORM_RECEIPT_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
+const PLATFORM_RECEIPT_MAX_BYTES = 4 * MB;
+function platformReceiptUploadSingle(fieldName) {
+  return checkedUploadSingle(fieldName, { mimes: PLATFORM_RECEIPT_MIME_TYPES, maxBytes: PLATFORM_RECEIPT_MAX_BYTES, refusal: PROOF_REFUSAL, notReal: 'That file does not look like a real photo or PDF.' });
+}
+
+// An image that is really one (a bank account's QR code): the image types
+// above, at the image size limit.
+function imageUploadChecked(fieldName) {
+  return checkedUploadSingle(fieldName, { mimes: ALLOWED_IMAGE_MIME_TYPES, maxBytes: MAX_FILE_BYTES, refusal: 'Upload the image as a PNG, JPG, WebP or GIF.', notReal: 'That file does not look like a real image.' });
 }
 
 // Convenience wrappers
@@ -314,6 +338,9 @@ module.exports = {
   csvUploadSingle,
   documentUploadSingle,
   proofUploadSingle,
+  platformReceiptUploadSingle,
+  imageUploadChecked,
+  PLATFORM_RECEIPT_MAX_BYTES,
   startsLike,
   ALLOWED_PROOF_MIME_TYPES,
   ensureUploadsDir,

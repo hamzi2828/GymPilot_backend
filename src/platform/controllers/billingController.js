@@ -37,7 +37,10 @@ const Gym = require('../models/gymModel');
 const PlatformPlan = require('../models/platformPlanModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
 const { planFor } = require('../entitlements');
-const { platformBillingAvailable } = require('../services/platformStripe');
+// platformBillingAvailable: may a gym START paying by card (Stripe usable
+// and the way gyms pay); platformStripeAvailable: may what Stripe already
+// bills go on (the portal, a plan change on a running subscription).
+const { platformBillingAvailable, platformStripeAvailable } = require('../services/platformStripe');
 // Called through the modules, not destructured, so a test can stand in for Stripe.
 const platformBilling = require('../services/platformBilling');
 const subscriptionSync = require('../services/subscriptionSync');
@@ -177,7 +180,9 @@ module.exports = {
     try {
       const gym = await freshGym(req);
       const sub = gym.subscription || {};
-      const [plan, stripe] = await Promise.all([planFor(gym), platformBillingAvailable()]);
+      // A gym Stripe already bills keeps its card buttons whichever way new
+      // payments go; any other gym is offered Stripe only when it is the way.
+      const [plan, stripe] = await Promise.all([planFor(gym), hasLiveStripeSubscription(gym) ? platformStripeAvailable() : platformBillingAvailable()]);
       // The meter is extra: a count that fails must not cost the gym its
       // Billing tab or the admin shell its billing banner. The banner asks on
       // every admin page load and needs only the status, so it skips the
@@ -335,7 +340,7 @@ module.exports = {
       if (!picked.plan) return res.status(picked.status).json(picked.body);
       const plan = picked.plan;
 
-      const stripe = await platformBillingAvailable();
+      const stripe = await platformStripeAvailable();
       if (!stripe.available) throw new PlatformStripeNotConfiguredError(stripe.reason);
       if (!hasLiveStripeSubscription(gym)) {
         return res.status(409).json({ success: false, code: 'NO_STRIPE_SUBSCRIPTION', message: 'This gym does not pay by card yet. Subscribe to the plan instead.' });

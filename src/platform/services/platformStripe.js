@@ -16,7 +16,7 @@ const clients = new Map();
 
 class PlatformStripeNotConfiguredError extends Error {
   constructor(message) {
-    super(message || 'The platform has no Stripe keys yet. Add them under System → Stripe.');
+    super(message || 'The platform has no Stripe keys yet. Add them under System → Payments.');
     this.code = 'PLATFORM_STRIPE_NOT_CONFIGURED';
     this.status = 409;
   }
@@ -35,15 +35,35 @@ async function platformStripeConfig() {
 }
 
 /**
- * Whether gyms can pay the platform by card right now: keys saved AND the
- * "charge gyms through Stripe" switch on. The switch is what lets keys sit
- * in the panel, tested, before anyone is sent to a checkout.
+ * Whether the platform's Stripe account can be used at all: keys saved AND
+ * the "charge gyms through Stripe" switch on. The switch is what lets keys
+ * sit in the panel, tested, before anyone is sent to a checkout. This is
+ * the gate for what Stripe already bills -- the customer portal, a plan
+ * change on a running subscription -- and for self-serve sign-up, which
+ * always pays by card: choosing another way for gyms to pay never switches
+ * it off.
+ */
+async function platformStripeAvailable() {
+  const cfg = await platformStripeConfig();
+  if (!cfg.secretKey) return { available: false, reason: 'The platform has no Stripe keys yet. Add them under System → Payments.' };
+  if (!cfg.enabled) return { available: false, reason: 'Charging gyms through Stripe is switched off under System → Payments.' };
+  return { available: true, reason: '' };
+}
+
+/**
+ * Whether a gym can START paying the platform by card from its Billing tab:
+ * Stripe usable (above) AND Stripe the way gyms pay (System → Payments,
+ * services/payments). A platform that never chose reads as Stripe while
+ * Stripe is switched on, so it answers as it always did.
  */
 async function platformBillingAvailable() {
-  const cfg = await platformStripeConfig();
-  if (!cfg.secretKey) return { available: false, reason: 'The platform has no Stripe keys yet. Add them under System → Stripe.' };
-  if (!cfg.enabled) return { available: false, reason: 'Charging gyms through Stripe is switched off under System → Stripe.' };
-  return { available: true, reason: '' };
+  const usable = await platformStripeAvailable();
+  if (!usable.available) return usable;
+  // Required here: the registry's Stripe provider requires this file.
+  const { selectedFrom } = require('./payments');
+  const { id } = selectedFrom(await PlatformSettings.getSettings());
+  if (id !== 'stripe') return { available: false, reason: 'Gyms pay GymsPilotPro another way now, not by card through Stripe (System → Payments).' };
+  return usable;
 }
 
 /** A Stripe client on the platform's own account, or throws. */
@@ -69,6 +89,7 @@ module.exports = {
   getPlatformStripe,
   platformStripeConfig,
   platformBillingAvailable,
+  platformStripeAvailable,
   forgetPlatformStripe,
   PlatformStripeNotConfiguredError
 };

@@ -21,7 +21,9 @@ const { validateDemoRequest, priceSelection } = require('./demoRequestsControlle
 const { resolveAddons } = require('./addonsController');
 const { slugify, isReservedSlug, freeSlugFrom } = require('../provisioning');
 const { subdomainHostFor, localFallback } = require('../tenantContext');
-const { platformBillingAvailable, platformStripeConfig, PlatformStripeNotConfiguredError } = require('../services/platformStripe');
+// Self-serve sign-up always pays by card, whichever way existing gyms pay
+// (System → Payments): it needs Stripe usable, not chosen.
+const { platformStripeAvailable, platformStripeConfig, PlatformStripeNotConfiguredError } = require('../services/platformStripe');
 // Called through the modules, not destructured, so a test can stand in for them.
 const platformBilling = require('../services/platformBilling');
 const signupProvisioning = require('../services/signupProvisioning');
@@ -98,7 +100,7 @@ async function selfServeAvailable() {
   if (!platformEmailConfigured()) {
     return { available: false, reason: 'SMTP_HOST, SMTP_USER and SMTP_PASS are not all set, so the owner of a new gym would never get the link to set their password' };
   }
-  const billing = await platformBillingAvailable();
+  const billing = await platformStripeAvailable();
   if (!billing.available) return billing;
   const { webhookSecret } = await platformStripeConfig();
   if (!webhookSecret) return { available: false, reason: 'The platform has no Stripe webhook signing secret, so a payment could never create its gym' };

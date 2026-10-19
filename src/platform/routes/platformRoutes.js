@@ -10,6 +10,7 @@ const router = express.Router();
 const { platformAuth } = require('../middleware/platformAuth');
 const { platformLoginLimiter, twoFactorLimiter, passwordResetLimiter, passwordResetConfirmLimiter, demoRequestLimiter, paymentLimiter } = require('../../middleware/rateLimit');
 const { warmPlatformModels } = require('../models');
+const { imageUploadChecked } = require('../../helper/upload');
 const { platformDatabaseName, tenantDatabasePrefix } = require('../dbNames');
 
 const authController = require('../controllers/platformAuthController');
@@ -107,10 +108,18 @@ router.post('/plans', plansController.create);
 router.put('/plans/:id', plansController.update);
 router.delete('/plans/:id', plansController.remove);
 
-// The platform's own Stripe keys
+// How gyms pay GymsPilotPro: the way chosen, the platform's own Stripe and
+// Safepay keys, its bank accounts, the reminders to gym owners.
 router.get('/settings', platformSettingsController.get);
 router.put('/settings', platformSettingsController.update);
+router.get('/settings/payment-gateways', platformSettingsController.paymentGateways);
 router.post('/settings/stripe/test', platformSettingsController.testStripe);
+router.post('/settings/bank-accounts', platformSettingsController.addBankAccount);
+router.put('/settings/bank-accounts/:id', platformSettingsController.updateBankAccount);
+router.delete('/settings/bank-accounts/:id', platformSettingsController.removeBankAccount);
+router.post('/settings/bank-accounts/:id/qr', imageUploadChecked('qrCode'), platformSettingsController.uploadBankAccountQr);
+router.delete('/settings/bank-accounts/:id/qr', platformSettingsController.removeBankAccountQr);
+router.post('/settings/:gatewayId/test', platformSettingsController.testGateway);
 
 // Add-ons sold beside the plans
 router.get('/addons', addonsController.list);

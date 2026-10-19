@@ -17,7 +17,9 @@
 const SHARED_FOLDERS = new Set([
   'uploads', 'settings', 'banks', 'trainers', 'members', 'member-documents', 'payment-proofs',
   'gym-classes', 'products', 'screenshots', 'home-sections', 'home-videos', 'hero-slides', 'testimonials',
-  'blogs', 'blog-hero'
+  'blogs', 'blog-hero',
+  // GymsPilotPro's own bank-account QR codes (services/platformBankAccounts.js).
+  'platform-bank-qr'
 ]);
 
 const PAGE_SIZE = 1000;
