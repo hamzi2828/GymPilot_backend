@@ -73,3 +73,18 @@ test('a package stored before periods were checked still saves while its period 
     assert.equal((await update(old, { period: 'Quarterly' })).statusCode, 200);
   });
 });
+
+test('"12 classes per month" is refused, not saved as a twelve-month package', async () => {
+  await h.inGym(gym, async () => {
+    const refused = await create({ name: 'Twelve a month', period: '12 classes per month' });
+    assert.equal(refused.statusCode, 400, JSON.stringify(refused.body));
+    assert.equal(refused.body.code, 'PERIOD_NOT_UNDERSTOOD');
+    assert.match(refused.body.message, /^The period "12 classes per month" starts with 12, which is not how long this package lasts/);
+    assert.equal(await Package.countDocuments({ name: 'Twelve a month' }), 0);
+
+    // Said the way it is meant, it saves.
+    const saved = await create({ name: 'Twelve a month', period: 'month', kind: 'session_pack', sessions: 12 });
+    assert.equal(saved.statusCode, 201, JSON.stringify(saved.body));
+    assert.equal((await create({ name: 'Three months', period: '3 x month' })).statusCode, 201);
+  });
+});

@@ -83,6 +83,26 @@ test('a label that names no length, or could be read two ways, is not guessed at
   for (const label of unreadable) assert.equal(periodLength(label), null, String(label));
 });
 
+test('a number that counts classes or sessions is not the length: "12 classes per month" is not twelve months', () => {
+  // Read as a count of months, these sold a year (or eight months) of membership.
+  for (const label of ['12 classes per month', '12 Classes / Month', '8 sessions monthly', '10 visits a week', '4 x classes per month']) {
+    assert.equal(periodLength(label), null, label);
+    assert.equal(termEnd(start, { period: label }).toISOString().slice(0, 10), '2026-03-02', `${label}: a stored one keeps the 30 days`);
+  }
+  // A count next to the unit, or written as times, still is the length.
+  assert.deepEqual(periodLength('3 x month'), { months: 3 });
+  assert.deepEqual(periodLength('3x month'), { months: 3 });
+  assert.deepEqual(periodLength('1 month, 12 classes'), { months: 1 });
+  assert.deepEqual(periodLength('Monthly - 12 classes'), { months: 1 });
+  assert.deepEqual(periodLength('Gold, 12 classes per month'), { months: 1 });
+
+  const problem = periodProblem({ period: '12 classes per month' });
+  assert.match(problem, /^The period "12 classes per month" starts with 12, which is not how long this package lasts/);
+  assert.match(problem, /put the number of classes or sessions in the package's sessions, or set how many days it is valid for/);
+  assert.equal(periodProblem({ period: '12 classes per month', durationDays: 30 }), null, 'days valid for say the length instead');
+  assert.equal(periodProblem({ period: 'month', sessions: 12 }), null);
+});
+
 test('termEnd sells what the label says: an annual plan is a year, not 30 days', () => {
   const ends = (period) => termEnd(start, { period }).toISOString().slice(0, 10);
   assert.equal(ends('Annual'), '2027-01-31');

@@ -122,25 +122,58 @@ const PERIOD_MAX = { months: 1200, days: 36600 };
 const PERIOD_HELP =
   'Use day, week, fortnight, month, quarter, half year or year, with a number in front if you need one ("3 months"), or set how many days it is valid for.';
 
-/**
- * The length a period label names: `{ months }` or `{ days }`, or null when
- * it names none ("Custom", "Lifetime", "10 sessions").
- */
-function periodLength(label) {
-  const text = String(label || '').toLowerCase().replace(/[^a-z0-9.]+/g, ' ').trim();
-  if (!text || PERIOD_AMBIGUOUS.test(text)) return null;
+function periodText(label) {
+  return String(label || '').toLowerCase().replace(/[^a-z0-9.]+/g, ' ').trim();
+}
 
+// The first length a label names: which unit, and where.
+function firstUnit(text) {
   let found = null;
   for (const unit of PERIOD_UNITS) {
     const match = unit.pattern.exec(text);
     if (match && (!found || match.index < found.match.index)) found = { unit, match };
   }
+  return found;
+}
+
+/**
+ * The number a label opens with when it counts something other than time
+ * -- "12 classes per month", "8 sessions monthly" -- or null. Such a number
+ * is not the length: read as one, "12 classes per month" sold twelve months.
+ * "3 x month" is a count of months, and not this.
+ */
+function strayCount(label) {
+  const text = periodText(label);
+  const found = text && firstUnit(text);
+  if (!found || found.match[1]) return null;
+  const before = text.slice(0, found.match.index).trim();
+  if (!/^\d/.test(before) || /^\d+(?:\.\d+)?\s*x$/.test(before)) return null;
+  return parseFloat(before);
+}
+
+/**
+ * The length a period label names: `{ months }` or `{ days }`, or null when
+ * it names none ("Custom", "Lifetime", "10 sessions") or opens with a count
+ * of something else ("12 classes per month": see strayCount).
+ */
+function periodLength(label) {
+  const text = periodText(label);
+  if (!text || PERIOD_AMBIGUOUS.test(text)) return null;
+
+  const found = firstUnit(text);
   if (!found) return null;
 
-  // The count beside the unit, else a number the label opens with
-  // ("3 x month"), else one.
+  // The count beside the unit ("3 months"), else one written as times
+  // ("3 x month"), else one -- unless the label opens with a number that
+  // counts something else, which is no length at all.
   const beside = found.match[1];
-  const count = beside ? PERIOD_WORDS[beside] || Number(beside) : parseInt(text, 10) || 1;
+  let count = 1;
+  if (beside) count = PERIOD_WORDS[beside] || Number(beside);
+  else if (strayCount(label) !== null) return null;
+  else {
+    const times = /^(\d+(?:\.\d+)?)\s*x$/.exec(text.slice(0, found.match.index).trim());
+    if (times) count = Number(times[1]);
+  }
   if (!Number.isInteger(count) || count < 1) return null;
   const length = found.unit.months ? { months: found.unit.months * count } : { days: found.unit.days * count };
   return (length.months || 0) > PERIOD_MAX.months || (length.days || 0) > PERIOD_MAX.days ? null : length;
@@ -149,13 +182,22 @@ function periodLength(label) {
 /**
  * Why a package cannot be saved as it is, or null. A one-off package with
  * no validity in days takes its length from the period label; one that
- * names no length used to be sold as 30 days whatever it cost.
+ * names no length used to be sold as 30 days whatever it cost, and one
+ * that opened with a count of classes sold that many months.
  */
 function periodProblem(pkg) {
   const billing = (pkg && pkg.billing) || {};
   if (billing.mode === 'recurring' || Number(pkg && pkg.durationDays) > 0) return null;
   if (periodLength(pkg && pkg.period)) return null;
-  return `The period "${String((pkg && pkg.period) || '').trim()}" does not say how long this package lasts. ${PERIOD_HELP}`;
+  const label = String((pkg && pkg.period) || '').trim();
+  const stray = strayCount(label);
+  if (stray !== null) {
+    return (
+      `The period "${label}" starts with ${stray}, which is not how long this package lasts: only a number next to a day, week, month or year is ("3 months"). ` +
+      `Say the length on its own ("month") and put the number of classes or sessions in the package's sessions, or set how many days it is valid for.`
+    );
+  }
+  return `The period "${label}" does not say how long this package lasts. ${PERIOD_HELP}`;
 }
 
 /**
