@@ -31,7 +31,7 @@ const { currentTenant } = require('../../platform/tenantContext');
 const { billingEmail } = require('../../templates/billingEmails');
 const { billingSettings } = require('./settings');
 const { activeBanks, bankText } = require('./banks');
-const { activeProvider, onlineLabel } = require('./provider');
+const { activeProvider, canCheckout, onlineLabel } = require('./provider');
 const { issuePayLink } = require('./payLinks');
 const { metadataOf } = require('./dueRenewals');
 
@@ -70,6 +70,25 @@ function firstNameOf(member, order) {
   return full ? String(full).split(' ')[0] : '';
 }
 
+/**
+ * How long one term of the package runs, in words: "1 month", "3 months",
+ * "1 year", "2 weeks", "30 days" -- the package's own label when it names
+ * no length.
+ */
+function periodLabel(snapshot) {
+  const s = snapshot || {};
+  const plural = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+  const days = Number(s.durationDays) || 0;
+  if (days > 0) return plural(days, 'day');
+  const billing = s.billing || {};
+  if (billing.mode === 'recurring') return plural(Number(billing.intervalCount) || 1, billing.interval || 'month');
+  const { periodLength } = require('../../gymfolio/services/membershipService');
+  const length = periodLength(s.period || '');
+  if (length && length.months) return length.months % 12 === 0 ? plural(length.months / 12, 'year') : plural(length.months, 'month');
+  if (length && length.days) return length.days % 7 === 0 ? plural(length.days / 7, 'week') : plural(length.days, 'day');
+  return String(s.period || '').trim();
+}
+
 /** "Visa •••• 4242" for a saved card. */
 function cardLabel(method) {
   if (!method) return '';
@@ -90,21 +109,28 @@ async function messageVars(order, kind, context = {}) {
   const dueKey = metadataOf(order, 'dueDate');
   const lastKey = metadataOf(order, 'lastDay');
   const pay = order.payment || {};
+  const dueDate = dayLabel(dueKey);
+  const lastDay = dayLabel(lastKey) || dueDate;
   return {
     firstName: firstNameOf(context.member, order),
     siteName,
     packageName: (order.packageDetails && order.packageDetails.name) || 'membership',
+    period: periodLabel(order.packageDetails),
     amount: amountLabel(pay.amount),
     currency: String(pay.currency || '').toUpperCase(),
-    dueDate: dayLabel(dueKey),
-    lastDay: dayLabel(lastKey) || dayLabel(dueKey),
+    dueDate,
+    lastDay,
+    // For the link staff send for any unpaid order, which may have no dates.
+    dueText: dueDate ? `, due ${dueDate} (last day to pay ${lastDay})` : '',
     orderNumber: order.orderNumber || '',
     payUrl: link.url,
     portalUrl: link.url,
     renewUrl: link.url,
     bankText: bankText(banks),
     reason: context.reason || '',
-    onlineLabel: onlineLabel(provider),
+    // Only a gateway that takes payments on its own page is "pay online";
+    // one that does not (bank transfer with receipt) leaves the bank details.
+    onlineLabel: canCheckout(provider) ? onlineLabel(provider) : null,
     autoPayCard: context.autoPayCard || '',
     banks,
     settings,
@@ -195,4 +221,4 @@ async function sendBillingMessage(order, kind, context = {}) {
   return { any: Object.values(sent).some(Boolean), sent, skipped };
 }
 
-module.exports = { EVENT_KEYS, sendBillingMessage, messageVars, gymName, amountLabel, cardLabel };
+module.exports = { EVENT_KEYS, sendBillingMessage, messageVars, gymName, amountLabel, cardLabel, periodLabel };

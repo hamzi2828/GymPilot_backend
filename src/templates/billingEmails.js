@@ -46,7 +46,7 @@ function opening(kind, v) {
   }
 }
 
-function bankBlock(banks) {
+function bankBlock(banks, online) {
   if (!banks || !banks.length) return '';
   const rows = banks.map((bank) =>
     detailTable([
@@ -58,15 +58,19 @@ function bankBlock(banks) {
     ])
   );
   return [
-    paragraph('<strong>Prefer a bank transfer?</strong> Send it from any bank app by Raast or IBFT, with no fee, to:'),
+    paragraph(
+      online
+        ? '<strong>Prefer a bank transfer?</strong> Send it from any bank app by Raast or IBFT, with no fee, to:'
+        : '<strong>Pay by bank transfer</strong> from any bank app by Raast or IBFT, with no fee, to:'
+    ),
     ...rows,
-    paragraph('Please use your name as the reference, and keep the receipt in case the gym asks for it.')
+    paragraph('Use your name as the reference, then upload a screenshot of the receipt on the payment page and the gym will confirm it.')
   ].join('');
 }
 
 /**
  * @param {string} kind  before | due | declined | last | link
- * @param {object} v     siteName, firstName, packageName, amount, currency,
+ * @param {object} v     siteName, firstName, packageName, period, amount, currency,
  *                       dueDate, lastDay, payUrl, orderNumber, reason,
  *                       onlineLabel (null: no online payment), banks,
  *                       autoPayCard ("Visa •••• 4242" when it will be charged)
@@ -83,6 +87,7 @@ function billingEmail(kind, v) {
     detailTable([
       ['Gym', v.siteName],
       ['Package', v.packageName],
+      ['Period', v.period],
       ['Amount', amount],
       ['Due date', v.dueDate],
       ['Last day to pay', v.lastDay],
@@ -92,8 +97,8 @@ function billingEmail(kind, v) {
       ? callout(`Nothing to do: we will charge your saved card ${escapeHtml(v.autoPayCard)} on the due date. You can still pay now, or switch automatic payments off in your account.`, 'good')
       : '',
     online ? paragraph(`Pay online in a minute: ${escapeHtml(v.onlineLabel)}.`) : '',
-    v.payUrl ? `<p style="margin:0 0 20px">${button(v.payUrl, online ? 'Pay now' : 'See how to pay')}</p>` : '',
-    bankBlock(v.banks)
+    v.payUrl ? `<p style="margin:0 0 20px">${button(v.payUrl, online ? 'Pay now' : v.banks && v.banks.length ? 'Pay by bank transfer' : 'See how to pay')}</p>` : '',
+    bankBlock(v.banks, online)
   ].join('');
 
   const siteName = v.siteName || 'your gym';

@@ -99,9 +99,10 @@ async function hasFollowingTerm(order) {
  * Nobody is told to renew what is not ending: a subscription that renews
  * itself, or a membership already renewed, is skipped -- and not marked as
  * sent, so a member who switches renewal off next week still gets the notices
- * that are left.
+ * that are left. Nor is a term whose renewal the payment-link reminders now
+ * cover (`billingRemindersOn`, from runDaily): those say it instead.
  */
-async function sendExpiryReminders({ dryRun = false } = {}) {
+async function sendExpiryReminders({ dryRun = false, billingRemindersOn = false } = {}) {
   const now = new Date();
   const sent = [];
   const skipped = [];
@@ -132,6 +133,14 @@ async function sendExpiryReminders({ dryRun = false } = {}) {
 
       if (await hasFollowingTerm(order)) {
         skipped.push({ order: order.orderNumber, days, reason: 'already renewed' });
+        continue;
+      }
+
+      // A term the payment-link reminders now cover (services/billing/):
+      // its renewal order is out, and the member hears about it from those
+      // instead -- with the amount and a link -- rather than twice.
+      if (billingRemindersOn && (await PackageOrder.exists({ 'metadata.dueFor': String(order._id), status: 'pending' }))) {
+        skipped.push({ order: order.orderNumber, days, reason: 'payment link reminders' });
         continue;
       }
 
@@ -393,7 +402,7 @@ async function runDaily(options = {}) {
     console.error('[jobs] billing reminders failed:', error);
     billing = { error: error.message };
   }
-  const memberships = await sendExpiryReminders(options);
+  const memberships = await sendExpiryReminders({ ...options, billingRemindersOn: !!(billing && billing.enabled && billing.remindersOn) });
   const classes = await sendClassReminders(options);
   const ptSessions = await sendPtReminders(options);
   const missed = await markMissedBookings(options);

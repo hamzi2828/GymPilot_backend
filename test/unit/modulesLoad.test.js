@@ -45,6 +45,14 @@ test('services and helpers load and export their public functions', () => {
   loads('../../src/platform/services/signupProvisioning', ['completeSignupCheckout', 'signupDecision', 'localeFor', 'provisionInput']);
   loads('../../src/platform/services/platformBilling', ['createSignupCheckoutSession', 'closeSignupCheckoutSession']);
   loads('../../src/platform/jobs', ['scheduleActiveGyms', 'dailyJobPace', 'runWithinBudget', 'orderByLastRun']);
+  // Payment links, renewal reminders and due-date charges.
+  loads('../../src/services/billing/billingJob', ['runBillingJob', 'milestonesFor', 'currentMilestone', 'claimNotices']);
+  loads('../../src/services/billing/dueRenewals', ['ensureDueRenewals', 'supersedeFor', 'closeDueOrder', 'reviewDueOrder']);
+  loads('../../src/services/billing/payLinks', ['issuePayLink', 'verifyPayToken', 'payLinkUrlFor', 'withPayLinks']);
+  loads('../../src/services/billing/billingMessages', ['sendBillingMessage', 'messageVars', 'periodLabel']);
+  loads('../../src/services/billing/savedMethods', ['savedMethodsOf', 'removeSavedMethod', 'autoPayMethod']);
+  loads('../../src/services/billing/provider', ['activeProvider', 'canCheckout', 'canAutoCharge', 'onlineLabel']);
+  loads('../../src/controller/payLinkController', ['show', 'checkout', 'adminLink', 'listSavedMethods', 'removeSavedMethod']);
 });
 
 test('controllers load with their handlers in place', () => {

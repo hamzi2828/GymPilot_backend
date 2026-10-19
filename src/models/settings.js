@@ -388,7 +388,8 @@ const settingsSchema = new mongoose.Schema(
       sendVia: {
         email: { type: Boolean, default: true },
         sms: { type: Boolean, default: false },
-        whatsapp: { type: Boolean, default: false },
+        // Only goes when the gym has its own WhatsApp provider (Settings → Messaging).
+        whatsapp: { type: Boolean, default: true },
         push: { type: Boolean, default: true }
       },
       // Switched on by the gym once its payment gateway has confirmed

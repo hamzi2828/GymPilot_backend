@@ -323,7 +323,7 @@ test('staff make a link for an unpaid order and send it on the gym\'s billing ch
     assert.match(email.html, /Pay now/);
     const sms = texts.find((t) => t.channel === 'sendSms');
     assert.equal(sms.to, '03001234567');
-    assert.match(sms.body, /^Iron Gym: here is your payment link for Monthly Unlimited \(PKR 5,000\): http:\/\/pay-links-gym\.test\/pay\/GPP1\./);
+    assert.match(sms.body, /^Iron Gym: hi Ayesha, your payment link for Monthly Unlimited \(1 month\), PKR 5,000, due \d{2} \w{3} \d{4} \(last day to pay \d{2} \w{3} \d{4}\): http:\/\/pay-links-gym\.test\/pay\/GPP1\./);
     assert.match(sms.body, /Or pay by bank transfer \/ Raast \(no fee\): Meezan Bank, Iron Gym, IBAN PK36MEZN0000000001\./);
     const push = texts.find((t) => t.channel === 'push');
     assert.equal(push.userId, String(member._id));

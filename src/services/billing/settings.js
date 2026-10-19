@@ -19,7 +19,8 @@ const DEFAULTS = Object.freeze({
   reminderDaysBefore: [3],
   dueDayReminder: true,
   lastDayAfterDue: 3,
-  sendVia: { email: true, sms: false, whatsapp: false, push: true },
+  // WhatsApp goes only when the gym has its own WhatsApp provider set up.
+  sendVia: { email: true, sms: false, whatsapp: true, push: true },
   autoCharge: { enabled: false }
 });
 

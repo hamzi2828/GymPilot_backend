@@ -1,7 +1,9 @@
 // scripts/sendReminders.js
 //
-// The daily job: expire lapsed memberships, warn members whose membership is
-// about to run out, and remind everyone booked into a class tomorrow.
+// The daily job: expire lapsed memberships, send renewal payment links (and
+// charge saved cards on the due date, where the gym does), warn members whose
+// membership is about to run out, and remind everyone booked into a class
+// tomorrow.
 //
 //   node scripts/sendReminders.js            # report only, sends nothing
 //   node scripts/sendReminders.js --send     # actually send
@@ -35,6 +37,31 @@ function report(title, result) {
   for (const [reason, n] of Object.entries(reasons)) console.log(`    skipped ${n}: ${reason}`);
 }
 
+// The payment-link reminders and due-date card charges (services/billing/).
+function reportBilling(billing) {
+  console.log('\nPayment link reminders');
+  if (!billing) return;
+  if (billing.error) {
+    console.log(`  failed: ${billing.error}`);
+    return;
+  }
+  console.log(`  ${billing.enabled ? 'on' : `off: ${billing.reason}`}   gateway: ${billing.provider || 'none (bank details only)'}   auto-charge: ${billing.autoChargeOn ? 'on' : 'off'}`);
+  const c = billing.counts || {};
+  console.log(`  renewal orders made: ${c.created || 0}   closed: ${c.closed || 0}   messages: ${c.sent || 0}   cards charged: ${c.charged || 0}   declined: ${c.declined || 0}`);
+  for (const row of (billing.created || []).slice(0, 25)) {
+    console.log(`    + ${row.order} -> ${row.package} ${row.amount}, due ${row.dueDate}, last day ${row.lastDay}`);
+  }
+  for (const row of (billing.sent || []).slice(0, 25)) console.log(`    -> ${row.order}  ${row.message}${row.milestone ? ` (${row.milestone})` : ''}`);
+  for (const row of billing.closed || []) console.log(`    x ${row.order}  ${row.reason}`);
+  // "package no longer on sale" is the one the gym has to act on.
+  const reasons = {};
+  for (const row of [...(billing.skipped || []), ...(billing.quiet || [])]) {
+    const why = row.reason || row.skipped;
+    if (why) reasons[why] = (reasons[why] || 0) + 1;
+  }
+  for (const [reason, n] of Object.entries(reasons)) console.log(`    skipped ${n}: ${reason}`);
+}
+
 async function main() {
   if (!process.env.MONGO_URI) {
     console.error('MONGO_URI is not set. Check your .env.');
@@ -51,6 +78,7 @@ async function main() {
   const result = await runDaily({ dryRun: !SEND });
 
   if (SEND) console.log(`\nMemberships expired: ${result.expired.expired}`);
+  reportBilling(result.billing);
   report('Membership expiry notices', result.memberships);
   report(`Class reminders for ${result.classes.date}`, result.classes);
 
