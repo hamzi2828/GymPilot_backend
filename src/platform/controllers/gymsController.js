@@ -721,7 +721,8 @@ module.exports = {
       });
       return res.json({
         success: true,
-        data: { created: result.created, email: result.email, passwordSet: result.passwordSet, inviteSent: result.inviteSent },
+        // inviteError: why the email did not go (null when it did).
+        data: { created: result.created, email: result.email, passwordSet: result.passwordSet, inviteSent: result.inviteSent, inviteError: result.inviteSent ? null : result.inviteError || 'email could not be sent' },
         warnings: result.inviteSent ? [] : ['Owner email could not be sent']
       });
     } catch (error) {

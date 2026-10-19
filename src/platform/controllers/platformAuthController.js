@@ -14,6 +14,7 @@ const { sendEmail } = require('../../services/emailService');
 const { passwordMatches } = require('../../services/passwordCheck');
 const { shell, paragraph, button, escapeHtml } = require('../../templates/gymEmails');
 const { localFallback } = require('../tenantContext');
+const { platformEmailConfigured } = require('../services/platformEmail');
 const twoFactorApp = require('./platformTwoFactorController');
 
 const MIN_PASSWORD_LENGTH = 10;
@@ -234,6 +235,11 @@ module.exports = {
   },
 
   // POST /api/platform/auth/forgot-password   { email }
+  //
+  // 503 before any account is looked up when no link could be sent to
+  // anyone: no PLATFORM_ADMIN_ORIGIN to build it on, or no platform mail
+  // server to send it with (`code` EMAIL_NOT_CONFIGURED). Otherwise the same
+  // answer whether or not the address has an account.
   forgotPassword: async (req, res) => {
     const reply = { success: true, message: 'If that address belongs to a platform account, a reset link is on its way.' };
     try {
@@ -246,6 +252,16 @@ module.exports = {
       if (!origin) {
         console.error('[platform] PLATFORM_ADMIN_ORIGIN is not set, so no password reset link can be sent');
         return res.status(503).json({ success: false, message: 'Password reset by email is not set up on this server yet. Ask whoever runs it to set PLATFORM_ADMIN_ORIGIN.' });
+      }
+      // Promising a link that no mail server will carry leaves the admin
+      // waiting for nothing.
+      if (!platformEmailConfigured()) {
+        console.error('[platform] SMTP_HOST, SMTP_USER and SMTP_PASS are not all set, so no password reset link can be sent');
+        return res.status(503).json({
+          success: false,
+          code: 'EMAIL_NOT_CONFIGURED',
+          message: 'Password reset by email is not set up on this server yet: it has no mail server to send from. Ask whoever runs it to set SMTP_HOST, SMTP_USER and SMTP_PASS.'
+        });
       }
 
       const admin = await SuperAdmin.findOne({ email });

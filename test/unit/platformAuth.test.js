@@ -36,6 +36,9 @@ const controller = require('../../src/platform/controllers/platformAuthControlle
 
 PlatformAuditLog.record = async () => null;
 
+// The platform's own mail server, set (sendEmail above is what is called).
+const PLATFORM_SMTP = { SMTP_HOST: 'smtp.platform.test', SMTP_USER: 'platform@gympilot.test', SMTP_PASS: 'unit' };
+
 function stub(target, methods) {
   const saved = {};
   for (const [name, fn] of Object.entries(methods)) {
@@ -237,7 +240,7 @@ test('a reset link is built on PLATFORM_ADMIN_ORIGIN and nowhere else, whatever 
       assert.equal(admin.passwordReset.tokenHash, null);
     });
 
-    await withEnv({ PLATFORM_ADMIN_ORIGIN: 'https://gympilot.app,https://www.gympilot.app' }, async () => {
+    await withEnv({ PLATFORM_ADMIN_ORIGIN: 'https://gympilot.app,https://www.gympilot.app', ...PLATFORM_SMTP }, async () => {
       const res = await call(controller.forgotPassword, fromGymSite);
       assert.equal(res.statusCode, 200);
       assert.equal(emails.length, 1);
@@ -245,6 +248,40 @@ test('a reset link is built on PLATFORM_ADMIN_ORIGIN and nowhere else, whatever 
       assert.doesNotMatch(emails[0].html, /ironworks\.example/);
     });
   } finally {
+    restore();
+  }
+});
+
+test('with no platform mail server, forgot-password says so before looking anyone up, and promises nothing', async () => {
+  const admin = await adminDoc();
+  const restore = accountIs(admin);
+  let lookups = 0;
+  const watch = stub(SuperAdmin, {
+    findOne: (...args) => {
+      lookups += 1;
+      return { then: (resolve) => resolve(admin) };
+    }
+  });
+  emails.length = 0;
+  try {
+    for (const smtp of [{ SMTP_HOST: undefined, SMTP_USER: undefined, SMTP_PASS: undefined }, { ...PLATFORM_SMTP, SMTP_PASS: '  ' }]) {
+      await withEnv({ PLATFORM_ADMIN_ORIGIN: 'https://gympilot.app', ...smtp }, async () => {
+        // The same answer for an account and for an address nobody has.
+        for (const email of [admin.email, 'nobody@gympilot.test']) {
+          const res = await call(controller.forgotPassword, { body: { email } });
+          assert.equal(res.statusCode, 503);
+          assert.equal(res.body.success, false);
+          assert.equal(res.body.code, 'EMAIL_NOT_CONFIGURED');
+          assert.match(res.body.message, /no mail server/);
+          assert.doesNotMatch(res.body.message, /on its way/);
+        }
+      });
+    }
+    assert.equal(lookups, 0, 'no account was looked up');
+    assert.equal(emails.length, 0);
+    assert.equal(admin.passwordReset.tokenHash, null, 'no reset token was made');
+  } finally {
+    watch();
     restore();
   }
 });
