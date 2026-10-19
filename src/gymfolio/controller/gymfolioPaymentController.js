@@ -230,8 +230,9 @@ const gymfolioPaymentController = {
         role = account && account.isActive !== false ? account.role : null;
       }
       const staff = !!role && (await can(role, 'package-orders', 'view'));
+      // An id that is not one is not found either (getOrderById), never a 500.
       const order = await gymfolioPaymentService.getOrderById(wanted, staff ? null : userIdOf(req));
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      if (!order) return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'Order not found' });
       return res.status(200).json({ success: true, data: order });
     } catch (error) {
       return fail(res, error, 'Failed to fetch order');
@@ -291,8 +292,9 @@ const gymfolioPaymentController = {
         return res.status(400).json({ success: false, message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
       }
 
-      const order = await PackageOrder.findById(orderId || id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const wanted = orderId || id;
+      const order = mongoose.Types.ObjectId.isValid(String(wanted || '')) ? await PackageOrder.findById(wanted) : null;
+      if (!order) return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'Order not found' });
 
       order.status = status;
       if (status === 'cancelled' || status === 'suspended' || status === 'expired') order.subscription.isActive = false;

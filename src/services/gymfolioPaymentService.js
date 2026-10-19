@@ -16,6 +16,7 @@
 // conditional update (see gymfolio/services/activationClaim.js), so two of
 // those arriving together produce one activation, not two.
 
+const mongoose = require('mongoose');
 const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const Package = require('../gymfolio/models/packageModel');
 const Settings = require('../models/settings');
@@ -80,6 +81,11 @@ async function closeUnpaidCheckout(order) {
     { $set: { 'payment.status': 'failed', status: 'cancelled', 'payment.lastPaymentError': CHECKOUT_EXPIRED } },
     { new: true }
   );
+}
+
+// Stripe's answer for an id it has no record of (on this account).
+function isMissingAtStripe(error) {
+  return !!error && (error.code === 'resource_missing' || error.statusCode === 404 || (error.raw && error.raw.code === 'resource_missing'));
 }
 
 // Stripe answers this when asked to cancel a subscription that is already
@@ -410,17 +416,27 @@ class GymfolioPaymentService {
    * than once: an order already paid is returned as it is.
    */
   async verifyPackagePayment(sessionId) {
-    const stripe = await getStripe();
-    const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent', 'subscription'] });
-
-    let order = await PackageOrder.findOne({ 'payment.stripeSessionId': sessionId });
-    if (!order) {
-      throw new membership.MembershipError(
+    const noOrder = () =>
+      new membership.MembershipError(
         'We could not find an order for this payment. If you have paid, contact the gym with your receipt.',
         404,
         'ORDER_NOT_FOUND'
       );
+    const stripe = await getStripe();
+    let session;
+    try {
+      session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['payment_intent', 'subscription'] });
+    } catch (error) {
+      // A session id this gym's Stripe account has never seen -- made up,
+      // mistyped, or another account's -- has no order here either: a 404,
+      // not a server error. Stripe unreachable is still a failure, so the
+      // webhook is sent again.
+      if (isMissingAtStripe(error)) throw noOrder();
+      throw error;
     }
+
+    let order = await PackageOrder.findOne({ 'payment.stripeSessionId': sessionId });
+    if (!order) throw noOrder();
 
     const paid = session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
 
@@ -655,7 +671,9 @@ class GymfolioPaymentService {
     return { received: true };
   }
 
+  /** The order, or null -- for an id that is not one too (it used to be a 500). */
   async getOrderById(orderId, userId) {
+    if (!mongoose.Types.ObjectId.isValid(String(orderId || ''))) return null;
     const query = { _id: orderId };
     if (userId) query.userId = userId;
     return PackageOrder.findOne(query)
@@ -701,7 +719,7 @@ class GymfolioPaymentService {
   /** A member ending their own membership: never immediate, never without their say. */
   async cancelSubscription(orderId, userId, reason = '') {
     const order = await this.getOrderById(orderId, userId);
-    if (!order) throw new Error('Order not found');
+    if (!order) throw new membership.MembershipError('Order not found', 404, 'ORDER_NOT_FOUND');
     return membership.cancel(order, { reason, source: 'member', immediate: false, by: userId });
   }
 

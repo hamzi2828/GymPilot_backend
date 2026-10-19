@@ -43,15 +43,24 @@ function userId(req) {
   return req.user ? req.user._id || req.user.id : null;
 }
 
+// An order by the id in the address, or null -- for an id that is not one
+// as well: looked up as it is, it failed with a 500 instead of a 404.
+function orderById(id) {
+  return mongoose.Types.ObjectId.isValid(String(id || '')) ? PackageOrder.findById(id) : null;
+}
+
+function orderNotFound(res) {
+  return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'Order not found' });
+}
+
 /**
  * Loads an order and decides who is acting on it.
  * @returns {Promise<{order, source: 'member'|'staff'}>}  throws with status on refusal
  */
 async function loadOrder(req, { staffLevel = 'manage', allowMember = true } = {}) {
   const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) throw new service.MembershipError('Order not found', 404);
-  const order = await PackageOrder.findById(id);
-  if (!order) throw new service.MembershipError('Order not found', 404);
+  const order = await orderById(id);
+  if (!order) throw new service.MembershipError('Order not found', 404, 'ORDER_NOT_FOUND');
 
   const me = userId(req);
   const isOwner = me && order.userId && String(order.userId) === String(me);
@@ -148,8 +157,8 @@ module.exports = {
   // POST /api/gymfolio/package-orders/:id/approve  (staff)
   approve: async (req, res) => {
     try {
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       // The order as it was activated: of two approvals sent together only
       // one gets this far; the other is told it is being confirmed, or paid.
       const approved = await service.approveTransfer(order, { by: userId(req) });
@@ -163,8 +172,8 @@ module.exports = {
   // POST /api/gymfolio/package-orders/:id/reject  (staff)  { reason }
   reject: async (req, res) => {
     try {
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const rejected = await service.rejectTransfer(order, { by: userId(req), reason: req.body && req.body.reason });
       tell('transferRejected', rejected);
       return res.json({ success: true, message: 'Payment rejected and the member has been told.', data: rejected });
@@ -255,8 +264,8 @@ module.exports = {
   // the desk has checked, and means it.
   renew: async (req, res) => {
     try {
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const body = req.body || {};
       const force = body.force === true || body.force === 'true';
       if (!force && order.status === 'past_due' && order.payment && order.payment.stripeSubscriptionId) {
@@ -314,8 +323,8 @@ module.exports = {
   // `forfeitCredit: true` gives the credit up.
   changePackage: async (req, res) => {
     try {
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const body = req.body || {};
       const result = await service.changePackage(order, {
         packageId: body.packageId,
@@ -367,9 +376,8 @@ module.exports = {
   // lost reply, the answer is the same and no second payment is recorded.
   recordPayment: async (req, res) => {
     try {
-      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const body = req.body || {};
       const updated = await service.recordPayment(order, {
         amount: body.amount,
@@ -398,9 +406,8 @@ module.exports = {
   // the change kept in termsHistory (membershipService.editTerms).
   editTerms: async (req, res) => {
     try {
-      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const updated = await service.editTerms(order, req.body || {}, { by: userId(req) });
       const due = Number(updated.payment.balanceDue || 0);
       const currency = String(updated.payment.currency || '').toUpperCase();
@@ -421,9 +428,8 @@ module.exports = {
   // Either way the membership ends now and any subscription behind it stops.
   refund: async (req, res) => {
     try {
-      if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ success: false, message: 'Order not found' });
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const body = req.body || {};
       await service.refund(order, { amount: body.amount, reason: body.reason, by: userId(req) });
       const money = `${String(order.payment.currency || '').toUpperCase()} ${Number(order.refund.amount || 0).toFixed(2)}`;
@@ -442,8 +448,8 @@ module.exports = {
   // POST /api/gymfolio/package-orders/:id/use-session  (staff)  { note }
   useSession: async (req, res) => {
     try {
-      const order = await PackageOrder.findById(req.params.id);
-      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      const order = await orderById(req.params.id);
+      if (!order) return orderNotFound(res);
       const updated = await service.consumeSession(order, { by: userId(req), note: req.body && req.body.note });
       if (!updated) return res.status(400).json({ success: false, message: 'This order is not a session pack' });
       return res.json({ success: true, message: `${updated.sessions.total - updated.sessions.used} session(s) left.`, data: updated });
