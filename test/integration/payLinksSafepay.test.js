@@ -9,6 +9,8 @@
 //   * on the next due date the daily job charges that card: paid -> the
 //     renewal is activated once; a card Safepay declines -> the renewal says
 //     so, stays open, and the member is sent the link;
+//   * a renewal closed because the member renewed at the desk is still
+//     activated if a Safepay checkout opened before that is paid after it;
 //   * with the bank-transfer gateway ('generic') chosen instead, the link
 //     offers the transfer and receipt only, and nothing is ever charged.
 //
@@ -85,7 +87,7 @@ function run() {
       await Bank.create({ name: 'Meezan Bank', accountTitle: 'Iron Gym', accountNumber: '0101', iban: 'PK36MEZN0000000001' });
       pkg = await Package.create({ name: 'Monthly', price: '5000', currency: 'PKR', period: 'month', features: ['Gym floor'] });
       const end = T.localInstant(T.shiftDateKey(T.dateKey(t0), 3), 12, 0);
-      for (const first of ['Ayesha', 'Bilal']) {
+      for (const first of ['Ayesha', 'Bilal', 'Cara']) {
         const user = await User.create({ firstName: first, lastName: 'Khan', email: `${first.toLowerCase()}@paylinks-safepay.test`, phone: '03331234567', role: 'user' });
         people[first] = user;
         terms[first] = await PackageOrder.create({
@@ -167,6 +169,27 @@ function run() {
     assert.equal(cards.status, 200);
     assert.deepEqual(cards.body.data.map((c) => [c.brand, c.last4, c.auto_pay]), [['Visa', '4242', true]]);
     assert.match(cards.body.data[0].consent_text, /^I allow .*Visa •••• 4242 for my membership \(5,000 PKR every month\)/);
+  });
+
+  test('a checkout opened before the member renewed at the desk still activates when it is paid after', async () => {
+    const renewal = await renewalFor(terms.Cara);
+    assert.ok(renewal, 'made by the first run');
+    const token = await h.inGym(gym, () => links.issuePayLink(renewal).token);
+    const opened = await call('POST', `/api/pay/${token}/checkout`, { body: {} });
+    assert.equal(opened.status, 200, JSON.stringify(opened.body));
+    const tracker = new URL(opened.body.url).searchParams.get('tracker');
+
+    const membership = h.src('gymfolio/services/membershipService');
+    await h.inGym(gym, async () => membership.renew(await PackageOrder.findById(terms.Cara._id), { paymentMethod: 'cash' }));
+    const closed = await renewalFor(terms.Cara);
+    assert.deepEqual([closed.status, closed.payment.status, closed.metadata.get('closedReason')], ['cancelled', 'failed', 'superseded']);
+    assert.equal((await call('GET', `/api/pay/${token}`)).body.data.status, 'cancelled');
+
+    // The member had already paid on Safepay's page: the payment lands, and counts.
+    fake.pay(tracker);
+    await h.inGym(gym, () => safepay.applyTrackerPayment(renewal._id, tracker, { amountMinor: 500000, currency: 'PKR' }));
+    const paid = await renewalFor(terms.Cara);
+    assert.deepEqual([paid.status, paid.payment.status], ['active', 'paid'], 'the member gets the term they paid for');
   });
 
   test('the next due date: the saved card is charged -- paid activates once, a decline leaves the renewal open with the link', async () => {
