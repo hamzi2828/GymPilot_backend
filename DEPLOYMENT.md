@@ -94,6 +94,40 @@ self-serve sign-up pays with (BILLING.md → *Platform billing*):
   their keys and a front desk still matches fingers. Only then unset
   `DEFAULT_TENANT_SLUG`.
 
+**A gym in Pakistan, on Safepay** (Settings → Payments → Safepay):
+
+* The gym opens its OWN Safepay account at https://getsafepay.pk (CNIC, an
+  FBR NTN certificate, a bank account maintenance certificate; companies
+  their SECP papers): the money settles into that gym's bank account.
+* Safepay dashboard (sandbox first, https://sandbox.api.getsafepay.com/dashboard;
+  then live, https://getsafepay.com/dashboard) → Developers → API keys: the
+  **API key** (public) and the **secret key** go into Settings → Payments →
+  Safepay, with the environment (sandbox or production).
+* Developers → Endpoints → **Add an endpoint**:
+  `https://<api>/api/payments/safepay/webhook/<slug>` (shown on that screen as
+  the webhook URL, with Copy), subscribed to the 2.0.0 payment events
+  (`payment.succeeded`, `payment.failed`, `payment.refunded`; all events is
+  fine). **View shared secret** → Settings → Payments → Safepay → webhook
+  secret. Safepay is not switched on without it (`SECRET_REQUIRED`): a member
+  who closed the tab after paying would never be recorded. Sandbox and live
+  have different keys and secrets.
+* **Test connection**, choose Safepay as the gym's gateway, and make a sandbox
+  payment end to end before moving to production keys.
+* Automatic card payments (Settings → Billing → auto-charge) stay off until
+  Safepay confirms in writing that merchant-initiated charges
+  (`unscheduled_cof`) are enabled on the gym's account.
+* Nothing on the server: no environment variable per gym.
+  `SAFEPAY_API_BASE_URL` / `SAFEPAY_CHECKOUT_BASE_URL` exist only for tests and
+  are ignored in production.
+* A gym moving from Stripe to Safepay with members still on Stripe
+  subscriptions: keep Settings → Stripe's keys switched on until those have
+  ended or been cancelled — with Stripe switched off its webhook is refused
+  and their renewals are not recorded.
+
+**Anywhere, without a payment company** (Settings → Payments → Generic): add the
+gym's bank accounts (with their QR images) under Settings → Banks; members
+transfer and upload the receipt, staff approve it in the bank-transfer review.
+
 ## 3. Frontend (Vercel)
 
 * Add every gym's domain to the gym in the platform panel (`<PLATFORM_ADMIN_ORIGIN>/super-admin`). With `VERCEL_TOKEN`

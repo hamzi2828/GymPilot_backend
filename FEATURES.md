@@ -18,6 +18,7 @@ setting is on the gym's `settings` document.
 | Admin header: search and bell | `controller/adminSearchController.js` (`GET /admin/search?q=` — members, staff, leads, package orders, classes, trainers; every word must match; five per group), `controller/adminNotificationsController.js` (`GET /admin/notifications` — counts of what is waiting: failed card payments, bank transfers to confirm, new contact queries, registrations, lead follow-ups due, leave requests, memberships ending within 7 days; equipment services due within 7 days or overdue and warranties ending within 30 days, by the asset register's own rule in `accounts/services/assetReminders.js` — the bell is the only way admins are told, nothing is emailed or pushed) | `components/admin/AdminSearch.tsx`, `AdminNotifications.tsx` | — | any staff account; each group or count only from the tabs the account's live role can view |
 | Direct uploads (files too big for the API) | `controller/uploadController.js` (`GET /api/uploads/capabilities`, `POST /api/uploads/blob` — a Vercel Blob client token for one path under the gym's own folder), `helper/blobUpload.js` `ownBlobUrl` | Homepage, Hero slides, Testimonials (`admin/_ops/directUpload.ts`); hero slides and testimonials then save the file's URL as `uploadedImageUrl` | — | `homepage` / `hero-slides` / `testimonials` at manage |
 | Memberships sold (package orders: the desk, fees, payment methods, part payments and dues, expiry lists) | `gymfolio/services/membershipService.js`, `orderMoney.js` (admission / trainer fee / membership split), `membershipLists.js`, `services/paymentMethods.js`, `controller/membershipController.js`, `membershipListsController.js`, `gymfolioPaymentController.js`; `payment.joiningFee` / `trainerFee` / `amountPaid` / `balanceDue` / `installments` on the order, fed to `ledger.membershipPaymentStages`; `POST /package-orders/:id/payments`, `PATCH /package-orders/:id/terms` (`termsHistory`), the desk lists `GET /package-orders/dues`, `/expiring`, `/expired` and `POST /package-orders/summary`; the fee desk's reads `services/feeDesk.js`, `controller/feeDeskController.js` (`GET /package-orders/desk/members?q=` — search by name, phone digits or member ID; `GET /package-orders/desk/members/:userId` — the membership a renewal follows, the package's price today, dues); `scripts/backfillOrderFees.js` — see BILLING.md | `/admin/package-orders`, `/admin/packages`, `/admin/fee-collection` (Collect fees: find a member, collect & renew, collect dues, new membership, thermal receipt), `/admin/fee-expiry` (Expiring · Expired / unpaid · Dues; CSV and print) | Account → history | `package-orders` (`packages` for the catalogue; taking money at manage) |
+| Online payments (one gateway per gym: Stripe, Safepay, generic bank transfer; checkout, webhook, saved cards) | `services/payments` (the gateway registry: `providers/{stripe,safepay,generic}.js`), `services/safepay` (Safepay's API, checkout, saved-card charges, webhook, saved cards), `controller/paymentWebhookController.js`, `routes/paymentWebhookRoutes.js`; `settings.onlinePayments` / `safepay` / `billing`; order `payment.provider` / `payment.safepay`; member `billing.savedMethods` — see *Online payments* below | Settings → Payments | Checkout, `/checkout/success`, account (pay a balance or a due renewal online) | `settings` |
 | Platform subscription (what the gym pays GymsPilotPro) | `platform/routes/billingRoutes.js`, `platform/controllers/billingController.js` (plan usage meter), `platform/services/platformBilling.js` — see BILLING.md | Settings → Billing, trial / overdue banner | — | `settings` |
 | Booking rules, timetable changes, rooms | `gymfolio/services/bookingRules.js`, `classSessions.js`, `models/classExceptionModel.js`, `controller/classExceptionController.js`; `settings.booking`, `settings.rooms` | Settings → General, `/admin/timetable-changes`, class room field | Timetable shows changes | `classes` |
 | Personal training | `gymfolio/models/ptSessionModel.js`, `services/ptService.js`, `controller/ptController.js`; `settings.pt`; trainer `acceptsPt/ptRate` and commission `commissionType` ('percent' of the session \| fixed 'amount' per session) + `commissionValue` (null = the gym's default percent; `commissionPercent` kept in step for a percent), stored on each completed session as `commission {basis, percent, amount}`; `GET /pt/summary` adds each trainer's `commission_terms` and `paid_by` ('payslip' when linked to an active staff account, else 'direct' — payable by hand) | `/admin/pt` | Personal training tab | `pt` |
@@ -39,6 +40,85 @@ setting is on the gym's `settings` document.
 | Business details (name, contact, description, social links) | `settings.siteName/contactEmail/mobileNumber/address/siteDescription` and `facebookUrl/instagramUrl/twitterUrl/youtubeUrl/tiktokUrl` — the same names in `PUT /settings`, `GET /settings`, `GET /settings/public` and `services/branding.js`; a social link must be http(s) (a bare `instagram.com/…` gains `https://`), anything else is a `400` | Settings → General → Business | Footer links, contact page, JSON-LD (`siteDescription` stands in for an empty `seo.description`), member app "contact us" | `settings` |
 | PWA | — | — | `manifest.ts`, `public/sw.js` | — |
 | Marketing site + platform panel (plans, gyms, demo requests, self-serve sign-up) | `platform/routes/platformRoutes.js`, `platform/controllers/{gymsController,plansController,demoRequestsController,signupController}.js`, `platform/services/signupProvisioning.js`, `platform/models/demoRequestModel.js` — sign-up in BILLING.md → *Self-serve sign-up* | `GymPilot_marketing` (`/` landing, `/checkout`, `/super-admin` panel) | — | super admin session (public routes under `/api/platform/public`) |
+
+## Online payments
+
+Each gym takes online payments through ONE gateway of its own choosing,
+`settings.onlinePayments.provider`: `stripe` (cards worldwide; Stripe renews
+its own subscriptions), `safepay` (Pakistan: card, JazzCash, Easypaisa or any
+bank app, straight into the gym's own account; payment links; optional
+automatic card payments) or `generic` (bank transfer with an uploaded
+receipt, any country; ready once the gym has an active bank account under
+Settings → Banks). Unset — a gym from before the choice — it reads as
+`stripe` when Stripe is on and `none` otherwise, and is stored only once the
+gym actually chooses. The choice decides whether Safepay is on
+(`safepay.enabled` follows it). Every gateway is one module in
+`services/payments/providers` with one interface (listed in
+`services/payments/index.js`); checkout, payment links and automatic charges
+go through `payments.activeProvider()` / `providerForCheckout()`, never a
+gateway directly, so a new gateway is a new module. GymsPilotPro never holds
+the money.
+
+* `GET /settings/payment-gateways` (settings view) — `{ data: [{ id, label,
+  description, countries, checkout_label, capabilities: { checkout,
+  paymentLinks, receiptUpload, savedCards, autoCharge, wallets, bankApps },
+  settings_key, config_fields: [{ name, label, type, secret, required,
+  options?, help? }], configured, selected, webhook_url }], selected }`. A
+  gateway's fields live at `settings[<settings_key>][<name>]`.
+* `POST /settings/<gatewayId>/test` (`stripe` as before, `safepay`,
+  `generic`; also `/settings/payment-gateways/:id/test`; settings manage) —
+  `{ success, message }`: the typed keys, or the saved ones for a field left
+  masked. Safepay is asked for a checkout token and a payment session that is
+  never paid; generic says how many bank accounts are ready.
+* `PUT /settings` takes `onlinePayments: { provider }`, `safepay: { enabled,
+  environment: 'sandbox'|'production', publicKey, secretKey, webhookSecret }`
+  (secrets masked on the way out with `secretKeySet` / `webhookSecretSet`,
+  kept when sent back masked, sealed at rest; switching Safepay on without
+  the secret key, webhook secret or API key is 400 `SECRET_REQUIRED` naming
+  the field, nothing saved) and `billing: { reminderDaysBefore: [0..30],
+  dueDayReminder, lastDayAfterDue: 0..30, sendVia: { email, sms, whatsapp,
+  push }, autoCharge: { enabled } }` (400 naming a field that cannot be used).
+  `GET /settings` adds `onlinePayments.providerChosen` and the read-only
+  `safepay.webhook_url` (`https://<API host>/api/payments/safepay/webhook/<slug>`).
+* `GET /api/gymfolio/payment/methods` adds `online: { provider, label,
+  checkout, auto_pay_available } | null` (Safepay: "Card, JazzCash, Easypaisa
+  or any bank app"; Stripe: "Card"; generic: "Bank transfer — upload your
+  receipt", `checkout: false`). `card` is whether the online checkout can be
+  used now, through whichever gateway; `auto_pay_available` whether the
+  member may opt into automatic card payments.
+* `POST /api/gymfolio/payment/create-package-checkout-session` keeps its shape
+  (`{ url }`, plus `provider` and, for Safepay, `orderId`). At a Safepay gym it
+  records the pending order (method `online`, `payment.provider: 'safepay'`;
+  price, joining fee and coupon worked out on the server exactly as for
+  Stripe; the term sold as one period) and opens Safepay's hosted checkout,
+  returning to `<gym's primary domain>/checkout/success?provider=safepay&order=<orderId>`
+  (cancel: `/checkout/cancel?order=<orderId>`) — the primary domain of the
+  platform record (`services/payments/site.js`), never Settings → siteUrl or
+  the request. `saveCard` + `autoPayConsent` (both `true`) keep the card for
+  automatic payments — only for a signed-in member at a gym with
+  `billing.autoCharge.enabled`. A generic gym answers 409 `BANK_TRANSFER_ONLY`.
+* `GET|POST /api/gymfolio/payment/verify/<orderId>?provider=safepay[&tracker=]`
+  answers from the order (the webhook may have recorded it), else asks
+  Safepay; 404 `ORDER_NOT_FOUND` for no such Safepay order. A Stripe session
+  id still goes to Stripe.
+* `POST /api/gymfolio/package-orders/:id/pay-online { saveCard?, autoPayConsent? }`
+  (the member, own order) — `{ url, purpose: 'order'|'balance', amount, reference }`
+  for an unpaid order meant for online payment (a renewal) or a part-paid
+  order's balance.
+* `POST /api/payments/safepay/webhook/:gymSlug` — Safepay's events: raw body,
+  `X-SFPY-SIGNATURE` (HMAC-SHA512) checked with that gym's webhook secret; a
+  payment is applied once through the same activation path Stripe's takes
+  (term continuing from the running one, coupon, invoice number,
+  confirmation) or as one more installment on a balance; a failed attempt
+  leaves the order payable; refunds are noted, not acted on.
+* Saved cards: `user.billing.savedMethods[]` (`select: false`): `{ id,
+  provider, token (sealed), customerToken, brand, last4, expMonth, expYear,
+  autoPay, consentAt, consentText, createdAt }` — Safepay's token for the
+  card, never card data. `services/safepay` exports `getSafepayConfig`,
+  `createCheckout`, `chargeSavedMethod` (Safepay `unscheduled_cof`),
+  `fetchTrackerStatus`, `verifyWebhook`, and `listSavedMethods`,
+  `autoPayMethodFor`, `removeSavedMethod` for the payment links and the
+  automatic charge.
 
 ## Daily job
 
@@ -80,7 +160,8 @@ so a gym left over today is first tomorrow.
 * `npm run test:integration` — `test/integration/**` against a real MongoDB:
   an in-memory server (`mongodb-memory-server`), one database per test gym,
   and email, notifications, Stripe and Vercel replaced by stand-ins
-  (`test/integration/helpers/harness.js`). `.env` is never read, and every
+  (`test/integration/helpers/harness.js`); Safepay is a stand-in HTTP server
+  on a local port (`test/integration/helpers/fakeSafepay.js`). `.env` is never read, and every
   variable that could reach a real service is cleared. The MongoDB binary
   (8.2.6, roughly 80 MB) is downloaded once to `~/.cache/mongodb-binaries` —
   by `npm install`, or else by the first run. When the server cannot start

@@ -250,6 +250,40 @@ images 20 MB, member documents 10 MB, CSV imports 5 MB, videos 100 MB
 4.5 MB, every upload is capped at 4 MB. An upload over its limit gets a
 `413` with `code: FILE_TOO_LARGE` and a message that says what to do.
 
+## Online payments and saved cards
+
+**The money goes to the gym.** Each gym connects its own Stripe or Safepay
+account; GymsPilotPro never holds a member's money, and there is no platform
+key a gym could fall back on. Safepay's secret key and webhook secret are
+sealed at rest like every other Settings secret (`services/secretBox.js`),
+shown to the admin only as a masked preview, kept when the preview is sent
+back, and never in the public settings. Outside production a test may point
+the connector at a stand-in Safepay (`SAFEPAY_API_BASE_URL`); in production
+the keys only ever go to Safepay's own hosts.
+
+**Amounts come from the server.** A checkout's amount is what the order owes
+— the package price, joining fee and coupon worked out as for Stripe, or the
+balance due — never a figure the browser sends, and a payment Safepay reports
+for less than was asked is not applied. The member is sent back to the gym's
+primary domain from its platform record, never to an address taken from the
+request.
+
+**Webhooks are believed only when signed.** Safepay's events arrive at
+`/api/payments/safepay/webhook/<gym>` and are checked against the
+`X-SFPY-SIGNATURE` header with THAT gym's webhook secret, over the exact bytes
+received; anything unsigned, signed by someone else or changed on the way is
+refused (400). The same payment delivered twice is applied once.
+
+**Saved cards are tokens, kept only with consent.** Card numbers never reach
+GymsPilotPro: the member types them on Safepay's page and passes 3-D Secure
+there. A card is kept only when the member ticked "save my card and pay
+automatically" and agreed to the consent sentence, at a gym that has switched
+automatic payments on, for a signed-in account. What is kept on the member
+(`billing.savedMethods`, never in an ordinary read of the account) is
+Safepay's token for the card — sealed — with the brand, last four digits,
+expiry, the consent sentence and when it was given. Removing it stops
+automatic payment at once and deletes it from Safepay's wallet too.
+
 ## Rate limits
 
 Sign-in, password reset, sign-up, the desk app's sign-in and the 2FA code
