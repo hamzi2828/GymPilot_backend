@@ -48,6 +48,17 @@ const punchContextSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// A check-in the gym's entry rules would have refused, recorded anyway (see
+// `entryRefusal` on the visit). The key and the words punchService's
+// entryRefusal gave.
+const entryRefusalSchema = new mongoose.Schema(
+  {
+    reason: { type: String, enum: ['expired', 'unpaid', 'no_package'], required: true },
+    text: { type: String, default: '' }
+  },
+  { _id: false }
+);
+
 // The times on the row at one moment, for either side of a correction.
 const visitTimesSchema = new mongoose.Schema(
   {
@@ -138,6 +149,13 @@ const attendanceSchema = new mongoose.Schema(
       balanceDue: { type: Number, default: 0 },
       currency: { type: String, default: '' }
     },
+
+    // Members: the gym's entry rules (Settings attendance.refuseEntry) would
+    // have refused this check-in, but it came from a desk that was offline
+    // and had already let the person in, so the visit happened and is
+    // recorded -- with the verdict above, and this to tell the office the
+    // rule was not applied at the door. Absent on every other visit.
+    entryRefusal: { type: entryRefusalSchema, default: undefined },
 
     // Staff: the rostered shift this punch was judged against, taken from the
     // trainer's availability for that weekday.

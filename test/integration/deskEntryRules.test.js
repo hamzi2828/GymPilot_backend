@@ -208,17 +208,81 @@ test('a queued scan is recorded at the time it was scanned, and a queue pairs it
   });
 });
 
-test('a queued scan for a gym that refuses unpaid members is refused on arrival, and nothing is recorded', async () => {
+test('a queued scan the rules would refuse is never lost: the offline desk let them in, so it is recorded with its verdict and flagged', async () => {
   await h.inGym(gym, async () => {
-    await putSettings({ refuseEntry: { unpaid: true } });
+    await putSettings({ refuseEntry: { unpaid: true, expired: true } });
     try {
       const owes = await memberWith({ balanceDue: 1500 });
-      const res = await deskPunch(owes, { scanned_at: hoursAgo(1).toISOString(), request_id: 'offline-refused-0001' });
-      assert.equal(res.body.refused, true, JSON.stringify(res.body));
+      const scannedAt = hoursAgo(1);
+      const body = { scanned_at: scannedAt.toISOString(), request_id: 'offline-refused-0001' };
+      const res = await deskPunch(owes, body);
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      assert.equal(res.body.success, true, 'recorded');
+      assert.equal(res.body.refused, undefined);
+      assert.equal(res.body.admitted_offline, true);
       assert.equal(res.body.reason, 'unpaid');
-      assert.equal((await visits(owes)).length, 0);
+      assert.match(res.body.message, /^Check-in recorded\. The desk was offline and let them in; the gym's entry rules refuse this \(Balance due PKR 1,500\)\.$/);
+      assert.equal(res.body.detail.action, 'check_in');
+      assert.equal(res.body.detail.admitted_offline, true);
+      assert.equal(res.body.detail.warning, 'LET IN OFFLINE — Balance due PKR 1,500');
+
+      const [visit] = await visits(owes);
+      assert.equal(visit.checkInAt.getTime(), scannedAt.getTime());
+      assert.deepEqual(visit.entryRefusal, { reason: 'unpaid', text: 'Balance due PKR 1,500' });
+      assert.equal(visit.membership.balanceDue, 1500, 'with its verdict');
+      assert.equal(visit.checkIn.offline, true);
+
+      // Sent again: the same answer, flag and all, and nothing new.
+      const again = await deskPunch(owes, body);
+      assert.equal(again.body.repeated, true);
+      assert.equal(again.body.admitted_offline, true);
+      assert.equal(again.body.reason, 'unpaid');
+      assert.equal((await visits(owes)).length, 1);
+
+      // The office sees it on the visit.
+      const admin = h.src('attendance/controller/adminAttendanceController');
+      const list = await h.call(admin.records, { query: { personId: String(owes._id) }, user: asOperator() });
+      assert.equal(list.statusCode, 200, JSON.stringify(list.body));
+      const row = list.body.records.find((r) => r.person_id === String(owes._id));
+      assert.deepEqual(row.entry_refusal, { reason: 'unpaid', text: 'Balance due PKR 1,500' });
+      assert.equal(row.check_in_by.offline, true);
+
+      // A live scan is still turned away.
+      const lapsed = await memberWith({ endIn: -3 });
+      assert.equal((await deskPunch(lapsed)).body.refused, true);
+      // Queued, the same member is recorded and flagged as expired.
+      const queued = await deskPunch(lapsed, { scanned_at: hoursAgo(2).toISOString(), request_id: 'offline-refused-0002' });
+      assert.equal(queued.body.success, true, JSON.stringify(queued.body));
+      assert.equal(queued.body.reason, 'expired');
+      assert.equal((await visits(lapsed))[0].status, 'membership_expired');
     } finally {
-      await putSettings({ refuseEntry: { unpaid: false } });
+      await putSettings({ refuseEntry: { unpaid: false, expired: false } });
+    }
+  });
+});
+
+test('a queued scan is judged on the membership at the time it was scanned, not when it arrived', async () => {
+  await h.inGym(gym, async () => {
+    await putSettings({ refuseEntry: { expired: true } });
+    try {
+      // Ran out two hours ago; scanned five hours ago, while it still ran.
+      const ended = await memberWith({ endIn: -2 / 24 });
+      const queued = await deskPunch(ended, { scanned_at: hoursAgo(5).toISOString(), request_id: 'judged-then-0001' });
+      assert.equal(queued.body.success, true, JSON.stringify(queued.body));
+      assert.equal(queued.body.admitted_offline, undefined, 'nothing to flag: it was in date then');
+      const [visit] = await visits(ended);
+      assert.equal(visit.status, 'membership_expiring');
+      assert.equal(visit.membership.status, 'active');
+      assert.equal(visit.entryRefusal, undefined);
+
+      // Now, it is over.
+      const out = await deskPunch(ended, { scanned_at: hoursAgo(4).toISOString(), request_id: 'judged-then-0002' });
+      assert.equal(out.body.detail.action, 'check_out');
+      const live = await deskPunch(ended);
+      assert.equal(live.body.refused, true);
+      assert.equal(live.body.reason, 'expired');
+    } finally {
+      await putSettings({ refuseEntry: { expired: false } });
     }
   });
 });

@@ -144,7 +144,9 @@ function punchContext(context) {
     os_user: context.osUser || '',
     method: context.method || '',
     ip: context.ip || '',
-    location: context.location || ''
+    location: context.location || '',
+    // Scanned while the desk was offline and sent later.
+    offline: !!context.offline
   };
 }
 
@@ -193,6 +195,13 @@ function shapeRecord(row, now = new Date()) {
       package_name: membership.packageName || '',
       end_date_label: membership.endDate ? T.dateLabel(membership.endDate) : null
     },
+    // A check-in the gym's entry rules would have refused, let in by a desk
+    // that was offline (punchService "Turned away at the door"); null on
+    // every other visit.
+    entry_refusal:
+      row.entryRefusal && row.entryRefusal.reason
+        ? { reason: row.entryRefusal.reason, text: row.entryRefusal.text || '' }
+        : null,
     schedule: {
       has_schedule: !!schedule.hasSchedule,
       start_time: schedule.startTime || '',

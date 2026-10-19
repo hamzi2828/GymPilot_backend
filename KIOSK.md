@@ -135,6 +135,15 @@ punch is placed by its own time (`punchService` → *A scan sent late*):
   as "No check-out" (`autoClosed`, from the moment the next visit began) unless
   a later punch in the queue closes it.
 
+Its membership is judged as it stood at the scan time, not when the punch
+arrived. And it is never refused under the gym's entry rules: the offline desk
+could not ask, so it let the person in, and the visit happened. A queued
+check-in those rules would have turned away is recorded with its verdict and
+flagged — `admitted_offline: true` and `reason` in the answer, `LET IN
+OFFLINE — …` as the receipt's warning, `entryRefusal { reason, text }` on the
+visit and `entry_refusal` on the office's attendance log (with
+`check_in_by.offline`).
+
 ## Gone
 
 * `GET /api/attendance/me/qr` → `410 { code: "QR_CHECKIN_REMOVED" }`, kept for

@@ -634,12 +634,17 @@ async function repeatedPunch(requestId, { personType, personIds, person, now, se
   const detail = await buildReceipt(record, action, person);
   detail.warning = personType === 'member' ? memberWarning(record) : null;
   detail.alert = personType === 'member' ? memberAlert(record, (await settings()).voice) : null;
+  // The first answer's flag for a check-in an offline desk let in against
+  // the rules, given again with it.
+  const admitted = action === 'check_in' ? admittedOfflineOf(record) : {};
+  if (admitted.admittedOffline) admittedOfflineDetail(detail, record);
 
   return {
     success: true,
     repeated: true,
     action,
-    message: action === 'check_in' ? 'Check-in recorded.' : 'Check-out recorded.',
+    message: action === 'check_in' ? 'Check-in recorded.' + admittedOfflineNote(record) : 'Check-out recorded.',
+    ...admitted,
     detail,
     person,
     record: visit
@@ -715,12 +720,21 @@ function readScannedAt(value, now = new Date()) {
 // `success: false, refused: true` with the reason, so the desk and the kiosk
 // can say "Entry refused" in red with the problem sound. Only a check-in is
 // ever refused: someone already inside can always scan out.
+//
+// Except a punch the desk queued offline. That desk could not ask, so it let
+// the person in: the visit happened, and refusing the punch now would only
+// lose it. It is recorded with its verdict, flagged (`entryRefusal` on the
+// visit; `admitted_offline` and `reason` in the answer) so the office sees
+// the rule was not applied at the door.
 // ---------------------------------------------------------------------------
 
 // The member's membership as this scan finds it, with the verdict the desk
 // shows and the money owing. One read, shared by the refusal and the check-in.
-async function memberStanding(person) {
-  const membership = await membershipFor(person.record);
+// `at` is the scan's own time: a punch the desk queued offline is judged on
+// the membership the person had when they were scanned, not on the one they
+// have when it arrives.
+async function memberStanding(person, at = new Date()) {
+  const membership = await membershipFor(person.record, { at });
   const verdict = membershipVerdict({ ...membership, autoRenews: await autoRenews(membership) });
   const balanceDue = Number(membership.balanceDue ?? 0) > 0 ? Number(membership.balanceDue) : 0;
   return {
@@ -882,12 +896,16 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   // where members only scan in -- is checked against the gym's entry rules
   // first, before anything (the old visit included) is touched.
   let standing = null;
+  // A queued scan the rules would have refused: let in by an offline desk,
+  // so recorded and flagged instead (see "Turned away at the door").
+  let admittedOffline = null;
   if (personType === 'member' && (!openRecord || !(await gymSettings()).memberScanOut)) {
-    standing = await memberStanding(person);
+    standing = await memberStanding(person, now);
     const refusal = entryRefusal(standing, (await gymSettings()).refuseEntry);
-    if (refusal) {
+    if (refusal && !scannedAt) {
       return refusedEntry({ person, standing, refusal, at: now, voice: (await gymSettings()).voice });
     }
+    admittedOffline = refusal;
   }
 
   // ---- Members who only scan in ----
@@ -991,10 +1009,11 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
 
   if (personType === 'member') {
     // Read above, before the entry rules were asked (see memberStanding).
-    const { membership, verdict } = standing || (await memberStanding(person));
+    const { membership, verdict } = standing || (await memberStanding(person, now));
     record.membership = membership;
     record.status = verdict.status;
     record.statusLabel = verdict.label;
+    if (admittedOffline) record.entryRefusal = { reason: admittedOffline.reason, text: admittedOffline.text };
   } else {
     const schedule = scheduleFor(person.record, shiftDate);
     const verdict = arrivalVerdict(schedule, now);
@@ -1050,17 +1069,42 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
   const detail = await buildReceipt(record, 'check_in', person);
   detail.warning = personType === 'member' ? memberWarning(record) : null;
   detail.alert = personType === 'member' ? memberAlert(record, (await gymSettings()).voice) : null;
+  admittedOfflineDetail(detail, record);
 
   return {
     success: true,
     action: 'check_in',
-    message: record.autoClosed
-      ? 'Check-in recorded as an earlier visit, with no check-out: they have been checked in since.'
-      : 'Check-in recorded.',
+    message:
+      (record.autoClosed
+        ? 'Check-in recorded as an earlier visit, with no check-out: they have been checked in since.'
+        : 'Check-in recorded.') + admittedOfflineNote(record),
+    ...admittedOfflineOf(record),
     detail,
     person,
     record
   };
+}
+
+// The flag recordPunch's answer carries for such a check-in.
+function admittedOfflineOf(record) {
+  const refusal = record && record.entryRefusal;
+  return refusal && refusal.reason ? { admittedOffline: { reason: refusal.reason, text: refusal.text || '' } } : {};
+}
+
+// What a check-in let in by an offline desk against the gym's rules says on
+// its receipt and in its answer (see "Turned away at the door"): the warning
+// line names the rule, so whoever reads it knows it was not applied.
+function admittedOfflineDetail(detail, record) {
+  if (!record.entryRefusal) return;
+  detail.admitted_offline = true;
+  detail.refusal_reason = record.entryRefusal.reason;
+  detail.warning = `LET IN OFFLINE — ${record.entryRefusal.text}`;
+}
+
+function admittedOfflineNote(record) {
+  return record.entryRefusal
+    ? ` The desk was offline and let them in; the gym's entry rules refuse this (${record.entryRefusal.text}).`
+    : '';
 }
 
 // Re-derived from the stored VERDICT rather than re-queried, so the check-out

@@ -210,7 +210,10 @@ function punchReply(result) {
     // (punchService.alreadyOnRecord); a plain repeat has none.
     ...(result.ignored ? { ignored: true, ...(result.code ? { code: result.code } : {}) } : {}),
     // Turned away under the gym's entry rules: nothing was recorded.
-    ...(result.refused ? { refused: true, code: 'ENTRY_REFUSED', reason: result.reason } : {})
+    ...(result.refused ? { refused: true, code: 'ENTRY_REFUSED', reason: result.reason } : {}),
+    // A punch queued offline that those rules would have turned away: the
+    // desk had let them in, so it was recorded, and flagged for the office.
+    ...(result.admittedOffline ? { admitted_offline: true, reason: result.admittedOffline.reason } : {})
   };
 }
 
@@ -239,6 +242,7 @@ function logPunch({ operator, device, personType, personId, method, result, meta
           status: result.detail.status,
           ...(result.repeated ? { repeated: true } : {}),
           ...(result.refused ? { refused: result.reason } : {}),
+          ...(result.admittedOffline ? { admittedOffline: result.admittedOffline.reason } : {}),
           ...extra
         }
       : null

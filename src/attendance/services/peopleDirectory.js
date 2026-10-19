@@ -407,7 +407,10 @@ function ownerEmail(user, unproven = null) {
   return String(user.email).toLowerCase().trim();
 }
 
-async function membershipFor(user) {
+// `at`: the moment to judge the membership at, now unless given -- a punch
+// the desk queued offline is judged at the time it was scanned, not at the
+// time it arrived (punchService.memberStanding).
+async function membershipFor(user, { at = null } = {}) {
   const emailMatch = ownerEmail(user, await unprovenIds([user]));
   const ownerClauses = [{ userId: user._id }];
   if (emailMatch) ownerClauses.push({ 'customerInfo.email': emailMatch });
@@ -429,7 +432,7 @@ async function membershipFor(user) {
 
   // The gym's currency is only needed to choose between two.
   const currency = owedTotals(owing).size > 1 ? await defaultCurrency() : null;
-  return membershipFromOrders(paidOrders, unpaid, new Date(), { owing, currency });
+  return membershipFromOrders(paidOrders, unpaid, at || new Date(), { owing, currency });
 }
 
 // membershipFor's answer from orders already in hand: `paidOrders` newest end
