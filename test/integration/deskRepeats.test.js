@@ -8,6 +8,7 @@
 // result back. Requests without one behave exactly as they always did.
 
 const assert = require('node:assert/strict');
+const jwt = require('jsonwebtoken');
 const h = require('./helpers/harness');
 
 let gym;
@@ -16,6 +17,7 @@ let Package;
 let User;
 let orders;
 let lifecycle;
+let Coupon;
 let monthly;
 let staff;
 
@@ -23,11 +25,12 @@ const test = h.suite(async () => {
   PackageOrder = h.src('gymfolio/models/packageOrderModel');
   Package = h.src('gymfolio/models/packageModel');
   User = h.src('models/user');
+  Coupon = h.src('gymfolio/models/couponModel');
   orders = h.src('gymfolio/controller/gymfolioPaymentController');
   lifecycle = h.src('gymfolio/controller/membershipController');
   gym = await h.createGym('repeat-gym', { timezone: 'UTC', currency: 'PKR' });
   await h.inGym(gym, async () => {
-    await h.ensureIndexes(PackageOrder);
+    await h.ensureIndexes(PackageOrder, Coupon);
     monthly = await Package.create({ name: 'Monthly', price: '6000', currency: 'PKR', period: 'month', features: ['Gym floor'] });
     staff = await User.create({ firstName: 'Desk', lastName: 'Staff', email: 'desk@repeat.test', role: 'admin' });
   });
@@ -167,6 +170,128 @@ test('a requestId that is not one is refused, naming the field', async () => {
     const sold = (await assign(member, { amountPaid: 1000 })).body.data;
     const bad = await pay(sold, { amount: 500, requestId: 'no' });
     assert.equal(bad.statusCode, 400);
+    assert.equal((await PackageOrder.findById(sold._id).lean()).payment.balanceDue, 5000);
+  });
+});
+
+// ---- Copies that arrive together ----------------------------------------
+//
+// A retry fired while the first request is still being saved (a double tap,
+// a desk that gives up waiting too soon) used to pass the "made already?"
+// lookup before the first had written anything, and sell a second order.
+// These go over HTTP, through the real routes, all at once.
+
+async function withServer(fn) {
+  const express = require('express');
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => {
+    req.tenant = gym;
+    h.inGym(gym, async () => next()).catch(next);
+  });
+  app.use('/api/gymfolio', h.src('gymfolio/routes/gymfolioRoutes'));
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const token = jwt.sign({ id: String(staff._id), email: staff.email, role: staff.role, tid: String(gym._id), tv: 0 }, process.env.JWT_SECRET, { expiresIn: '5m' });
+  const post = async (path, body) => {
+    const res = await fetch(base + path, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  try {
+    return await fn(post);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+const COPIES = 5;
+const together = (send) => Promise.all(Array.from({ length: COPIES }, () => send()));
+
+function oneAnswer(results) {
+  for (const r of results) assert.equal(r.status, 201, JSON.stringify(r.body));
+  const ids = new Set(results.map((r) => String(r.body.data._id)));
+  assert.equal(ids.size, 1, 'every copy is answered with the same order');
+  assert.equal(results.filter((r) => !r.body.repeated).length, 1, 'one copy made it; the rest are told they are repeats');
+  return results.find((r) => !r.body.repeated).body.data;
+}
+
+test('the same sale sent several times at once makes one order, one invoice and one coupon use', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember();
+    await Coupon.create({ code: 'RACE10', type: 'percent', value: 10, maxRedemptions: 50 });
+    const body = { userId: String(member._id), packageId: String(monthly._id), paymentMethod: 'cash', couponCode: 'RACE10', requestId: 'race-assign-0001' };
+
+    const results = await withServer((post) => together(() => post('/api/gymfolio/package-orders/assign', body)));
+    const made = oneAnswer(results);
+
+    const rows = await PackageOrder.find({ userId: member._id }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(String(rows[0]._id), String(made._id));
+    assert.ok(rows[0].invoice && rows[0].invoice.number, 'the order has its invoice');
+    assert.equal((await Coupon.findOne({ code: 'RACE10' }).lean()).redemptions, 1, 'the coupon is counted once');
+    assert.equal(await confirmations(member), 1, 'the member is told once');
+  });
+});
+
+test('the same renewal sent several times at once makes one renewal', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember();
+    const sold = (await assign(member)).body.data;
+
+    const results = await withServer((post) => together(() => post(`/api/gymfolio/package-orders/${sold._id}/renew`, { paymentMethod: 'cash', requestId: 'race-renew-0001' })));
+    oneAnswer(results);
+    assert.equal(await PackageOrder.countDocuments({ renewedFrom: sold._id }), 1);
+  });
+});
+
+test('the same part payment sent several times at once is recorded once', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember();
+    const sold = (await assign(member, { amountPaid: 1000 })).body.data;
+
+    const results = await withServer((post) => together(() => post(`/api/gymfolio/package-orders/${sold._id}/payments`, { amount: 2000, requestId: 'race-payment-0001' })));
+    for (const r of results) assert.equal(r.status, 200, JSON.stringify(r.body));
+    for (const r of results) assert.equal(r.body.message, 'Payment recorded. PKR 3000.00 still due.');
+    assert.equal(results.filter((r) => !r.body.repeated).length, 1);
+
+    const row = await PackageOrder.findById(sold._id).lean();
+    assert.equal(row.payment.balanceDue, 3000);
+    assert.equal(row.payment.installments.length, 2, 'the opening part and this one');
+  });
+});
+
+test('an older part payment sent again after a newer one is still known: nothing is taken twice', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember();
+    const sold = (await assign(member, { amountPaid: 1000 })).body.data;
+
+    assert.equal((await pay(sold, { amount: 1000, requestId: 'instalment-0001' })).statusCode, 200);
+    assert.equal((await pay(sold, { amount: 1000, requestId: 'instalment-0002' })).statusCode, 200);
+    // The first one's reply was lost; the desk sends it again, late.
+    const late = await pay(sold, { amount: 1000, requestId: 'instalment-0001' });
+    assert.equal(late.statusCode, 200, JSON.stringify(late.body));
+    assert.equal(late.body.repeated, true);
+
+    const row = await PackageOrder.findById(sold._id).lean();
+    assert.equal(row.payment.balanceDue, 3000);
+    assert.equal(row.payment.amountPaid, 3000);
+    assert.deepEqual(row.payment.installments.map((part) => part.requestId || null), [null, 'instalment-0001', 'instalment-0002']);
+  });
+});
+
+test('an order from before installments kept their ids still answers its latest payment as a repeat', async () => {
+  await h.inGym(gym, async () => {
+    const member = await newMember();
+    const sold = (await assign(member, { amountPaid: 1000 })).body.data;
+    await PackageOrder.updateOne({ _id: sold._id }, { $set: { 'metadata.lastPaymentRequestId': 'legacy-payment-01' } });
+    const again = await pay(sold, { amount: 500, requestId: 'legacy-payment-01' });
+    assert.equal(again.body.repeated, true);
     assert.equal((await PackageOrder.findById(sold._id).lean()).payment.balanceDue, 5000);
   });
 });

@@ -394,6 +394,9 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
       console.warn(`[membership] coupon ${coupon.code} reached its redemption limit before ${order.orderNumber} activated`);
     }
     order.payment.couponRedeemed = true;
+    // Which coupon this call counted, so a save that is then refused (the
+    // same desk request already made its order) can take the use back.
+    if (counted && order.$locals) order.$locals.couponCounted = coupon._id;
   }
 
   await order.save();
@@ -443,10 +446,17 @@ function money(value, field) {
 // is answered with the first result and changes nothing. Left out, every
 // request is new, as before.
 //
-// The id is kept in the order's `metadata`: `requestId` on the order a sale
-// or renewal made, `lastPaymentRequestId` for the latest part payment. This
-// covers the retry after a lost reply; two requests with one id arriving at
-// the very same moment are not told apart (that needs a unique index).
+// The id is kept on what the request made: `metadata.requestId` on the order
+// a sale or renewal made, and `requestId` on the installment a part payment
+// recorded (every one of them, so an old payment's id sent again late is
+// still known). Orders from before that keep their latest payment's id in
+// `metadata.lastPaymentRequestId`, and it still counts.
+//
+// Two copies arriving at the very same moment -- a retry while the first is
+// still being saved -- are told apart too: a unique index on the order's
+// request id lets one sale be written, and a part payment is one
+// conditional update on the balance, so the second finds the first's
+// result and answers with it.
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
 
@@ -476,6 +486,26 @@ function asRepeat(order) {
 /** Whether an order was handed back as the answer to a repeated request. */
 function isRepeat(order) {
   return !!(order && order.$locals && order.$locals.repeated);
+}
+
+/** The order a desk request already made for this member, or null. */
+function orderMadeBy(userId, requestId) {
+  return PackageOrder.findOne({ userId, 'metadata.requestId': requestId });
+}
+
+/** Whether a write failed only because another order holds this request id. */
+function isRequestIdClash(error) {
+  if (!error || error.code !== 11000) return false;
+  const keys = Object.keys(error.keyPattern || error.keyValue || {});
+  return keys.includes('metadata.requestId') || /metadata\.requestId|one_order_per_desk_request/.test(String(error.message || ''));
+}
+
+/** Whether this desk part payment is already on the order. */
+function paymentRecorded(order, requestId) {
+  if (!requestId || !order) return false;
+  if (metadataOf(order, 'lastPaymentRequestId') === requestId) return true;
+  const parts = (order.payment && order.payment.installments) || [];
+  return parts.some((part) => part && part.requestId === requestId);
 }
 
 /**
@@ -616,7 +646,10 @@ function commissionOn(fee, { commissionType, commissionValue }) {
  * recorded as received by `paidBy` (a staff account id).
  *
  * `requestId`: the desk's id for this action. When this member already has
- * the order it made, that order is returned (isRepeat) and nothing is sold.
+ * the order it made, that order is returned (isRepeat) and nothing is sold
+ * -- also when the first copy is still being saved as the second arrives:
+ * the unique index on the request id refuses the second order, and the
+ * first one is the answer.
  *
  * `imported`: the member import only. A paid membership brought over from
  * the gym's old system: marked so its payment is not counted as money taken
@@ -645,7 +678,7 @@ async function createManualOrder({
   imported = false
 }) {
   if (requestId) {
-    const first = await PackageOrder.findOne({ userId: user._id, 'metadata.requestId': requestId });
+    const first = await orderMadeBy(user._id, requestId);
     if (first) return asRepeat(first);
   }
   const settings = await Settings.getSettings().catch(() => null);
@@ -779,10 +812,23 @@ async function createManualOrder({
     createdBy: null
   });
 
-  if (paid) {
-    await markPaidAndActivate(order, { paidAt: now, startDate: start, endDate: end });
-  } else {
-    await order.save();
+  try {
+    if (paid) {
+      await markPaidAndActivate(order, { paidAt: now, startDate: start, endDate: end });
+    } else {
+      await order.save();
+    }
+  } catch (error) {
+    // The same request sent again while the first was still being saved:
+    // both got past the lookup above, and the unique index let the first
+    // one's order in. Nothing of this copy was kept -- the coupon use it
+    // counted goes back -- and the first one's order is the answer.
+    if (!requestId || !isRequestIdClash(error)) throw error;
+    const coupon = order.$locals && order.$locals.couponCounted;
+    if (coupon) await Coupon.updateOne({ _id: coupon, redemptions: { $gt: 0 } }, { $inc: { redemptions: -1 } }).catch(() => {});
+    const first = await orderMadeBy(user._id, requestId);
+    if (!first) throw error;
+    return asRepeat(first);
   }
 
   // The member's trainer from now on (members pages, the trainer's list).
@@ -831,8 +877,11 @@ function refundInProgress() {
  * people recording the same payment at once take it off once, and the
  * second is told the balance moved.
  *
- * `requestId`: the desk's id for this payment. Sent again, the order is
- * returned as the payment left it (isRepeat) and nothing more is recorded.
+ * `requestId`: the desk's id for this payment, kept on the installment it
+ * recorded. Sent again -- straight away, or after later payments -- the
+ * order is returned as it now stands (isRepeat) and nothing more is
+ * recorded. Two copies at once: the conditional update lets one through,
+ * and the other finds its installment and answers the same way.
  *
  * @throws {MembershipError} 409 STRIPE_BILLED / NOT_PAID / NO_BALANCE /
  *   REFUND_IN_PROGRESS / BALANCE_CHANGED; 400 INVALID_PAYMENT (not above 0) / OVERPAYMENT (more
@@ -841,7 +890,7 @@ function refundInProgress() {
 async function recordPayment(order, { amount, method, note = '', by = null, now = new Date(), requestId } = {}) {
   // First of all: the payment may have settled the balance, and the repeat
   // would otherwise be told nothing is owed.
-  if (requestId && metadataOf(order, 'lastPaymentRequestId') === requestId) return asRepeat(order);
+  if (paymentRecorded(order, requestId)) return asRepeat(order);
   if (stripeBilled(order)) {
     throw new MembershipError('This membership is paid by card through Stripe; there is no balance to take at the desk.', 409, 'STRIPE_BILLED');
   }
@@ -878,7 +927,8 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
     method: how,
     at: now,
     by: by && mongoose.Types.ObjectId.isValid(String(by)) ? by : null,
-    note: String(note || '').trim().slice(0, 200)
+    note: String(note || '').trim().slice(0, 200),
+    ...(requestId ? { requestId } : {})
   });
 
   const updated = await PackageOrder.findOneAndUpdate(
@@ -889,13 +939,17 @@ async function recordPayment(order, { amount, method, note = '', by = null, now 
         'payment.installments': parts,
         'payment.amountPaid': round2(paidSoFar(order.payment) + paying),
         'payment.balanceDue': round2(balance - paying),
-        'payment.lastPaidAt': now,
-        ...(requestId ? { 'metadata.lastPaymentRequestId': requestId } : {})
+        'payment.lastPaidAt': now
       }
     },
     { new: true }
   );
   if (!updated) {
+    // The same payment sent twice at once: the other copy recorded it.
+    if (requestId) {
+      const current = await PackageOrder.findById(order._id);
+      if (paymentRecorded(current, requestId)) return asRepeat(current);
+    }
     const fresh = await PackageOrder.findById(order._id).select('refund.claimedAt').lean();
     if (fresh && refundUnderWay(fresh)) throw refundInProgress();
     throw new MembershipError('The balance changed while this payment was being recorded. Reload the order and try again.', 409, 'BALANCE_CHANGED');

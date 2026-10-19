@@ -127,7 +127,11 @@ const packageOrderSchema = new mongoose.Schema(
               method: { type: String, default: '' },
               at: { type: Date, required: true },
               by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-              note: { type: String, default: '' }
+              note: { type: String, default: '' },
+              // The desk's id for the request that recorded this part, when
+              // it sent one: the same id again is this part, not another
+              // (membershipService.recordPayment).
+              requestId: { type: String }
             },
             { _id: false }
           )
@@ -422,6 +426,14 @@ packageOrderSchema.index({ 'subscription.renewals.at': -1 });
 packageOrderSchema.index({ 'payment.installments.at': -1 }, { sparse: true });
 // Who still owes money: only the few orders with a balance are indexed.
 packageOrderSchema.index({ 'payment.balanceDue': 1 }, { partialFilterExpression: { 'payment.balanceDue': { $gt: 0 } } });
+// One order per desk request (membershipService.createManualOrder): two
+// copies of a sale or renewal sent together both pass the "made already?"
+// lookup, and this lets only one of them be written. Only orders that carry
+// a request id are indexed.
+packageOrderSchema.index(
+  { userId: 1, 'metadata.requestId': 1 },
+  { unique: true, name: 'one_order_per_desk_request', partialFilterExpression: { 'metadata.requestId': { $type: 'string' } } }
+);
 
 // Virtual for subscription duration
 packageOrderSchema.virtual('subscriptionDuration').get(function() {
