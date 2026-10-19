@@ -27,6 +27,7 @@
 
 const path = require('path');
 const nodeTest = require('node:test');
+const { tolerateStopStall } = require('./mongoTeardown');
 
 const SRC = path.resolve(__dirname, '..', '..', '..', 'src');
 
@@ -146,6 +147,8 @@ async function start() {
   } catch (error) {
     return unavailable(`the in-memory MongoDB could not start (${error.message}). It needs its binary, downloaded once to ~/.cache/mongodb-binaries.`);
   }
+  // A watchdog slow to exit at the end must not fail a file (mongoTeardown.js).
+  tolerateStopStall(state.server);
 
   const base = state.server.getUri(); // mongodb://127.0.0.1:<port>/
   const url = new URL(base);
