@@ -4,10 +4,11 @@
 // emailed code (platformAuthController) needs working SMTP; this needs only
 // a phone.
 //
-//   setup   -> a fresh secret, held as pending, and the otpauth:// URL the
-//              panel draws as a QR code. Nothing changes yet.
-//   enable  -> a code from the app proves it was scanned; the secret becomes
-//              the account's, and ten one-time backup codes are shown once.
+//   setup   -> the password; then a fresh secret, held as pending, and the
+//              otpauth:// URL the panel draws as a QR code. Nothing changes yet.
+//   enable  -> the password again and a code from the app, which proves it
+//              was scanned; the secret becomes the account's, and ten
+//              one-time backup codes are shown once.
 //   disable -> password AND a current code (or a backup code).
 //
 // The secret is sealed at rest with the settings key (services/secretBox.js),
@@ -17,6 +18,7 @@ const bcrypt = require('bcryptjs');
 const SuperAdmin = require('../models/superAdminModel');
 const PlatformAuditLog = require('../models/platformAuditLogModel');
 const { seal, open } = require('../../services/secretBox');
+const { passwordMatches } = require('../../services/passwordCheck');
 const { storage } = require('../tenantContext');
 const totp = require('../totp');
 
@@ -44,6 +46,47 @@ function publicAdmin(admin) {
 
 function usesApp(admin) {
   return !!(admin && admin.twoFactor && admin.twoFactor.enabled && admin.twoFactor.method === 'totp');
+}
+
+/**
+ * "Type your password to change how you sign in." A session can be taken
+ * (a shared computer, a copied token) without the password being known, and
+ * without this such a session could switch the emailed codes off, or put its
+ * own authenticator app in their place, and keep the account. Every change to
+ * the second step asks for it.
+ *
+ * Resolves to null when `typed` is the account's password, or to the body of
+ * the 400 to send -- never a 401, which the panel takes to mean "signed out".
+ * The codes are the gym side's (services/passwordCheck.js):
+ *
+ *   PASSWORD_REQUIRED   none was sent
+ *   PASSWORD_INCORRECT  it does not match
+ *
+ * @param {{ password?: string }} admin  loaded with +password
+ */
+async function passwordRefusal(admin, typed, toDo) {
+  if (!typed || typeof typed !== 'string') {
+    return {
+      success: false,
+      code: 'PASSWORD_REQUIRED',
+      message: `Enter your current password to ${toDo}. It stops anyone else who gets into your session from changing how you sign in.`
+    };
+  }
+  if (!(await passwordMatches(typed, admin && admin.password))) {
+    return { success: false, code: 'PASSWORD_INCORRECT', message: 'That password is not right, so nothing was changed.' };
+  }
+  return null;
+}
+
+/** Refuses with passwordRefusal's answer, written to the audit log when it was a wrong password. Resolves true when it refused. */
+async function refusedWithoutPassword(req, res, admin, typed, toDo, step) {
+  const refusal = await passwordRefusal(admin, typed, toDo);
+  if (!refusal) return false;
+  if (refusal.code === 'PASSWORD_INCORRECT') {
+    PlatformAuditLog.record({ actorId: admin._id, actorEmail: admin.email, action: 'two_factor_change_failed', ip: clientIp(req), meta: { reason: 'wrong_password', step } });
+  }
+  res.status(400).json(refusal);
+  return true;
 }
 
 /**
@@ -117,14 +160,15 @@ async function verifyAppCode(admin, code) {
 }
 
 module.exports = {
-  // POST /api/platform/auth/two-factor/app/setup
+  // POST /api/platform/auth/two-factor/app/setup   { currentPassword }
   setup: async (req, res) => {
     try {
-      const admin = await SuperAdmin.findById(req.superAdmin._id);
+      const admin = await SuperAdmin.findById(req.superAdmin._id).select('+password');
       if (!admin) return res.status(404).json({ success: false, message: 'Account not found' });
       if (usesApp(admin)) {
         return res.status(409).json({ success: false, message: 'An authenticator app is already set up. Turn it off first to set up another.' });
       }
+      if (await refusedWithoutPassword(req, res, admin, req.body && req.body.currentPassword, 'set up an authenticator app', 'app_setup')) return;
       const secret = totp.generateSecret();
       admin.twoFactor = admin.twoFactor || {};
       admin.twoFactor.totp = admin.twoFactor.totp || {};
@@ -147,17 +191,21 @@ module.exports = {
     }
   },
 
-  // POST /api/platform/auth/two-factor/app/enable   { code }
+  // POST /api/platform/auth/two-factor/app/enable   { code, currentPassword }
+  //
+  // This is the step that replaces the emailed codes (or no second step)
+  // with the app, so the password is asked for here as well as at setup.
   enable: async (req, res) => {
     try {
       const code = String((req.body && req.body.code) || '').replace(/\s/g, '');
       if (!/^\d{6}$/.test(code)) return res.status(400).json({ success: false, message: 'Enter the 6-digit code your app shows' });
 
-      const admin = await SuperAdmin.findById(req.superAdmin._id).select('+twoFactor.totp.pendingSecret');
+      const admin = await SuperAdmin.findById(req.superAdmin._id).select('+twoFactor.totp.pendingSecret +password');
       const state = admin && admin.twoFactor && admin.twoFactor.totp;
       if (!state || !state.pendingSecret || !state.pendingExpiresAt || new Date(state.pendingExpiresAt) < new Date()) {
         return res.status(400).json({ success: false, code: 'SETUP_EXPIRED', message: 'This setup has expired. Start again to get a new QR code.' });
       }
+      if (await refusedWithoutPassword(req, res, admin, req.body && req.body.currentPassword, 'turn on the authenticator app', 'app_enable')) return;
       const secret = openSecret(state.pendingSecret);
       const step = secret ? totp.verifyTotp(secret, code) : null;
       if (step === null) {
@@ -223,6 +271,8 @@ module.exports = {
 
   verifyAppCode,
   usesApp,
+  passwordRefusal,
+  refusedWithoutPassword,
   SECRET_FIELDS,
   MAX_FAILURES
 };

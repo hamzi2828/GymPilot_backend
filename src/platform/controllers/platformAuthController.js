@@ -207,7 +207,10 @@ module.exports = {
     }
   },
 
-  // PUT /api/platform/auth/two-factor   { enabled }
+  // PUT /api/platform/auth/two-factor   { enabled, currentPassword }
+  //
+  // Either way the current password is needed: 400 PASSWORD_REQUIRED or
+  // PASSWORD_INCORRECT without it (platformTwoFactorController.passwordRefusal).
   setTwoFactor: async (req, res) => {
     try {
       const enabled = !!(req.body && (req.body.enabled === true || req.body.enabled === 'true'));
@@ -216,12 +219,15 @@ module.exports = {
       if (twoFactorApp.usesApp(req.superAdmin)) {
         return res.status(409).json({ success: false, code: 'APP_TWO_FACTOR', message: 'Sign-in uses your authenticator app. Turn that off first (it needs your password and a code).' });
       }
+      const admin = await SuperAdmin.findById(req.superAdmin._id).select('+password');
+      if (!admin) return res.status(404).json({ success: false, message: 'Account not found' });
+      const toDo = enabled ? 'turn on two-factor sign-in' : 'turn off two-factor sign-in';
+      if (await twoFactorApp.refusedWithoutPassword(req, res, admin, req.body && req.body.currentPassword, toDo, 'email')) return;
       if (enabled) {
         const { verifyConnection } = require('../../services/emailService');
         const smtp = await verifyConnection();
         if (!smtp.ok) return res.status(409).json({ success: false, message: `Platform email is not working (${smtp.error}); two-factor sign-in cannot be switched on.` });
       }
-      const admin = await SuperAdmin.findById(req.superAdmin._id);
       admin.twoFactor = admin.twoFactor || {};
       admin.twoFactor.enabled = enabled;
       admin.twoFactor.method = 'email';
