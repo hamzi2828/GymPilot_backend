@@ -20,7 +20,7 @@ test('a gym that never saved the block gets the defaults', () => {
     reminderDaysBefore: [3],
     dueDayReminder: true,
     lastDayAfterDue: 3,
-    sendVia: { email: true, sms: false, whatsapp: false, push: true },
+    sendVia: { email: true, sms: false, whatsapp: true, push: true },
     autoCharge: { enabled: false }
   });
   assert.deepEqual(billingSettings(null), b);
@@ -33,7 +33,7 @@ test('stored values are read leniently: out of range days dropped, largest first
   const b = billingSettings({ billing: { reminderDaysBefore: [1, 7, 7, 45, -1, 'x', 3], lastDayAfterDue: 99, sendVia: { sms: true } } });
   assert.deepEqual(b.reminderDaysBefore, [7, 3, 1]);
   assert.equal(b.lastDayAfterDue, 3, 'out of range: the default');
-  assert.deepEqual(b.sendVia, { email: true, sms: true, whatsapp: false, push: true });
+  assert.deepEqual(b.sendVia, { email: true, sms: true, whatsapp: true, push: true });
   assert.equal(leadDays(b), 7);
   assert.equal(leadDays(billingSettings({ billing: { reminderDaysBefore: [] } })), 0, 'no reminders before: made on the due day');
 });

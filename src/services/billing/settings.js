@@ -20,7 +20,7 @@ const DEFAULTS = Object.freeze({
   reminderDaysBefore: [3],
   dueDayReminder: true,
   lastDayAfterDue: 3,
-  sendVia: { email: true, sms: false, whatsapp: false, push: true },
+  sendVia: { email: true, sms: false, whatsapp: true, push: true },
   autoCharge: { enabled: false }
 });
 
