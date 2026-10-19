@@ -348,6 +348,11 @@ router.delete('/banks/:id/qr-code', auth, requirePermission('settings'), bankCon
 
 router.post('/settings/test-smtp', auth, requirePermission('settings'), settingsController.testSmtp);
 router.post('/settings/stripe/test', auth, requirePermission('settings', 'manage'), settingsController.testStripe);
+// Online payment gateways (services/payments): the list the admin picker is
+// drawn from, and "Test connection" for Safepay and for any gateway by id.
+router.get('/settings/payment-gateways', auth, requirePermission('settings'), settingsController.paymentGateways);
+router.post('/settings/safepay/test', auth, requirePermission('settings', 'manage'), settingsController.testGateway);
+router.post('/settings/payment-gateways/:id/test', auth, requirePermission('settings', 'manage'), settingsController.testGateway);
 
 // Hero Slide routes
 router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Public route

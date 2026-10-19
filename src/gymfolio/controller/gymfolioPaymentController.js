@@ -14,7 +14,7 @@ const { sweepIfDue } = require('../services/membershipExpiry');
 const notify = require('../../services/gymNotifications');
 const { afterResponse } = require('../../services/afterResponse');
 const membership = require('../services/membershipService');
-const { getStripe, stripeConfig, cardPaymentsStatus, StripeNotConfiguredError } = require('../../services/stripeClient');
+const { getStripe, stripeConfig, StripeNotConfiguredError } = require('../../services/stripeClient');
 const { activeBanks } = require('./membershipController');
 
 function userIdOf(req) {
@@ -92,22 +92,39 @@ const gymfolioPaymentController = {
    * GET /api/gymfolio/payment/methods -- how this gym can be paid right now.
    * When card is off, `cardUnavailable` says why ({ code, reason }), so the
    * website can tell the member rather than just leave the option out.
+   *
+   * `card` is the online checkout (create-package-checkout-session), through
+   * whichever gateway the gym chose (services/payments): Stripe as always, or
+   * Safepay. `online` names that gateway and what to call the option:
+   * { provider: 'safepay', label: 'Card, JazzCash, Easypaisa or any bank app' },
+   * { provider: 'stripe', label: 'Card' }, { provider: 'generic', label:
+   * 'Bank transfer — upload your receipt' } (no checkout of its own: members
+   * use the bank transfer), or null when nothing can be paid online now.
    */
   async paymentMethods(req, res) {
     try {
-      const [cardStatus, banks, settings] = await Promise.all([
-        cardPaymentsStatus().catch(() => ({ available: false, code: null, reason: '' })),
-        activeBanks().catch(() => []),
-        Settings.getSettings().catch(() => null)
+      const payments = require('../../services/payments');
+      const settings = await Settings.getSettings().catch(() => null);
+      const [online, banks] = await Promise.all([
+        payments.onlineStatus(settings).catch(() => ({ provider: null, available: false, checkout: false, code: null, reason: '' })),
+        activeBanks().catch(() => [])
       ]);
+      const card = !!online.checkout;
+      let cardUnavailable = null;
+      if (!card) {
+        cardUnavailable = online.available
+          ? { code: 'BANK_TRANSFER_ONLY', reason: 'This gym takes payment by bank transfer.' }
+          : { code: online.code, reason: online.reason };
+      }
       return res.json({
         success: true,
         data: {
-          card: cardStatus.available,
-          cardUnavailable: cardStatus.available ? null : { code: cardStatus.code, reason: cardStatus.reason },
+          card,
+          cardUnavailable,
           bankTransfer: banks.length > 0,
           banks,
-          currency: (settings && settings.currency) || 'USD'
+          currency: (settings && settings.currency) || 'USD',
+          online: online.available && online.provider ? { provider: online.provider, label: online.label } : null
         }
       });
     } catch (error) {

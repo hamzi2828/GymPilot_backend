@@ -92,6 +92,15 @@ function sanitizeSettings(doc) {
       webhookSecretSet: !!data.stripe.webhookSecret,
     };
   }
+  if (data.safepay) {
+    data.safepay = {
+      ...data.safepay,
+      secretKey: maskSecret(data.safepay.secretKey),
+      webhookSecret: maskSecret(data.safepay.webhookSecret),
+      secretKeySet: !!data.safepay.secretKey,
+      webhookSecretSet: !!data.safepay.webhookSecret,
+    };
+  }
   if (data.smtp) {
     data.smtp = {
       ...data.smtp,
@@ -176,6 +185,95 @@ function mergeMessaging(existing = {}, incoming = {}, warnings = []) {
       birthday: bool(inAuto, 'birthday', !!auto.birthday)
     }
   };
+}
+
+// ---- Online payments: the gateway, Safepay's keys, billing reminders ----
+
+// The gym's Safepay block, merged field by field: a masked secret (one the
+// admin never retyped) keeps the stored value, as Stripe's do.
+function mergeSafepay(existing = {}, incoming = {}, warnings = []) {
+  const ex = existing || {};
+  return {
+    enabled: incoming.enabled !== undefined ? incoming.enabled === true || incoming.enabled === 'true' : !!ex.enabled,
+    environment: incoming.environment !== undefined ? incoming.environment : ex.environment || 'sandbox',
+    publicKey: incoming.publicKey !== undefined ? String(incoming.publicKey ?? '').trim() : ex.publicKey || '',
+    secretKey: resolveSecret('The Safepay secret key', incoming.secretKey, ex.secretKey, warnings),
+    webhookSecret: resolveSecret('The Safepay webhook secret', incoming.webhookSecret, ex.webhookSecret, warnings)
+  };
+}
+
+function wholeDays(value, field, { min = 0, max = 30 } = {}) {
+  const number = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  if (value === '' || value === null || !Number.isInteger(number) || number < min || number > max) {
+    return { problem: `${field} must be a whole number of days from ${min} to ${max}` };
+  }
+  return { value: number };
+}
+
+/**
+ * The billing reminders block, read strictly: what is sent replaces what is
+ * stored, field by field; a value that cannot be used is a 400 naming the
+ * field rather than quietly dropped.
+ * @returns {{ value?: object, problem?: string }}
+ */
+function readBilling(incoming = {}, existing = {}) {
+  const ex = existing || {};
+  const exVia = ex.sendVia || {};
+  const out = {
+    reminderDaysBefore: Array.isArray(ex.reminderDaysBefore) ? ex.reminderDaysBefore : [3],
+    dueDayReminder: ex.dueDayReminder !== false,
+    lastDayAfterDue: Number.isInteger(ex.lastDayAfterDue) ? ex.lastDayAfterDue : 3,
+    sendVia: { email: exVia.email !== false, sms: !!exVia.sms, whatsapp: !!exVia.whatsapp, push: exVia.push !== false },
+    autoCharge: { enabled: !!(ex.autoCharge && ex.autoCharge.enabled) }
+  };
+  const bool = (value) => value === true || value === 'true';
+
+  if (incoming.reminderDaysBefore !== undefined) {
+    if (!Array.isArray(incoming.reminderDaysBefore)) return { problem: 'billing.reminderDaysBefore must be a list of days' };
+    if (incoming.reminderDaysBefore.length > 10) return { problem: 'billing.reminderDaysBefore can hold at most 10 days' };
+    const days = [];
+    for (const day of incoming.reminderDaysBefore) {
+      const read = wholeDays(day, 'Each of billing.reminderDaysBefore');
+      if (read.problem) return read;
+      days.push(read.value);
+    }
+    // Largest first: the order the reminders go out in.
+    out.reminderDaysBefore = [...new Set(days)].sort((a, b) => b - a);
+  }
+  if (incoming.dueDayReminder !== undefined) out.dueDayReminder = bool(incoming.dueDayReminder);
+  if (incoming.lastDayAfterDue !== undefined) {
+    const read = wholeDays(incoming.lastDayAfterDue, 'billing.lastDayAfterDue');
+    if (read.problem) return read;
+    out.lastDayAfterDue = read.value;
+  }
+  if (incoming.sendVia !== undefined) {
+    if (!incoming.sendVia || typeof incoming.sendVia !== 'object') return { problem: 'billing.sendVia must say which channels to use' };
+    for (const channel of ['email', 'sms', 'whatsapp', 'push']) {
+      if (incoming.sendVia[channel] !== undefined) out.sendVia[channel] = bool(incoming.sendVia[channel]);
+    }
+  }
+  if (incoming.autoCharge !== undefined) {
+    if (!incoming.autoCharge || typeof incoming.autoCharge !== 'object') return { problem: 'billing.autoCharge must be { enabled }' };
+    if (incoming.autoCharge.enabled !== undefined) out.autoCharge.enabled = bool(incoming.autoCharge.enabled);
+  }
+  return { value: out };
+}
+
+// What the admin Settings screen shows beside the stored payment settings:
+// the gateway in use (derived for a gym that never chose) and the address
+// to register with Safepay. Read-only; never saved from a PUT.
+async function withPaymentExtras(data, req, settings) {
+  const payments = require('../services/payments');
+  const { currentTenant } = require('../platform/tenantContext');
+  const gym = currentTenant();
+  const apiBase = `${req.protocol}://${req.get('host')}`;
+  const { id, explicit } = await payments.selectedProviderId(settings);
+  data.onlinePayments = { ...(data.onlinePayments || {}), provider: id, providerChosen: explicit };
+  data.safepay = {
+    ...(data.safepay || {}),
+    webhook_url: payments.getProvider('safepay').webhookUrl(apiBase, gym ? gym.slug : '')
+  };
+  return data;
 }
 
 // A social profile link as the footer and the structured data will use it.
@@ -324,6 +422,7 @@ const settingsController = {
       data.gymSlug = gym ? gym.slug : null;
       const apiBase = `${req.protocol}://${req.get('host')}`;
       data.stripeWebhookUrl = gym ? `${apiBase}/api/gymfolio/payment/webhook/${gym.slug}` : `${apiBase}/api/gymfolio/payment/webhook`;
+      await withPaymentExtras(data, req, settings);
 
       return res.status(200).json({
         success: true,
@@ -390,6 +489,52 @@ const settingsController = {
     }
   },
 
+  // GET /settings/payment-gateways -- every gateway a gym can choose, what it
+  // supports, the fields its form needs, whether this gym has it set up and
+  // which one it uses. The admin screen draws the picker and each form from
+  // this, so a gateway added later appears without a screen change.
+  paymentGateways: async (req, res) => {
+    try {
+      const payments = require('../services/payments');
+      const { currentTenant } = require('../platform/tenantContext');
+      const gym = currentTenant();
+      const { data, selected } = await payments.describeProviders({ apiBase: `${req.protocol}://${req.get('host')}`, slug: gym ? gym.slug : '' });
+      return res.status(200).json({ success: true, data, selected });
+    } catch (error) {
+      console.error('Payment gateways error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to load the payment gateways' });
+    }
+  },
+
+  // POST /settings/safepay/test { publicKey?, secretKey?, environment? }
+  // POST /settings/payment-gateways/:id/test { ...that gateway's fields }
+  //
+  // Checks keys against the gateway: the ones the admin has just typed, or
+  // -- for a field left as its masked preview -- the stored ones, so "Test
+  // connection" answers for what will be saved. Safepay is asked for a
+  // checkout token and a payment session that is never paid.
+  testGateway: async (req, res) => {
+    try {
+      const payments = require('../services/payments');
+      const id = req.params.id || 'safepay';
+      const provider = payments.getProvider(id);
+      if (!provider) return res.status(404).json({ success: false, message: `There is no payment gateway called "${id}".` });
+      const body = (req.body && typeof req.body === 'object' && req.body) || {};
+      const fields = provider.settingsKey && body[provider.settingsKey] && typeof body[provider.settingsKey] === 'object' ? body[provider.settingsKey] : body;
+      const input = {};
+      for (const field of provider.configFields) {
+        const value = fields[field.name];
+        if (value === undefined || value === null) continue;
+        if (field.secret && isMasked(value)) continue;
+        input[field.name] = typeof value === 'string' ? value.trim() : value;
+      }
+      const result = await provider.testConnection(input);
+      return res.status(result.success ? 200 : 400).json({ success: !!result.success, message: result.message, ...(result.data ? { data: result.data } : {}) });
+    } catch (error) {
+      return res.status(400).json({ success: false, message: (error && error.message) || 'The gateway could not be reached' });
+    }
+  },
+
   // PUT /settings - Update settings
   updateSettings: async (req, res) => {
     try {
@@ -442,7 +587,10 @@ const settingsController = {
         seo,
         maps,
         openingHours,
-        locale
+        locale,
+        onlinePayments,
+        safepay,
+        billing
       } = req.body;
 
       // Before anything is written: a saved secret is never carried over to
@@ -463,6 +611,8 @@ const settingsController = {
       // The gym's clock lives on its platform record (every gym has its own),
       // edited here so the owner does not need the platform panel for it.
       let timezoneChanged = false;
+      // The gateway sent back as it already reads, with nothing to store (below).
+      let choiceAlreadyRead = false;
       if (ianaTimezone !== undefined) {
         const tz = String(ianaTimezone || '').trim();
         try {
@@ -578,6 +728,40 @@ const settingsController = {
         };
       }
 
+      // ---- Online payments ----
+      if (safepay && typeof safepay === 'object') {
+        const current = await currentSettings();
+        const merged = mergeSafepay(current.safepay || {}, safepay, warnings);
+        if (!['sandbox', 'production'].includes(merged.environment)) {
+          return res.status(400).json({ success: false, message: 'safepay.environment must be sandbox or production' });
+        }
+        updateData.safepay = merged;
+      }
+      if (billing && typeof billing === 'object') {
+        const current = await currentSettings();
+        const read = readBilling(billing, current.billing || {});
+        if (read.problem) return res.status(400).json({ success: false, message: read.problem });
+        updateData.billing = read.value;
+      }
+      if (onlinePayments && typeof onlinePayments === 'object' && onlinePayments.provider !== undefined) {
+        const payments = require('../services/payments');
+        const wanted = String(onlinePayments.provider || 'none').trim();
+        if (!payments.CHOICES.includes(wanted)) {
+          return res.status(400).json({ success: false, message: `onlinePayments.provider must be one of: ${payments.CHOICES.join(', ')}` });
+        }
+        // A gym that never chose reads as Stripe-or-none (payments.
+        // selectedProviderId). The settings page sends that reading back on
+        // every save; storing it would pin a choice nobody made -- and a gym
+        // pinned to 'none' would then not take cards when it later switched
+        // Stripe on. So it is stored once the gym has chosen, or chooses
+        // something else.
+        const current = await currentSettings();
+        const stored = current.onlinePayments && current.onlinePayments.provider;
+        const unchosen = await payments.selectedProviderId({ ...current, stripe: updateData.stripe || current.stripe, onlinePayments: {} });
+        if (stored || wanted !== unchosen.id) updateData.onlinePayments = { provider: wanted };
+        else choiceAlreadyRead = true;
+      }
+
       if (smtp && typeof smtp === 'object') {
         const current = await currentSettings();
         const existing = current.smtp || {};
@@ -691,9 +875,9 @@ const settingsController = {
 
       // Ensure we have some data to update
       if (Object.keys(updateData).length === 0) {
-        if (timezoneChanged) {
+        if (timezoneChanged || choiceAlreadyRead) {
           const settings = await Settings.getSettings();
-          return res.status(200).json({ success: true, message: 'Settings updated successfully', data: sanitizeSettings(settings), warnings });
+          return res.status(200).json({ success: true, message: 'Settings updated successfully', data: await withPaymentExtras(sanitizeSettings(settings), req, settings), warnings });
         }
         return res.status(400).json({
           success: false,
@@ -721,7 +905,7 @@ const settingsController = {
       return res.status(200).json({
         success: true,
         message: warnings.length ? 'Settings updated, with warnings' : 'Settings updated successfully',
-        data: sanitizeSettings(updatedSettings),
+        data: await withPaymentExtras(sanitizeSettings(updatedSettings), req, await Settings.getSettings()),
         ...(currencyRelabelled ? { currency_relabelled: currencyRelabelled } : {}),
         warnings
       });
