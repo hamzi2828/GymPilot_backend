@@ -27,9 +27,11 @@ const punchContextSchema = new mongoose.Schema(
     // to tell them apart.
     method: {
       type: String,
-      // qr: scanned from the member's account page; code: their member
-      // number typed at a kiosk or desk.
-      enum: ['fingerprint', 'manual', 'qr', 'code'],
+      // face: matched by the desk's camera; desk_code: the desk screen's
+      // rotating code, scanned with the person's own signed-in phone. qr and
+      // code are the retired member QR and typed member number, kept so the
+      // visits recorded with them still validate.
+      enum: ['fingerprint', 'manual', 'qr', 'code', 'face', 'desk_code'],
       default: 'fingerprint'
     },
     // The desk's own id for the punch that recorded this half of the visit,

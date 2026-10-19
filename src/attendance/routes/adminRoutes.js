@@ -5,9 +5,11 @@
 // Separate from desktopRoutes on purpose. That surface is authenticated by a
 // long-lived desktop token tied to a front-desk PC and is allowed to WRITE
 // punches; this one is a normal admin JWT. It reads, and it can correct or
-// void a visit the desk recorded -- but it can never create one. Keeping them
-// apart means a leaked desk token cannot read the whole gym's history, and an
-// admin session cannot manufacture attendance.
+// void a visit the desk recorded -- but it can never create one for anybody
+// else. (The one punch it takes is a person checking themselves in with a
+// live desk screen's code, /me/checkin, and that visit is the desk's.) Keeping
+// them apart means a leaked desk token cannot read the whole gym's history,
+// and an admin session cannot manufacture attendance.
 
 const express = require('express');
 const router = express.Router();
@@ -17,6 +19,7 @@ const requirePermission = require('../../middleware/requirePermission');
 const controller = require('../controller/adminAttendanceController');
 const corrections = require('../controller/attendanceCorrectionController');
 const myController = require('../controller/myAttendanceController');
+const deskCode = require('../controller/deskCodeController');
 
 // A member reading their OWN attendance. Registered before the permission gate
 // below, so it needs nothing but a valid token -- asking a member to hold the
@@ -28,6 +31,13 @@ router.get('/me', auth, myController.me);
 // The QR code a member shows at the door -- theirs alone, freshly signed
 // each time it is asked for. See services/qrToken.js.
 router.get('/me/qr', auth, myController.qr);
+
+// A member (or a member of staff) checking themselves in with their phone, by
+// scanning the code on a front-desk screen. The one write a website or phone
+// session can make here, and only for the account itself: the visit is the
+// desk's -- recorded under the desk account and the PC that showed the code
+// (controller/deskCodeController.js) -- and the code is good for a minute.
+router.post('/me/checkin', auth, deskCode.limitCheckins, deskCode.checkIn);
 
 // Both gates on every route BELOW: `auth` only proves the token is valid, not
 // that the account may touch the gym's attendance. The level follows the

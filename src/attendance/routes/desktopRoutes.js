@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 
 const controller = require('../controller/desktopAppController');
+const deskCode = require('../controller/deskCodeController');
 const {
   desktopAuth,
   requireEnrollPermission,
@@ -34,6 +35,11 @@ router.post('/theme', controller.theme);
 router.post('/session', desktopAuth, controller.session);
 router.post('/logout', desktopAuth, controller.logout);
 router.post('/recent', desktopAuth, controller.recent);
+
+// The rotating code the screen shows for members to scan with their phone
+// (services/deskCode.js). Both the Windows desk and the web kiosk show it, with
+// no staff unlock: it names the desk, never a person.
+router.post('/checkin-code', desktopAuth, deskCode.checkinCode);
 
 // The fingerprint side -- decrypted templates and enrolment -- is the Windows
 // app's alone: a web kiosk is refused both, unlocked or not (notOnKiosk).

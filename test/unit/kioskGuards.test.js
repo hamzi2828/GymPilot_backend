@@ -159,10 +159,13 @@ test('the routes: templates and enrolment carry the kiosk refusal, and nothing e
   // Refused before the enrolment grant is even asked about.
   assert.deepEqual(chains.get('/enroll'), ['desktopAuth', 'notOnKiosk', 'requireEnrollPermission', 'enroll']);
 
-  for (const path of ['/session', '/logout', '/recent', '/unlock', '/people', '/punch']) {
+  for (const path of ['/session', '/logout', '/recent', '/unlock', '/people', '/punch', '/checkin-code']) {
     assert.ok(chains.has(path), path);
     assert.ok(!chains.get(path).includes('notOnKiosk'), `${path} stays open to a kiosk`);
   }
+
+  // The screen's check-in code needs a desk token and nothing else: no unlock.
+  assert.deepEqual(chains.get('/checkin-code'), ['desktopAuth', 'checkinCode']);
 });
 
 test('the audit trail can record staff unlock attempts, granted and refused', async () => {

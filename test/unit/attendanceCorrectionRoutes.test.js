@@ -77,6 +77,12 @@ test('every route is gated on its own, and nothing is gated router-wide', () => 
     assert.equal(chain[0], 'auth');
     assert.ok(!chain.includes('permissionGate'), `${path} is not behind the attendance permission`);
   }
+
+  // So does checking in with the desk's code -- with a per-account limit.
+  assert.deepEqual(
+    routes.get('post /me/checkin').stack.map((layer) => layer.handle.name),
+    ['auth', 'limitCheckins', 'checkIn']
+  );
 });
 
 test('the fingerprint routes pass through untouched, to be gated once where they are mounted', async () => {
@@ -102,7 +108,8 @@ test('this router\'s own routes still refuse a request without a token', async (
     ['POST', '/records/0000000000000000000000a1/void'],
     ['GET', '/settings'],
     ['PUT', '/settings'],
-    ['GET', '/me']
+    ['GET', '/me'],
+    ['POST', '/me/checkin']
   ]) {
     const { passedOn, res } = await run(method, url);
     assert.equal(passedOn, false, `${method} ${url} is answered here`);

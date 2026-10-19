@@ -43,7 +43,7 @@ const attendanceLogSchema = new mongoose.Schema(
     personName: { type: String, default: '' },
 
     action: { type: String, default: '' },     // check_in | check_out | ignore
-    method: { type: String, default: '' },     // fingerprint | manual
+    method: { type: String, default: '' },     // fingerprint | face | desk_code | manual
     success: { type: Boolean, default: true },
     message: { type: String, default: '' },
 

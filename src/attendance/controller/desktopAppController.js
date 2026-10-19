@@ -143,6 +143,58 @@ async function openDeskSession(user, device, extra = {}) {
   };
 }
 
+// What a client is told about a punch, from recordPunch's result. A phone
+// checking in with the desk code (deskCodeController) is answered in exactly
+// this shape, so the desk, the kiosk and the phone read one kind of reply.
+//
+// A repeat scan and a real punch both carry a receipt, so the desk sees the
+// person either way; only `success` differs. `ignored` marks the repeat --
+// "already checked in (or out) a moment ago": nothing recorded, and nothing
+// wrong. `repeated` marks the answer to a punch sent again with its
+// request_id: the first answer, with nothing recorded this time.
+function punchReply(result) {
+  return {
+    success: result.success,
+    message: result.message,
+    detail: result.detail || null,
+    ...(result.repeated ? { repeated: true } : {}),
+    ...(result.ignored ? { ignored: true } : {}),
+    // Turned away under the gym's entry rules: nothing was recorded.
+    ...(result.refused ? { refused: true, code: 'ENTRY_REFUSED', reason: result.reason } : {})
+  };
+}
+
+// The audit row for a punch, recorded or not, under the desk account that
+// took it. `meta` adds to the row's extras; keys left undefined are dropped.
+function logPunch({ operator, device, personType, personId, method, result, meta = {} }) {
+  const extra = Object.fromEntries(Object.entries(meta).filter(([, value]) => value !== undefined && value !== null));
+  AttendanceLog.record({
+    event: result.success ? 'punch' : 'punch_denied',
+    userId: operator._id,
+    userName: sessionPayload(operator).name,
+    userEmail: operator.email,
+    personType,
+    personId,
+    personName: (result.person && result.person.name) || '',
+    action: (result.detail && result.detail.action) || '',
+    method,
+    success: Boolean(result.success),
+    message: result.message,
+    device: device.deviceLabel,
+    osUser: device.osUser,
+    clientApp: device.clientApp,
+    ip: device.ip,
+    meta: result.detail
+      ? {
+          status: result.detail.status,
+          ...(result.repeated ? { repeated: true } : {}),
+          ...(result.refused ? { refused: result.reason } : {}),
+          ...extra
+        }
+      : null
+  });
+}
+
 module.exports = {
   // POST /api/desktop/theme
   //
@@ -511,6 +563,14 @@ module.exports = {
       if (!personId.match(/^[0-9a-fA-F]{24}$/)) {
         return res.status(400).json({ success: false, message: 'Unknown person.' });
       }
+      // The one method the server vouches for itself: a desk code is checked
+      // when the phone sends it (deskCodeController), so a desk cannot claim it.
+      if (method === 'desk_code') {
+        return res.status(400).json({
+          success: false,
+          message: 'A desk-code check-in comes from the member\'s phone, not the desk.'
+        });
+      }
       // Optional: the desk's id for this attempt, sent again unchanged when
       // the answer to it was lost (punchService.repeatedPunch).
       const requestId = readRequestId(body.request_id);
@@ -551,45 +611,17 @@ module.exports = {
         scannedAt
       });
 
-      AttendanceLog.record({
-        event: result.success ? 'punch' : 'punch_denied',
-        userId: req.desktopUser._id,
-        userName: sessionPayload(req.desktopUser).name,
-        userEmail: req.desktopUser.email,
+      logPunch({
+        operator: req.desktopUser,
+        device: req.deviceContext,
         personType,
         personId,
-        personName: (result.person && result.person.name) || '',
-        action: (result.detail && result.detail.action) || '',
         method,
-        success: Boolean(result.success),
-        message: result.message,
-        device: req.deviceContext.deviceLabel,
-        osUser: req.deviceContext.osUser,
-        clientApp: req.deviceContext.clientApp,
-        ip: req.deviceContext.ip,
-        meta: result.detail
-          ? {
-              status: result.detail.status,
-              ...(requestId ? { requestId } : {}),
-              ...(result.repeated ? { repeated: true } : {}),
-              ...(result.refused ? { refused: result.reason } : {}),
-              ...(scannedAt ? { scannedAt } : {})
-            }
-          : null
+        result,
+        meta: { requestId, scannedAt }
       });
 
-      // A repeat scan and a real punch both carry a receipt, so the desk sees
-      // the person either way; only `success` differs. `repeated` marks the
-      // answer to a punch sent again with its request_id: the first answer,
-      // with nothing recorded this time.
-      return res.json({
-        success: result.success,
-        message: result.message,
-        detail: result.detail || null,
-        ...(result.repeated ? { repeated: true } : {}),
-        // Turned away under the gym's entry rules: nothing was recorded.
-        ...(result.refused ? { refused: true, code: 'ENTRY_REFUSED', reason: result.reason } : {})
-      });
+      return res.json(punchReply(result));
     } catch (err) {
       console.error('[attendance] punch failed:', err);
       return res.status(500).json({ success: false, message: 'Could not record attendance.' });
@@ -795,3 +827,6 @@ module.exports = {
 
 // For the admin panel's link code (platform/controllers/deskLinkController.js).
 module.exports.openDeskSession = openDeskSession;
+// For the phone's desk-code check-in (deskCodeController.js).
+module.exports.punchReply = punchReply;
+module.exports.logPunch = logPunch;
