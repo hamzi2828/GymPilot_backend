@@ -215,8 +215,7 @@ const gymfolioPaymentController = {
         return res.status(409).json({ success: false, code: 'GATEWAY_UNSUPPORTED', message: "Paying an order online isn't available at this gym — please pay at the front desk." });
       }
       const member = await User.findById(userId).select('firstName lastName email phone').lean();
-      const { frontendOrigin } = require('../../platform/tenantContext');
-      const site = String(frontendOrigin() || '').replace(/\/+$/, '');
+      const site = require('../../services/payments/site').gymSiteOrigin();
       const ref = encodeURIComponent(String(order._id));
       const body = req.body || {};
       const result = await provider.createCheckout({

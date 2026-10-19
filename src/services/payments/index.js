@@ -39,6 +39,7 @@
 
 const Settings = require('../../models/settings');
 const { PaymentGatewayError } = require('./errors');
+const { gymSiteOrigin } = require('./site');
 
 const PROVIDERS = [require('./providers/stripe'), require('./providers/safepay'), require('./providers/generic')];
 const PROVIDER_IDS = PROVIDERS.map((provider) => provider.id);
@@ -159,6 +160,7 @@ module.exports = {
   PROVIDER_IDS,
   CHOICES,
   PaymentGatewayError,
+  gymSiteOrigin,
   listProviders,
   getProvider,
   selectedProviderId,

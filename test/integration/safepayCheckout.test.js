@@ -256,3 +256,17 @@ test('a bank-transfer-only gym is told to pay by bank transfer', async () => {
     assert.equal(await PackageOrder.countDocuments({}), 0, 'no order is made');
   });
 });
+
+test("the member is sent back to the gym's primary domain: not the address the request came in on, not a stale Settings site address", async () => {
+  const { runWithTenant } = h.src('platform/tenantContext');
+  const Settings = h.src('models/settings');
+  const moved = { ...gym, domains: [{ host: 'old-alias.test' }, { host: 'www.primary-gym.com', isPrimary: true }] };
+  await runWithTenant({ gym: moved, origin: 'http://old-alias.test' }, async () => {
+    await Settings.updateOne({ isActive: true }, { $set: { siteUrl: 'https://stale.example' } });
+    const res = await checkout({});
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const url = new URL(res.body.url);
+    assert.equal(url.searchParams.get('redirect_url'), `https://www.primary-gym.com/checkout/success?provider=safepay&order=${res.body.orderId}`);
+    assert.equal(url.searchParams.get('cancel_url'), `https://www.primary-gym.com/checkout/cancel?order=${res.body.orderId}`);
+  });
+});

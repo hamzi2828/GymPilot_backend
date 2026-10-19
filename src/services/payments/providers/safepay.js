@@ -7,7 +7,7 @@
 
 const safepay = require('../../safepay');
 const { storedSafepay } = require('../../safepay/config');
-const { frontendOrigin } = require('../../../platform/tenantContext');
+const { gymSiteOrigin } = require('../site');
 const { PaymentGatewayError } = require('../errors');
 const { createPendingPurchase, closeUnopened } = require('../purchase');
 
@@ -21,7 +21,7 @@ const CHECKOUT_UNAVAILABLE = "Online payment isn't available at this gym — ple
 
 /** Where the member lands after Safepay's page, for an order: the gym site's checkout pages. */
 function checkoutReturnUrls(order) {
-  const site = String(frontendOrigin() || '').replace(/\/+$/, '');
+  const site = gymSiteOrigin();
   const id = encodeURIComponent(String((order && order._id) || order));
   return {
     returnUrl: `${site}/checkout/success?provider=safepay&order=${id}`,
