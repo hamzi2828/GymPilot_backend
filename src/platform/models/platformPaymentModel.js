@@ -48,6 +48,14 @@ const platformPaymentSchema = new mongoose.Schema(
 
 platformPaymentSchema.index({ gymId: 1, requestId: 1 }, { unique: true });
 platformPaymentSchema.index({ gymId: 1, createdAt: -1 });
+// One payment per transaction id: the same transfer typed into two forms at
+// once both pass the service's lookup, and this lets only one be recorded.
+// A payment without a reference (cash, other) is not indexed: any number of
+// those may be on record.
+platformPaymentSchema.index(
+  { gymId: 1, method: 1, reference: 1 },
+  { unique: true, name: 'one_payment_per_reference', partialFilterExpression: { reference: { $gt: '' } } }
+);
 
 platformPaymentSchema.statics.METHODS = METHODS;
 

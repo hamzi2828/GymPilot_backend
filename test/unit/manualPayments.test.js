@@ -224,3 +224,70 @@ test('a payment that could not move the date is not left on record', async () =>
     w.restore();
   }
 });
+
+// The first of two clicks saved after the second looked it up by request id
+// but before it looked up the reference: the row found by reference is this
+// very form's, so it is the same payment -- not "already recorded" (the
+// flaky 409 the integration test used to see now and then).
+test('a second click that finds the first one by its reference answers with it, not DUPLICATE_REFERENCE', async () => {
+  const gym = gymBilledByHand();
+  const w = world();
+  try {
+    const first = await recordPayment({ gym, input: form(), now });
+    const restore = stub(PlatformPayment, {
+      findOne: (filter) => ({ lean: async () => ('requestId' in filter ? null : first.payment) }),
+      create: async () => {
+        throw new Error('nothing should be created');
+      }
+    });
+    try {
+      const second = await recordPayment({ gym, input: form(), now });
+      assert.equal(second.duplicate, true);
+      assert.equal(String(second.payment._id), String(first.payment._id));
+    } finally {
+      restore();
+    }
+    assert.equal(w.calls.created.length, 1);
+    assert.equal(w.calls.gymWrites.length, 1);
+  } finally {
+    w.restore();
+  }
+});
+
+test('two different forms with one reference at once: the index lets one in, the other is DUPLICATE_REFERENCE', async () => {
+  const gym = gymBilledByHand();
+  const w = world();
+  try {
+    const winner = { _id: new mongoose.Types.ObjectId(), method: 'jazzcash', reference: 'TID-4471', requestId: 'req-winner-01', receivedAt: day('2026-10-08') };
+    let lookups = 0;
+    const restore = stub(PlatformPayment, {
+      // Nothing yet when this form looks; the other one's row once it has lost.
+      findOne: (filter) => ({ lean: async () => ((lookups += 1) <= 2 ? null : 'requestId' in filter ? null : winner) }),
+      create: async () => {
+        throw Object.assign(new Error('E11000 duplicate key error index: one_payment_per_reference'), { code: 11000 });
+      }
+    });
+    try {
+      await assert.rejects(recordPayment({ gym, input: form({ requestId: 'req-loser-001' }), now }), (error) => {
+        assert.ok(error instanceof ManualPaymentError);
+        assert.deepEqual([error.status, error.code], [409, 'DUPLICATE_REFERENCE']);
+        return true;
+      });
+      assert.equal(lookups, 4, 'by request id and reference before, and again after the refused write');
+    } finally {
+      restore();
+    }
+    assert.equal(w.calls.gymWrites.length, 0, 'nothing moved');
+  } finally {
+    w.restore();
+  }
+});
+
+test('the payments carry a unique index on the reference, for payments that have one', () => {
+  const indexes = PlatformPayment.schema.indexes();
+  const byReference = indexes.find(([fields]) => fields.reference === 1);
+  assert.ok(byReference, 'an index on the reference');
+  assert.deepEqual(byReference[0], { gymId: 1, method: 1, reference: 1 });
+  assert.equal(byReference[1].unique, true);
+  assert.deepEqual(byReference[1].partialFilterExpression, { reference: { $gt: '' } });
+});

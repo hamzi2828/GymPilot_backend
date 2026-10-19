@@ -177,9 +177,12 @@ function validatePayment(body, gym, now = new Date()) {
  *
  * The same `requestId` again is the same payment: the row already stored is
  * returned (`duplicate: true`) and nothing moves a second time -- a double
- * click, or a retry after a slow answer. A different form with a reference
+ * click, or a retry after a slow answer, even when the first click is saved
+ * while the second is being checked. A different form with a reference
  * already on record for the gym is refused (409 `DUPLICATE_REFERENCE`): the
- * same transfer typed in twice.
+ * same transfer typed in twice. Both rules are backed by unique indexes
+ * (models/platformPaymentModel.js), so two requests at once cannot get
+ * round them.
  *
  * @param {object} args
  * @param {object} args.gym    the gym document (lean or not)
@@ -199,15 +202,20 @@ async function recordPayment({ gym, input, actor = null, now = new Date() }) {
   const { errors, data } = validatePayment(input, gym, now);
   if (errors.length) throw new ManualPaymentError(errors[0], 400, 'INVALID_PAYMENT');
 
-  if (data.reference) {
-    const same = await PlatformPayment.findOne({ gymId: gym._id, method: data.method, reference: data.reference }).lean();
-    if (same) {
-      throw new ManualPaymentError(
-        `A ${METHOD_LABELS[data.method]} payment with reference "${data.reference}" is already recorded for this gym (received ${dayLabel(same.receivedAt)}).`,
-        409,
-        'DUPLICATE_REFERENCE'
-      );
-    }
+  // The same transfer typed into a second form is refused -- but a row with
+  // this reference made by THIS form is this payment: the first of two
+  // clicks, saved between this one's lookup by request id and this one.
+  const sameReference = () => (data.reference ? PlatformPayment.findOne({ gymId: gym._id, method: data.method, reference: data.reference }).lean() : null);
+  const duplicateReference = (same) =>
+    new ManualPaymentError(
+      `A ${METHOD_LABELS[data.method]} payment with reference "${data.reference}" is already recorded for this gym (received ${dayLabel(same.receivedAt)}).`,
+      409,
+      'DUPLICATE_REFERENCE'
+    );
+  const same = await sameReference();
+  if (same) {
+    if (same.requestId === requestId) return { payment: same, duplicate: true };
+    throw duplicateReference(same);
   }
 
   let payment;
@@ -219,9 +227,13 @@ async function recordPayment({ gym, input, actor = null, now = new Date() }) {
       recordedBy: { id: actor ? actor._id : null, email: (actor && actor.email) || '' }
     });
   } catch (error) {
-    // Two clicks that raced past the lookup above: the unique index let one in.
-    const first = error && error.code === 11000 ? await PlatformPayment.findOne({ gymId: gym._id, requestId }).lean() : null;
+    if (!error || error.code !== 11000) throw error;
+    // Two clicks that raced past both lookups above: a unique index -- the
+    // request id's, or the reference's -- let one in.
+    const first = await PlatformPayment.findOne({ gymId: gym._id, requestId }).lean();
     if (first) return { payment: first, duplicate: true };
+    const taken = await sameReference();
+    if (taken) throw duplicateReference(taken);
     throw error;
   }
 
