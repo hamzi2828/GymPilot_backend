@@ -46,7 +46,7 @@ const EXPORT_LIMIT = 20000;
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
 // How long a copy refused for stock waits for the first copy's receipt: it
 // may have taken the stock a moment ago and still be writing it.
-const REPEAT_WAIT_MS = 2000;
+const REPEAT_WAIT_MS = 1000;
 const REPEAT_POLL_MS = 100;
 
 function readRequestId(value) {
