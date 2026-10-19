@@ -219,7 +219,10 @@ async function createCheckout({ order: orderOrId, amount, currency, customer = {
     }
   );
 
-  const url = api.checkoutUrl(config, { tracker: token, tbt, redirectUrl: returnUrl, cancelUrl, orderRef, customer: customerToken, saveCard: saving });
+  // {TRACKER} in an address is this payment's reference (as Stripe's
+  // {CHECKOUT_SESSION_ID}), for a page that must ask about this one payment.
+  const withRef = (address) => String(address).split('{TRACKER}').join(encodeURIComponent(token));
+  const url = api.checkoutUrl(config, { tracker: token, tbt, redirectUrl: withRef(returnUrl), cancelUrl: withRef(cancelUrl), orderRef, customer: customerToken, saveCard: saving });
   return { url, tracker: token, saveCard: saving, purpose: due.purpose, amount: due.amount, currency: code };
 }
 
@@ -429,33 +432,55 @@ async function trackerDetails(tracker) {
  * @returns {Promise<{ paid: boolean, order }>}
  */
 async function verifyOrderPayment(orderOrId) {
-  let order = await loadOrder(orderOrId);
+  const order = await loadOrder(orderOrId);
   if (!order) return { paid: false, order: null };
   if (order.payment.status === 'paid') return { paid: true, order };
 
   const open = trackersOf(order).filter((record) => record.purpose === 'order' && record.status !== 'paid');
   const latest = open[open.length - 1];
   if (!latest) return { paid: false, order };
+  return settleWithSafepay(order, latest);
+}
 
-  const details = await trackerDetails(latest.token);
+/**
+ * The same question for one payment (`tracker`): the page a balance payment
+ * returns to asks about that payment, not the order (already paid). A
+ * tracker that is not this order's is never paid.
+ */
+async function verifyTrackerPayment(orderOrId, tracker) {
+  const order = await loadOrder(orderOrId);
+  if (!order) return { paid: false, order: null };
+  const record = trackerRecord(order, tracker);
+  if (!record) return { paid: false, order };
+  if (record.status === 'paid') return { paid: true, order };
+  return settleWithSafepay(order, record);
+}
+
+// Asks Safepay about a tracker that is not recorded as paid, and records
+// what it says: applied when paid; marked when the session closed unpaid,
+// which also closes a new purchase (not an order a payment link is for).
+async function settleWithSafepay(order, record) {
+  const details = await trackerDetails(record.token);
   if (details.status === 'paid') {
-    const result = await applyTrackerPayment(order, latest.token, { ...details, what: `return page, tracker ${latest.token}` });
-    order = result.order || (await loadOrder(order._id));
-    return { paid: order.payment.status === 'paid', order };
+    const result = await applyTrackerPayment(order, record.token, { ...details, what: `return page, tracker ${record.token}` });
+    const fresh = result.order || (await loadOrder(order._id));
+    const mine = trackerRecord(fresh, record.token);
+    return { paid: !!(mine && mine.status === 'paid'), order: fresh };
   }
+  let current = order;
   if (details.status === 'failed') {
-    order = (await markTrackerFailed(order, latest.token, `Safepay closed the payment session (${details.state || 'unpaid'})`)) || order;
-    const dueFor = order.metadata && typeof order.metadata.get === 'function' ? order.metadata.get('dueFor') : order.metadata && order.metadata.dueFor;
-    if (!dueFor && ['pending', 'failed'].includes(order.payment.status)) {
-      order =
+    current = (await markTrackerFailed(order, record.token, `Safepay closed the payment session (${details.state || 'unpaid'})`)) || order;
+    const dueFor = current.metadata && typeof current.metadata.get === 'function' ? current.metadata.get('dueFor') : current.metadata && current.metadata.dueFor;
+    if (record.purpose === 'order' && !dueFor && ['pending', 'failed'].includes(current.payment.status)) {
+      current =
         (await PackageOrder.findOneAndUpdate(
-          { _id: order._id, 'payment.status': { $in: ['pending', 'failed'] } },
+          { _id: current._id, 'payment.status': { $in: ['pending', 'failed'] } },
           { $set: { 'payment.status': 'failed', status: 'cancelled', 'payment.lastPaymentError': 'The payment session closed before payment was completed' } },
           { new: true }
-        )) || order;
+        )) || current;
     }
   }
-  return { paid: false, order };
+  return { paid: false, order: current };
 }
 
 /* ---------------------------- saved-card charges ---------------------------- */
@@ -646,6 +671,7 @@ module.exports = {
   fetchTrackerStatus,
   trackerDetails,
   verifyOrderPayment,
+  verifyTrackerPayment,
   applyTrackerPayment,
   markTrackerFailed,
   handleWebhookEvent,

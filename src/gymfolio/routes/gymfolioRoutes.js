@@ -251,6 +251,9 @@ router.post('/package-orders/:id/unfreeze', auth, membershipController.unfreeze)
 router.post('/package-orders/:id/cancel', auth, membershipController.cancel);
 router.post('/package-orders/:id/resume', auth, membershipController.resume);
 router.post('/package-orders/:id/billing-portal', auth, membershipController.billingPortal);
+// The member pays their own unpaid renewal, or a balance, through the gym's
+// online gateway (gymfolioPaymentController.payOrderOnline).
+router.post('/package-orders/:id/pay-online', paymentLimiter, auth, gymfolioPaymentController.payOrderOnline);
 router.get('/package-orders/:id/invoice.pdf', auth, membershipController.invoicePdf);
 
 // Staff only.

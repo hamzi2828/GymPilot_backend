@@ -22,7 +22,7 @@ const CHECKOUT_UNAVAILABLE = "Online payment isn't available at this gym — ple
 /** Where the member lands after Safepay's page, for an order: the gym site's checkout pages. */
 function checkoutReturnUrls(order) {
   const site = String(frontendOrigin() || '').replace(/\/+$/, '');
-  const id = encodeURIComponent(String(order._id));
+  const id = encodeURIComponent(String((order && order._id) || order));
   return {
     returnUrl: `${site}/checkout/success?provider=safepay&order=${id}`,
     cancelUrl: `${site}/checkout/cancel?order=${id}`
@@ -152,6 +152,14 @@ module.exports = {
   /** 'paid' | 'failed' | 'pending' for a tracker. */
   fetchStatus(tracker) {
     return safepay.fetchTrackerStatus(tracker);
+  },
+
+  /**
+   * The return page's question for an order this gateway took: paid yet?
+   * With `reference` (a tracker) it is that one payment. -> { paid, order }
+   */
+  verifyOrder(order, { reference } = {}) {
+    return reference ? safepay.verifyTrackerPayment(order, reference) : safepay.verifyOrderPayment(order);
   },
 
   /** The event, checked with `secret` (default: the gym's stored webhook secret). */

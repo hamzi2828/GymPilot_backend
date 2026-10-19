@@ -31,6 +31,9 @@
 //   chargeSavedMethod({ order, amount, currency, savedMethod })
 //                               -> Promise<{ status: 'paid'|'failed'|'pending', reference, reason, code? }>
 //   fetchStatus(reference)      -> Promise<'paid'|'failed'|'pending'>
+//   verifyOrder(order, { reference? })  (optional; gateways paid against an
+//                                  order) -> Promise<{ paid, order }> for the
+//                                  checkout success page
 //   verifyWebhook(rawBody, headers, secret?) -> Promise<event>  (throws when not genuine)
 //   webhookUrl(apiBase, slug)   -> the address the gym registers with the gateway
 

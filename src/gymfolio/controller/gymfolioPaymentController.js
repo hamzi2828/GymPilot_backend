@@ -21,8 +21,11 @@ function userIdOf(req) {
   return req.user ? req.user._id || req.user.id : null;
 }
 
+// Errors that carry the answer to give: their status, their sentence, their code.
+const ANSWERED = new Set(['MembershipError', 'SafepayError', 'PaymentGatewayError']);
+
 function fail(res, error, fallback) {
-  if (error instanceof StripeNotConfiguredError || error instanceof membership.MembershipError) {
+  if (error instanceof StripeNotConfiguredError || error instanceof membership.MembershipError || (error && ANSWERED.has(error.name) && error.status)) {
     return res.status(error.status || 400).json({ success: false, message: error.message, code: error.code || undefined });
   }
   console.error(fallback, error);
@@ -132,10 +135,21 @@ const gymfolioPaymentController = {
     }
   },
 
-  /** POST /api/gymfolio/payment/create-package-checkout-session */
+  /**
+   * POST /api/gymfolio/payment/create-package-checkout-session
+   *   { packageId, customerInfo, couponCode?, saveCard?, autoPayConsent? }
+   *
+   * A new purchase, paid online through the gateway the gym chose
+   * (services/payments): Stripe Checkout as always, or Safepay's hosted
+   * checkout. `saveCard` + `autoPayConsent` (both true) ask Safepay to keep
+   * the card for automatic payments; honoured only at a gym with auto-charge
+   * on, for a signed-in member. Answers { url } to send the browser to;
+   * `sessionId` for Stripe, `orderId` for the other gateways (the success
+   * page's verify call takes either).
+   */
   async createPackageCheckoutSession(req, res) {
     try {
-      const { packageId, customerInfo, couponCode } = req.body || {};
+      const { packageId, customerInfo, couponCode, saveCard, autoPayConsent } = req.body || {};
       const userId = userIdOf(req);
 
       if (!packageId) return res.status(400).json({ success: false, message: 'Package ID is required' });
@@ -143,18 +157,138 @@ const gymfolioPaymentController = {
         return res.status(400).json({ success: false, message: 'Customer information is required' });
       }
 
-      const session = await gymfolioPaymentService.createPackageCheckoutSession(userId, packageId, customerInfo, { couponCode });
-      return res.status(200).json({ success: true, sessionId: session.sessionId, url: session.url, orderNumber: session.orderNumber });
+      const payments = require('../../services/payments');
+      const provider = await payments.providerForCheckout();
+      const session = await provider.createPurchaseCheckout({
+        userId,
+        packageId,
+        customerInfo,
+        couponCode,
+        saveCard: saveCard === true,
+        autoPayConsent: autoPayConsent === true
+      });
+      return res.status(200).json({
+        success: true,
+        sessionId: session.sessionId,
+        url: session.url,
+        orderNumber: session.orderNumber,
+        orderId: session.orderId,
+        provider: provider.id,
+        saveCard: session.saveCard
+      });
     } catch (error) {
       return fail(res, error, 'Failed to create checkout session');
     }
   },
 
-  /** GET|POST /api/gymfolio/payment/verify/:sessionId */
+  /**
+   * POST /api/gymfolio/package-orders/:id/pay-online { saveCard?, autoPayConsent? }
+   *
+   * The signed-in member pays one of their own orders online through the
+   * gym's gateway: a renewal waiting for payment (an unpaid order paid
+   * online), or what is still owed on a part-paid one. The amount is what
+   * the order owes, never one sent. Answers { url } for the gateway's page;
+   * the member comes back to /checkout/success?provider=<id>&order=<id>
+   * &tracker=<the payment's reference>.
+   */
+  async payOrderOnline(req, res) {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+      const { id, orderId } = req.params;
+      const wanted = orderId || id;
+      const order = mongoose.Types.ObjectId.isValid(String(wanted || '')) ? await PackageOrder.findOne({ _id: wanted, userId }) : null;
+      if (!order) return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'Order not found' });
+      // Unpaid orders are paid online only when they were meant to be (a
+      // renewal raised for online payment, a checkout left unfinished): a
+      // bank transfer waiting for its receipt is not turned into one.
+      if (order.payment.status !== 'paid' && order.payment.method !== 'online') {
+        return res.status(409).json({ success: false, code: 'ORDER_NOT_PAYABLE', message: 'This order is paid another way. Ask at the front desk if you would like to pay it online.' });
+      }
+      if (order.payment.status === 'paid' && membership.stripeBilled(order)) {
+        return res.status(409).json({ success: false, code: 'STRIPE_BILLED', message: 'This membership is paid by card through Stripe.' });
+      }
+
+      const payments = require('../../services/payments');
+      const provider = await payments.providerForCheckout();
+      if (!provider.capabilities.paymentLinks) {
+        return res.status(409).json({ success: false, code: 'GATEWAY_UNSUPPORTED', message: "Paying an order online isn't available at this gym — please pay at the front desk." });
+      }
+      const member = await User.findById(userId).select('firstName lastName email phone').lean();
+      const { frontendOrigin } = require('../../platform/tenantContext');
+      const site = String(frontendOrigin() || '').replace(/\/+$/, '');
+      const ref = encodeURIComponent(String(order._id));
+      const body = req.body || {};
+      const result = await provider.createCheckout({
+        order,
+        customer: member ? { name: [member.firstName, member.lastName].filter(Boolean).join(' '), email: member.email, phone: member.phone } : {},
+        returnUrl: `${site}/checkout/success?provider=${provider.id}&order=${ref}&tracker={TRACKER}`,
+        cancelUrl: `${site}/checkout/cancel?order=${ref}`,
+        saveCard: body.saveCard === true,
+        autoPayConsent: body.autoPayConsent === true
+      });
+      return res.status(200).json({
+        success: true,
+        url: result.url,
+        orderId: String(order._id),
+        orderNumber: order.orderNumber,
+        provider: provider.id,
+        reference: result.reference,
+        purpose: result.purpose,
+        amount: result.amount,
+        currency: result.currency,
+        saveCard: result.saveCard
+      });
+    } catch (error) {
+      return fail(res, error, 'Failed to open the payment page');
+    }
+  },
+
+  /**
+   * GET|POST /api/gymfolio/payment/verify/:sessionId
+   *
+   * `sessionId` is a Stripe Checkout session id, or -- for the other
+   * gateways -- the order id the success page was sent back with
+   * (?provider=safepay&order=<id>). For those the answer is the order's own
+   * state (the webhook may have recorded it), else the gateway is asked. With
+   * ?tracker=<reference> it is that one payment that is answered for (a
+   * balance paid on an order that was already paid).
+   */
   async verifyPackagePayment(req, res) {
     try {
       const { sessionId } = req.params;
       if (!sessionId) return res.status(400).json({ success: false, message: 'Session ID is required' });
+      if (/^[a-f\d]{24}$/i.test(sessionId)) {
+        const gatewayOrder = await PackageOrder.findById(sessionId);
+        if (gatewayOrder && gatewayOrder.payment && gatewayOrder.payment.provider && gatewayOrder.payment.provider !== 'stripe') {
+          const payments = require('../../services/payments');
+          const provider = payments.getProvider(gatewayOrder.payment.provider);
+          if (!provider || typeof provider.verifyOrder !== 'function') {
+            return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'We could not find an order for this payment.' });
+          }
+          const tracker = String((req.query && req.query.tracker) || (req.body && req.body.tracker) || '').trim() || null;
+          const { paid, order } = await provider.verifyOrder(gatewayOrder, { reference: tracker });
+          return res.status(200).json({
+            success: paid,
+            paid,
+            order: order
+              ? {
+                  orderNumber: order.orderNumber,
+                  packageId: order.packageId,
+                  packageName: (order.packageDetails && order.packageDetails.name) || '',
+                  amount: order.payment ? order.payment.amount : undefined,
+                  currency: order.payment ? order.payment.currency : undefined,
+                  status: order.status,
+                  provider: gatewayOrder.payment.provider
+                }
+              : null
+          });
+        }
+        if (!gatewayOrder) {
+          // Not a Stripe session either: Stripe ids start cs_.
+          return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'We could not find an order for this payment. If you have paid, contact the gym with your receipt.' });
+        }
+      }
       const { success, paid, order } = await gymfolioPaymentService.verifyPackagePayment(sessionId);
       // Only what the checkout success page shows. Anyone holding the
       // session id can call this -- it sits in the success page's URL, and

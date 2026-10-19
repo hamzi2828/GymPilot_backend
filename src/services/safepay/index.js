@@ -35,6 +35,7 @@ module.exports = {
   storedSafepay,
   handleWebhookEvent: payments.handleWebhookEvent,
   verifyOrderPayment: payments.verifyOrderPayment,
+  verifyTrackerPayment: payments.verifyTrackerPayment,
   applyTrackerPayment: payments.applyTrackerPayment,
   trackerDetails: payments.trackerDetails,
   autoChargeEnabled: payments.autoChargeEnabled,
