@@ -251,3 +251,75 @@ test('a card subscription is not moved onto a package that is paid once, and Str
     h.setStripe(null);
   }
 });
+
+// ---- A membership paid in the gym's old currency -------------------------------
+//
+// The credit is money the member paid in the old order's currency; the new
+// order is priced in the gym's currency today. When the gym has changed
+// currency in Settings since, 600 rupees used to come off as 600 pounds.
+// There is no exchange rate here, so the credit is refused (409
+// CREDIT_CURRENCY_MISMATCH) until the desk confirms giving it up.
+
+async function halfUsedYearPaidIn(code) {
+  const order = await halfUsedYear();
+  await PackageOrder.updateOne({ _id: order._id }, { $set: { 'payment.currency': code } });
+  return order;
+}
+
+test('a credit paid in another currency is not taken off the new price as if it were this one', async () => {
+  await h.inGym(gym, async () => {
+    const order = await halfUsedYearPaidIn('pkr');
+    const res = await change(order, { packageId: String(twoYear._id) });
+
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'CREDIT_CURRENCY_MISMATCH');
+    assert.deepEqual(res.body.details, { credit: 600, price: 0, creditUnused: 600, currency: 'PKR', priceCurrency: 'GBP' });
+    assert.match(res.body.message, /^This membership was paid in PKR, but packages are now sold in GBP, so its PKR 600\.00 of unused days cannot come off the price of Two years\./);
+    assert.match(res.body.message, /refund PKR 600\.00 of this membership and then assign Two years/);
+
+    assert.equal((await PackageOrder.findById(order._id).lean()).status, 'active');
+    assert.equal(await PackageOrder.countDocuments({ renewedFrom: order._id }), 0);
+  });
+});
+
+test('confirmed, the change goes ahead at the full new price and says the other-currency credit was given up', async () => {
+  await h.inGym(gym, async () => {
+    const order = await halfUsedYearPaidIn('pkr');
+    const res = await change(order, { packageId: String(twoYear._id), forfeitCredit: true });
+
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.equal(res.body.credit, 0);
+    assert.equal(res.body.creditUnused, 600);
+    assert.equal(res.body.creditCurrency, 'PKR');
+    assert.equal(
+      res.body.message,
+      'Package changed. The PKR 600.00 of unused days was paid in PKR and could not come off a GBP price, so it was given up, as confirmed. The new membership comes to GBP 2000.00.'
+    );
+    assert.equal(res.body.data.payment.currency, 'gbp');
+    assert.equal(res.body.data.payment.amount, 2000);
+    assert.equal(res.body.data.payment.discountAmount, 0);
+    const old = await PackageOrder.findById(order._id).lean();
+    assert.match(old.cancellation.reason, /; PKR 600\.00 of unused credit given up \(paid in PKR\)$/);
+  });
+});
+
+test('the credit refusal names the money in the gym\'s currency code, even on an order that recorded none', async () => {
+  await h.inGym(gym, async () => {
+    const order = await halfUsedYearPaidIn('');
+    const res = await change(order, { packageId: String(monthly._id) });
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'CREDIT_EXCEEDS_PRICE');
+    assert.equal(res.body.details.currency, 'GBP');
+    assert.match(res.body.message, /GBP 600\.00 of unused days already paid for, but Monthly costs only GBP 120\.00/);
+  });
+});
+
+test('a same-currency change answers in that currency as before', async () => {
+  await h.inGym(gym, async () => {
+    const order = await halfUsedYear();
+    const res = await change(order, { packageId: String(twoYear._id) });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.equal(res.body.creditCurrency, 'GBP');
+    assert.equal(res.body.credit, 600);
+  });
+});

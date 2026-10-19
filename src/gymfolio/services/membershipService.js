@@ -1824,10 +1824,28 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     return { order, previous: null, credit: null };
   }
 
-  const { applied, unused } = creditAgainst(credit, parseAmount(pkg.price));
+  // The new order is priced in the gym's currency today; the credit is money
+  // paid in the old order's. When the two differ (the gym changed currency
+  // in Settings since) the numbers cannot be set against each other -- 6000
+  // rupees is not 6000 pounds off -- and there is no exchange rate here.
+  const settings = await Settings.getSettings().catch(() => null);
+  const currency = resolveCurrency(pkg.currency, settings && settings.currency);
+  const paidIn = String(order.payment.currency || '').toUpperCase() || currency;
+  const sum = (n, code = currency) => `${code} ${n.toFixed(2)}`.trim();
+  const otherCurrency = credit > 0 && paidIn !== currency;
+  if (otherCurrency && !forfeitCredit) {
+    const refusal = new MembershipError(
+      `This membership was paid in ${paidIn}, but packages are now sold in ${currency}, so its ${sum(credit, paidIn)} of unused days cannot come off the price of ${pkg.name}. ` +
+        `To give the money back, refund ${sum(credit, paidIn)} of this membership and then assign ${pkg.name}. To change anyway and give up the ${sum(credit, paidIn)}, confirm the change.`,
+      409,
+      'CREDIT_CURRENCY_MISMATCH'
+    );
+    refusal.details = { credit, price: 0, creditUnused: credit, currency: paidIn, priceCurrency: currency };
+    throw refusal;
+  }
+
+  const { applied, unused } = otherCurrency ? { applied: 0, unused: credit } : creditAgainst(credit, parseAmount(pkg.price));
   if (unused > 0 && !forfeitCredit) {
-    const currency = String(order.payment.currency || '').toUpperCase();
-    const sum = (n) => `${currency} ${n.toFixed(2)}`.trim();
     const refusal = new MembershipError(
       `This member has ${sum(credit)} of unused days already paid for, but ${pkg.name} costs only ${sum(applied)}: ${sum(unused)} would be lost. ` +
         `To give the money back, refund ${sum(credit)} of this membership and then assign ${pkg.name}. To change anyway and give up the ${sum(unused)}, confirm the change.`,
@@ -1837,7 +1855,8 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
     refusal.details = { credit, price: applied, creditUnused: unused, currency };
     throw refusal;
   }
-  const givenUp = unused > 0 ? `${unused} of unused credit given up` : '';
+  let givenUp = '';
+  if (unused > 0) givenUp = otherCurrency ? `${sum(unused, paidIn)} of unused credit given up (paid in ${paidIn})` : `${unused} of unused credit given up`;
 
   const replacement = await createManualOrder({
     user,
@@ -1869,7 +1888,9 @@ async function changePackage(order, { packageId, paymentMethod = 'cash', markPai
   };
   await order.save();
 
-  return { order: replacement, previous: order, credit: applied, creditUnused: unused };
+  // `creditCurrency`: what the credit (and so creditUnused) is money in --
+  // the old order's currency, the new one's unless the gym changed it.
+  return { order: replacement, previous: order, credit: applied, creditUnused: unused, creditCurrency: paidIn };
 }
 
 /* ------------------------------- sessions ------------------------------ */

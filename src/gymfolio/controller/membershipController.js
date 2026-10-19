@@ -304,7 +304,14 @@ module.exports = {
   // When they are worth more than the new package the change is refused
   // (409 CREDIT_EXCEEDS_PRICE, `details: { credit, price, creditUnused,
   // currency }`) until the desk sends `forfeitCredit: true`; the answer then
-  // says what was credited (`credit`) and what was given up (`creditUnused`).
+  // says what was credited (`credit`) and what was given up (`creditUnused`),
+  // both money in `creditCurrency`.
+  //
+  // A membership paid in another currency than packages are sold in now
+  // (the gym changed it in Settings) cannot have its unused days taken off
+  // the new price at all: 409 CREDIT_CURRENCY_MISMATCH, `details: { credit,
+  // price: 0, creditUnused, currency (the old one), priceCurrency }`, until
+  // `forfeitCredit: true` gives the credit up.
   changePackage: async (req, res) => {
     try {
       const order = await PackageOrder.findById(req.params.id);
@@ -321,20 +328,31 @@ module.exports = {
       });
       if (result.order.payment.status === 'paid' && result.previous) tell('membershipConfirmed', result.order);
       const currency = String(result.order.payment.currency || '').toUpperCase();
-      const sum = (n) => `${currency} ${Number(n || 0).toFixed(2)}`;
+      const sum = (n, code = currency) => `${code} ${Number(n || 0).toFixed(2)}`;
+      // The credit is money in the old order's currency; it differs from the
+      // new order's only when the gym changed currency since (409
+      // CREDIT_CURRENCY_MISMATCH until confirmed), and then none of it came off.
+      const creditCurrency = result.creditCurrency || currency;
+      let message = 'Subscription switched; Stripe will prorate the difference.';
+      if (result.credit !== null && creditCurrency !== currency) {
+        message =
+          `Package changed. The ${sum(result.creditUnused, creditCurrency)} of unused days was paid in ${creditCurrency} and could not come off a ${currency} price, ` +
+          `so it was given up, as confirmed. The new membership comes to ${sum(result.order.payment.amount)}.`;
+      } else if (result.credit !== null) {
+        message =
+          `Package changed. ${sum(result.credit)} credited for unused days` +
+          `${result.creditUnused > 0 ? `; the other ${sum(result.creditUnused)} was given up, as confirmed` : ''}. ` +
+          `The new membership comes to ${sum(result.order.payment.amount)}.`;
+      }
       return res.status(201).json({
         success: true,
         // Exactly what was done with the credit, and what the new order costs.
-        message:
-          result.credit !== null
-            ? `Package changed. ${sum(result.credit)} credited for unused days` +
-              `${result.creditUnused > 0 ? `; the other ${sum(result.creditUnused)} was given up, as confirmed` : ''}. ` +
-              `The new membership comes to ${sum(result.order.payment.amount)}.`
-            : 'Subscription switched; Stripe will prorate the difference.',
+        message,
         data: result.order,
         previous: result.previous,
         credit: result.credit,
-        creditUnused: result.credit !== null ? result.creditUnused : null
+        creditUnused: result.credit !== null ? result.creditUnused : null,
+        creditCurrency: result.credit !== null ? creditCurrency : null
       });
     } catch (error) {
       return fail(res, error);
