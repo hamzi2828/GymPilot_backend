@@ -126,7 +126,7 @@ const asStaff = (user, gym, sentTo = gym) => ({
   Authorization: `Bearer ${staffToken(user, gym)}`
 });
 
-const makeCode = (user, gym) => send('POST', '/api/desk-link/codes', { headers: asStaff(user, gym) });
+const makeCode = (user, gym, body) => send('POST', '/api/desk-link/codes', { headers: asStaff(user, gym), body });
 
 // The Windows app: no gym named, no session.
 const redeem = (code, extra = {}) =>
@@ -232,12 +232,17 @@ test('an expired code is refused in plain words', async () => {
   assert.match(res.body.message, /expired — get a new one in your admin panel/);
 });
 
-test('an account without the front-desk grant cannot make a code; an administrator has it switched on', async () => {
+test('an account without the front-desk grant cannot make a code; an administrator has it switched on only once they confirm', async () => {
   const before = await DeskLinkCode.countDocuments({});
   const refused = await makeCode(tom, gymA);
   assert.equal(refused.status, 403);
   assert.equal(refused.body.code, 'DESK_APP_NOT_ALLOWED');
   assert.match(refused.body.message, /Staff page/);
+  // Asking for the grant is no way round it for anyone but an administrator.
+  const selfGrant = await makeCode(tom, gymA, { grant_desk_access: true });
+  assert.equal(selfGrant.status, 403);
+  assert.equal(selfGrant.body.code, 'DESK_APP_NOT_ALLOWED');
+  assert.ok(!(await h.inGym(gymA, () => User.findById(tom._id).lean())).allowAttendanceApp);
   assert.equal(await DeskLinkCode.countDocuments({}), before);
 
   // The page knows before the button is pressed.
@@ -250,12 +255,35 @@ test('an account without the front-desk grant cannot make a code; an administrat
   assert.equal(ownerPage.body.data.can_link, true);
   assert.equal(ownerPage.body.data.grants_access_on_link, true);
 
-  const first = await makeCode(ownerA, gymA);
+  // An administrator without the grant is asked first: no code, no grant.
+  for (const body of [undefined, {}, { grant_desk_access: 'true' }, { grant_desk_access: 1 }]) {
+    const asked = await makeCode(ownerA, gymA, body);
+    assert.equal(asked.status, 409, JSON.stringify(asked.body));
+    assert.deepEqual(asked.body, {
+      success: false,
+      code: 'DESK_PERMISSION_REQUIRED',
+      message: 'Your account is not allowed to run the desk app yet.'
+    });
+  }
+  assert.ok(!(await h.inGym(gymA, () => User.findById(ownerA._id).lean())).allowAttendanceApp);
+  assert.equal(await DeskLinkCode.countDocuments({}), before);
+
+  // Confirmed: switched on, recorded, and the code made.
+  const first = await makeCode(ownerA, gymA, { grant_desk_access: true });
   assert.equal(first.status, 201, JSON.stringify(first.body));
   assert.equal(first.body.data.granted_app_access, true);
   assert.equal((await h.inGym(gymA, () => User.findById(ownerA._id).lean())).allowAttendanceApp, true);
   const second = await makeCode(ownerA, gymA);
+  assert.equal(second.status, 201, 'once on, nothing to confirm');
   assert.equal(second.body.data.granted_app_access, false);
+
+  let granted = [];
+  for (let i = 0; i < 50 && !granted.length; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    granted = await PlatformAuditLog.find({ gymId: gymA._id, action: 'desk_link.desk_access_granted' }).lean();
+  }
+  assert.equal(granted.length, 1);
+  assert.equal(granted[0].meta.userId, String(ownerA._id));
 
   const linked = await redeem(second.body.data.code);
   assert.equal(linked.status, 200, JSON.stringify(linked.body));
@@ -280,7 +308,7 @@ test('gyms are kept apart: a session from one gym cannot make codes at another, 
   assert.equal(crossed.status, 401);
   assert.equal(crossed.body.code, 'TOKEN_WRONG_GYM');
 
-  const { code } = (await makeCode(ownerB, gymB)).body.data;
+  const { code } = (await makeCode(ownerB, gymB, { grant_desk_access: true })).body.data;
   const linked = await redeem(code);
   assert.equal(linked.status, 200, JSON.stringify(linked.body));
   assert.equal(linked.body.gym.slug, 'link-gym-b');

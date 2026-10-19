@@ -200,8 +200,10 @@ async function overview(req, res) {
       success: true,
       data: {
         can_link: canLink,
-        // An administrator without the grant gets it switched on with their
-        // first code; the page says so before they press the button.
+        // An administrator without the grant can switch it on with their
+        // first code, once they confirm it (createCode's 409
+        // DESK_PERMISSION_REQUIRED); the page can say so before they press
+        // the button.
         grants_access_on_link: isAdmin && !account.allowAttendanceApp,
         not_allowed_reason: canLink ? null : NOT_ALLOWED,
         code_minutes: CODE_MINUTES,
@@ -241,14 +243,31 @@ async function createCode(req, res) {
       });
     }
 
-    // The owner who presses "Get link code" means to use the desk: an
-    // administrator without the front-desk grant has it switched on here,
-    // rather than being sent to the Staff page to grant it to themselves
-    // (which they are allowed to do anyway). Recorded, and said on screen.
+    // An administrator without the front-desk grant may switch it on for
+    // themselves here (they could on the Staff page anyway) -- but only when
+    // they say so: the grant lets the account run a front-desk PC, so the page
+    // asks first (409 DESK_PERMISSION_REQUIRED) and sends the request again
+    // with `grant_desk_access: true`. Recorded, and said on screen.
     let grantedAppAccess = false;
     if (isAdmin && !account.allowAttendanceApp) {
+      if (!(req.body && req.body.grant_desk_access === true)) {
+        return res.status(409).json({
+          success: false,
+          code: 'DESK_PERMISSION_REQUIRED',
+          message: 'Your account is not allowed to run the desk app yet.'
+        });
+      }
       await User.updateOne({ _id: account._id }, { $set: { allowAttendanceApp: true } });
       grantedAppAccess = true;
+      PlatformAuditLog.record({
+        action: 'desk_link.desk_access_granted',
+        actorEmail: account.email || account.username || '',
+        gymId: gym._id,
+        gymSlug: gym.slug,
+        meta: { userId: String(account._id) },
+        ip: clientIp(req)
+      });
+      auditInGym(req, account, { action: 'Desk app access switched on for own account', allowAttendanceApp: true });
     }
 
     // Keep at most MAX_ACTIVE_CODES waiting per account: the newest ones.
