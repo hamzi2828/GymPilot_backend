@@ -258,13 +258,17 @@ test('a retry after the gym exists links it and never makes a second', async () 
     orphan.restore();
   }
 
-  // Set up by hand from the panel before the payment landed: the panel invited them.
-  const byHand = webhookWorld({ signup: signupRecord({ gymId: gym._id }), gymById: gym });
-  try {
-    await handlePlatformStripeEvent(signupEvent(signup._id), stripeSaying('trialing'));
-    assert.equal(readySet(byHand.calls).$set['signup.inviteSent'], true);
-  } finally {
-    byHand.restore();
+  // Set up by hand from the panel before the payment landed: the panel
+  // invited them then, and recorded whether that email went. That answer is
+  // kept -- never assumed to have gone.
+  for (const went of [true, false]) {
+    const byHand = webhookWorld({ signup: signupRecord({ gymId: gym._id }, { inviteSent: went }), gymById: gym });
+    try {
+      await handlePlatformStripeEvent(signupEvent(signup._id), stripeSaying('trialing'));
+      assert.equal(readySet(byHand.calls).$set['signup.inviteSent'], went);
+    } finally {
+      byHand.restore();
+    }
   }
 });
 

@@ -437,11 +437,12 @@ async function completeSignupCheckout(session, stripe, eventAt) {
       // still finds the gym and comes back here.
       const outcome = await applyCheckoutToGym(gym, session, subscription, eventAt);
       // A signup already marked ready keeps what it recorded. One the panel
-      // set up by hand had its owner invited then. One an earlier delivery
-      // made, then died before recording it, may have died before the
-      // owner's email went: they get a fresh one.
+      // set up by hand had its owner invited then, and keeps whether that
+      // email went (gymsController markRequestConverted). One an earlier
+      // delivery made, then died before recording it, may have died before
+      // the owner's email went: they get a fresh one.
       const alreadyReady = signup.signup && signup.signup.state === 'ready';
-      const inviteSent = alreadyReady ? undefined : signup.gymId ? true : await resendOwnerInvite(gym);
+      const inviteSent = alreadyReady ? undefined : signup.gymId ? !!(signup.signup && signup.signup.inviteSent) : await resendOwnerInvite(gym);
       await markReady(signup, gym, { subscription, subscriptionId, customerId, inviteSent });
       return { gym, result: `signup linked to ${gym.slug}: ${outcome.result}` };
     }

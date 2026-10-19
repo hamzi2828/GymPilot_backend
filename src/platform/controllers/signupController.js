@@ -198,7 +198,12 @@ function marketingOrigin(req) {
 function statusView(doc) {
   const s = doc.signup || {};
   const state = s.state || 'awaiting_payment';
-  const data = { status: state, message: STATUS_MESSAGES[state] || STATUS_MESSAGES.awaiting_payment };
+  const data = {
+    status: state,
+    message: STATUS_MESSAGES[state] || STATUS_MESSAGES.awaiting_payment,
+    // Only true once the owner's set-password email has actually gone.
+    inviteSent: state === 'ready' && s.inviteSent === true
+  };
   if (state === 'failed' && s.gaveUpAt) data.message = GAVE_UP;
   if (state === 'ready') {
     if (!s.inviteSent) data.message = READY_NO_EMAIL;

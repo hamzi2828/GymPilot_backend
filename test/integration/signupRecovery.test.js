@@ -221,13 +221,31 @@ test('the success page sets a stuck signup going again, once, however often it a
 
   const first = await ask();
   assert.equal(first.body.data.status, 'provisioning');
+  assert.equal(first.body.data.inviteSent, false);
   await ask();
   await ask();
 
   assert.ok(await eventually(async () => (await DemoRequest.findById(signup._id).lean()).signup.state === 'ready'), 'set up in the background');
   const after = await DemoRequest.findById(signup._id).lean();
   assert.equal(after.signup.recoveryAttempts, 1, 'polling ran it once');
-  assert.equal((await ask()).body.data.status, 'ready');
+  const ready = (await ask()).body.data;
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.inviteSent, true, 'the set-password email went');
+});
+
+test('the success page says when the set-password email did not go', async () => {
+  const signup = await stuckSignup('no-mail');
+  h.setEmailFailure('Invalid login: 535 Authentication failed');
+  try {
+    const outcome = await signupProvisioning.recoverSignup(signup._id);
+    assert.equal(outcome.outcome, 'ready', JSON.stringify(outcome));
+  } finally {
+    h.setEmailFailure(null);
+  }
+  const status = await h.call(signupController.status, { params: { id: String(signup._id) } });
+  assert.equal(status.body.data.status, 'ready');
+  assert.equal(status.body.data.inviteSent, false);
+  assert.match(status.body.data.message, /did not go out/);
 });
 
 test('still stuck after a few retries, the admins hear once; after days, it is given up on', async () => {

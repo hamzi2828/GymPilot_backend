@@ -97,9 +97,12 @@ async function loadGym(id) {
  * the gym, so the Demo requests page shows where it went. The gym already
  * exists by now, so a problem here is a warning, never a failure.
  *
+ * A self-serve signup also keeps whether the owner's set-password email went
+ * (`inviteSent`): its buyer's status page says so when the payment lands.
+ *
  * @returns {Promise<{request: {id, status, gymId}|null, warning: string|null}>}
  */
-async function markRequestConverted(requestId, gym, superAdmin) {
+async function markRequestConverted(requestId, gym, superAdmin, { inviteSent = false } = {}) {
   if (!requestId) return { request: null, warning: null };
   const lost = 'The request this gym was set up from no longer exists, so it was not marked converted';
   if (!mongoose.Types.ObjectId.isValid(String(requestId))) return { request: null, warning: lost };
@@ -110,6 +113,7 @@ async function markRequestConverted(requestId, gym, superAdmin) {
       { new: true }
     );
     if (!doc) return { request: null, warning: lost };
+    if (doc.kind === 'signup') await DemoRequest.updateOne({ _id: doc._id, kind: 'signup', 'signup.state': { $ne: 'ready' } }, { $set: { 'signup.inviteSent': !!inviteSent } });
     return { request: { id: String(doc._id), status: doc.status, gymId: String(gym._id) }, warning: null };
   } catch (error) {
     return { request: null, warning: `The request this gym was set up from could not be marked converted: ${error.message}` };
@@ -252,7 +256,7 @@ module.exports = {
         enforceDatabasePolicy: true,
         requireSite: true
       });
-      const converted = await markRequestConverted(body.demoRequestId, gym, req.superAdmin);
+      const converted = await markRequestConverted(body.demoRequestId, gym, req.superAdmin, { inviteSent: !!(ownerInvite && ownerInvite.sent) });
       if (converted.warning) warnings.push(converted.warning);
       audit(req, 'gym_created', gym, {
         slug: gym.slug,
@@ -664,6 +668,11 @@ module.exports = {
   // password changes: the owner is emailed a set-password link instead --
   // "resend the invite". Either way the link is sent; the answer says
   // whether it went, and a delivery problem is a warning, not a failure.
+  //
+  // When the email did not go: data.inviteError says why, and -- for a
+  // resend, where no password was typed -- data.setPasswordLink is the link
+  // itself, still working, for the super admin to pass on another way. It is
+  // in this answer only: never logged or audited.
   resetOwnerPassword: async (req, res) => {
     try {
       const gym = await loadGym(req.params.id);
@@ -707,12 +716,25 @@ module.exports = {
 
         let invite;
         try {
-          invite = await sendOwnerInvite({ gym: target, email: user.email, siteUrl: inviteSiteUrlFor(target), resend: true });
+          // A typed password is already a way in; only a resend needs the link.
+          invite = await sendOwnerInvite({ gym: target, email: user.email, siteUrl: inviteSiteUrlFor(target), resend: true, handOverLink: password === null });
         } catch (error) {
           invite = { sent: false, error: error.message };
         }
-        return { created, email: user.email, passwordSet: password !== null, inviteSent: !!invite.sent, inviteError: invite.error || null };
+        return {
+          created,
+          email: user.email,
+          passwordSet: password !== null,
+          inviteSent: !!invite.sent,
+          inviteError: invite.error || null,
+          setPasswordLink: !invite.sent && password === null ? invite.link || null : null
+        };
       });
+      // A gym that came from a self-serve signup: the panel's demo request
+      // page, and the buyer's status page, stop saying the email never went.
+      if (result.inviteSent) {
+        await DemoRequest.updateOne({ gymId: gym._id, kind: 'signup', 'signup.inviteSent': { $ne: true } }, { $set: { 'signup.inviteSent': true } }).catch(() => null);
+      }
 
       audit(req, password !== null ? 'gym_owner_password_reset' : 'gym_owner_invite_sent', gym, {
         email,
@@ -721,8 +743,15 @@ module.exports = {
       });
       return res.json({
         success: true,
-        // inviteError: why the email did not go (null when it did).
-        data: { created: result.created, email: result.email, passwordSet: result.passwordSet, inviteSent: result.inviteSent, inviteError: result.inviteSent ? null : result.inviteError || 'email could not be sent' },
+        data: {
+          created: result.created,
+          email: result.email,
+          passwordSet: result.passwordSet,
+          inviteSent: result.inviteSent,
+          // Why the email did not go (null when it did).
+          inviteError: result.inviteSent ? null : result.inviteError || 'email could not be sent',
+          setPasswordLink: result.setPasswordLink
+        },
         warnings: result.inviteSent ? [] : ['Owner email could not be sent']
       });
     } catch (error) {

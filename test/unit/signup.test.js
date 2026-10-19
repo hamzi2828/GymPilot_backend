@@ -213,8 +213,9 @@ test('in production, with nowhere configured for Stripe to send the buyer back t
 
 test('the status says where it has got and nothing personal; the address only once ready', () => {
   const waiting = controller.statusView({ signup: { state: 'awaiting_payment', siteUrl: '' } });
-  assert.deepEqual(Object.keys(waiting).sort(), ['message', 'status']);
+  assert.deepEqual(Object.keys(waiting).sort(), ['inviteSent', 'message', 'status']);
   assert.equal(waiting.status, 'awaiting_payment');
+  assert.equal(waiting.inviteSent, false);
 
   const failed = controller.statusView({ signup: { state: 'failed', error: 'E11000 duplicate key', siteUrl: 'https://x.gympilot.test' } });
   assert.equal(failed.status, 'failed');
@@ -226,9 +227,14 @@ test('the status says where it has got and nothing personal; the address only on
   assert.equal(ready.siteUrl, 'https://ironworks.gympilot.test');
   assert.equal(ready.trialEndsAt, trialEnd);
   assert.match(ready.message, /Check your email/);
+  assert.equal(ready.inviteSent, true, 'the buyer is pointed at their inbox');
 
-  const noEmail = controller.statusView({ signup: { state: 'ready', siteUrl: 'https://ironworks.gympilot.test', inviteSent: false } });
-  assert.match(noEmail.message, /did not go out/);
+  // Not sent, or never recorded: false, and the page says the team will send it.
+  for (const inviteSent of [false, undefined]) {
+    const noEmail = controller.statusView({ signup: { state: 'ready', siteUrl: 'https://ironworks.gympilot.test', inviteSent } });
+    assert.match(noEmail.message, /did not go out/);
+    assert.equal(noEmail.inviteSent, false);
+  }
 
   // Given up on: still failed, but the buyer is told the subscription is cancelled.
   const gaveUp = controller.statusView({ signup: { state: 'failed', gaveUpAt: new Date(), error: 'E11000' } });

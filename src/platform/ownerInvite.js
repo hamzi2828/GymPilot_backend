@@ -72,9 +72,12 @@ function ownerInviteEmail({ gymName, email, siteUrl, link, firstName, resend, va
  * @param {string} args.email     the owner's address inside the gym
  * @param {string} args.siteUrl   the gym's website origin
  * @param {boolean} [args.resend] true from "resend invite" -- changes the wording only
- * @returns {Promise<{sent: boolean, error?: string}>}
+ * @param {boolean} [args.handOverLink] when the email does not go, keep the
+ *   link working and return it as `link`, for a super admin to pass on by
+ *   hand. Only for an answer to that super admin: never logged, never stored.
+ * @returns {Promise<{sent: boolean, error?: string, link?: string}>}
  */
-async function sendOwnerInvite({ gym, email, siteUrl, resend = false }) {
+async function sendOwnerInvite({ gym, email, siteUrl, resend = false, handOverLink = false }) {
   const address = String(email || '').toLowerCase().trim();
   if (!address) return { sent: false, error: 'No owner email' };
 
@@ -86,11 +89,12 @@ async function sendOwnerInvite({ gym, email, siteUrl, resend = false }) {
   user.passwordResetExpiresAt = new Date(Date.now() + INVITE_TTL_HOURS * 60 * 60 * 1000);
   await user.save();
 
+  const link = setPasswordLink(siteUrl, token, address);
   const { subject, html } = ownerInviteEmail({
     gymName: gym.name,
     email: address,
     siteUrl,
-    link: setPasswordLink(siteUrl, token, address),
+    link,
     firstName: user.firstName,
     resend,
     validHours: INVITE_TTL_HOURS
@@ -104,13 +108,16 @@ async function sendOwnerInvite({ gym, email, siteUrl, resend = false }) {
   }
 
   if (!result || !result.success) {
-    // A live token nobody received is only a liability; clear it, as
-    // forgot-password does, and say so.
+    const reason = (result && result.error) || 'email could not be sent';
+    // The reason only: the link opens the owner's account.
+    console.error(`[platform] owner invite to ${address} failed: ${reason}`);
+    // Handed to the super admin who asked, the link has somebody to receive
+    // it after all. Otherwise a live token nobody received is only a
+    // liability; clear it, as forgot-password does, and say so.
+    if (handOverLink) return { sent: false, error: reason, link };
     user.passwordResetTokenHash = null;
     user.passwordResetExpiresAt = null;
     await user.save().catch(() => {});
-    const reason = (result && result.error) || 'email could not be sent';
-    console.error(`[platform] owner invite to ${address} failed: ${reason}`);
     return { sent: false, error: reason };
   }
 
