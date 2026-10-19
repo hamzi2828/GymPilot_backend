@@ -20,7 +20,6 @@ const assert = require('node:assert/strict');
 const Gym = require('../../src/platform/models/gymModel');
 const provisioning = require('../../src/platform/provisioning');
 const platformBilling = require('../../src/platform/services/platformBilling');
-const backupJobs = require('../../src/services/backupJobs');
 const MemberDirectory = require('../../src/platform/models/memberDirectoryModel');
 const tenantStats = require('../../src/platform/tenantStats');
 const gymFiles = require('../../src/platform/services/gymFiles');
@@ -76,12 +75,6 @@ function deletionWorld({ cancel = async () => ({ status: 'canceled', amountPaid:
       }
     }),
     stub(tenantStats, { countCardSubscriptions: async () => cardSubscriptions }),
-    stub(backupJobs, {
-      removeGymBackups: async () => {
-        order.push('backups removed');
-        return { removed: 0, left: 0 };
-      }
-    }),
     stub(MemberDirectory, {
       deleteMany: async (filter) => {
         order.push('sign-in names removed');
@@ -100,7 +93,7 @@ function deletionWorld({ cancel = async () => ({ status: 'canceled', amountPaid:
 }
 
 // What goes once the gym's record has: every deletion ends with these.
-const AFTERWARDS = ['record deleted', 'backups removed', 'sign-in names removed'];
+const AFTERWARDS = ['record deleted', 'sign-in names removed'];
 
 test('deleting a gym cancels its card subscription before the gym goes', async () => {
   const world = deletionWorld();
@@ -109,6 +102,7 @@ test('deleting a gym cancels its card subscription before the gym goes', async (
     assert.deepEqual(world.order, ['cancel sub_1', ...AFTERWARDS]);
     assert.equal(result.deleted, true);
     assert.deepEqual(result.billing, { subscriptionId: 'sub_1', cancelled: true, amountPaid: 8000, currency: 'PKR' });
+    assert.deepEqual(Object.keys(result), ['deleted', 'databaseDropped', 'billing', 'memberLoginsRemoved', 'filesRemoved']);
   } finally {
     world.restore();
   }
@@ -153,7 +147,7 @@ test('a deleted gym\'s files are removed by its own prefix, page by page, and ne
   const removed = [];
   const pages = {
     undefined: { blobs: [{ url: 'https://s/iron-works/members/a.pdf' }, { url: 'https://s/iron-works/payment-proofs/b.png' }], hasMore: true, cursor: 'next' },
-    next: { blobs: [{ url: 'https://s/iron-works/backups/c' }], hasMore: false }
+    next: { blobs: [{ url: 'https://s/iron-works/settings/c.png' }], hasMore: false }
   };
   const restore = stub(gymFiles.store, {
     configured: () => true,

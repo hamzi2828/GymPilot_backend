@@ -172,9 +172,8 @@ app.use(cors({
 //
 // The size limit is for what the API is actually sent as JSON or a form:
 // records, settings, a page of text. Nothing larger travels that way --
-// files are multipart and have their own limits (helper/upload.js), a CSV
-// import is a file, and a backup to restore goes straight to the store and
-// arrives here as a URL. The old 50 MB applied to every route, signed in or
+// files are multipart and have their own limits (helper/upload.js), and a
+// CSV import is a file. The old 50 MB applied to every route, signed in or
 // not, so anyone could make the server parse 50 MB at a time.
 // ---------------------------------------------------------------------------
 const BODY_LIMIT = '1mb';

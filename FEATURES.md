@@ -36,7 +36,6 @@ setting is on the gym's `settings` document.
 | Daily sales report | `services/dailySales.js`, `controller/reportsController.js` (`GET /admin/reports/daily-sales?from=&to=`; `GET /admin/reports/export/daily-sales` as CSV — totals as the last row — or `?format=xlsx` — a Daily sales sheet with a bold totals row and a By payment method sheet). Every day in the range: new sign-ups (first payments' membership share), renewals (membership share of Stripe's renewals and of the first payment of an order that renewed or replaced another -- a desk renewal or a package change, `renewedFrom` -- as the Overview counts renewals), admission fees, trainer fees, dues collected (instalments, whole), membership refunds given that day (negative), POS sales still paid; the columns add up to the day's total, which is that day's income on the accounts screen. Totals by payment method (memberships, refunds and the till together; cash, card, online card, bank transfer, JazzCash, Easypaisa, other mobile wallet). The split is read from the ledger's payment rows (`admission`, `trainerFee`, `membership`, `kind`, per-payment `method`); a row without it counts wholly as membership money. Gym currency only; other currencies counted and left out | `/admin/reports?tab=daily` | — | `reports` |
 | Website: SEO, map, hours, language, embed, domains | `settings.seo/maps/openingHours/locale`, `platform/vercelDomains.js` | Settings → General → Website; platform panel domains | `/embed/timetable`, JSON-LD, language switcher | `settings` |
 | Gym timezone | the gym's platform record `locale.timezone` (`platform/tenantContext.js` `tenantTimezone()`), the zone every local day is filed in; `GET /settings` and `GET /settings/public` answer it as `ianaTimezone` — the public one for every admin role, so the admin pages' "today" (date pickers and presets: the frontend's `helper/date.ts` `gymDateKey`) is the gym's day wherever the browser is, falling back to the browser's own date until it is known | Settings → General (Timezone) | — | `settings` (to change) |
-| Data & backup | `services/backupService.js` (the archive, both ways), `backupCrypto.js`, `backupStorage.js`, `backupJobs.js`, `platform/models/platformBackupModel.js`, `controller/backupController.js`, `routes/backupRoutes.js` (`POST /api/backups/download` — the whole gym as a streamed `.tar.gz`; `GET /api/backups` — stored backups and whether this server can store them; `POST /api/backups/run` — back up now; `POST /api/backups/:id/download`; restore: `POST /api/backups/uploads` + `/uploads/:id/complete` — a file sent straight to Blob, encrypted in the browser; `POST /api/backups/restore/preview`, `POST /api/backups/restore` — `services/backupRestore.js`), `scripts/backupGym.js` — see SECURITY_AND_DATA.md → *Backups* and *Daily backup* below | Settings → Data & backup | — | `settings` at manage **and** the administrator role |
 | Business details (name, contact, description, social links) | `settings.siteName/contactEmail/mobileNumber/address/siteDescription` and `facebookUrl/instagramUrl/twitterUrl/youtubeUrl/tiktokUrl` — the same names in `PUT /settings`, `GET /settings`, `GET /settings/public` and `services/branding.js`; a social link must be http(s) (a bare `instagram.com/…` gains `https://`), anything else is a `400` | Settings → General → Business | Footer links, contact page, JSON-LD (`siteDescription` stands in for an empty `seo.description`), member app "contact us" | `settings` |
 | PWA | — | — | `manifest.ts`, `public/sw.js` | — |
 | Marketing site + platform panel (plans, gyms, demo requests, self-serve sign-up) | `platform/routes/platformRoutes.js`, `platform/controllers/{gymsController,plansController,demoRequestsController,signupController}.js`, `platform/services/signupProvisioning.js`, `platform/models/demoRequestModel.js` — sign-up in BILLING.md → *Self-serve sign-up* | `GymPilot_marketing` (`/` landing, `/checkout`, `/super-admin` panel) | — | super admin session (public routes under `/api/platform/public`) |
@@ -73,28 +72,6 @@ so a gym left over today is first tomorrow.
   failed, deferred, took_ms } }`. A gym the budget did not reach reads
   `{ skipped: 'time budget used; first in line next run' }` and its slug is in
   `schedule.deferred`.
-
-## Daily backup
-
-`GET/POST /api/jobs/backups` (`Authorization: Bearer <CRON_SECRET>`; Vercel
-Cron calls it daily at 02:00 UTC, `vercel.json`) stores an encrypted backup
-of every active gym (`services/backupJobs.js`, SECURITY_AND_DATA.md →
-*Backups*), paced exactly as the daily job is — the same
-`DAILY_JOB_CONCURRENCY` / `DAILY_JOB_BUDGET_MS`, gyms least recently backed up
-first (`platform_job_runs`, job `backups`), `?dryRun=1` and `?gym=<slug>` as
-above. A gym with a daily backup from the last 20 hours is skipped
-(`{ skipped: 'backed up in the last 20 hours' }`), so a retried or repeated
-call makes no second one; a run that overlaps another still backing the gym
-up skips it too (`{ skipped: 'another run is backing this gym up' }`: a
-per-gym lock in `platform_job_runs`, job `daily-backup`, let go after 15
-minutes if its run was cut off). After each backup the gym's older ones beyond the
-newest `BACKUP_KEEP_DAILY` (default 7) of each kind are deleted from the store
-and the list.
-
-Without `BLOB_READ_WRITE_TOKEN` or `BACKUP_ENCRYPTION_KEY` nothing is stored:
-the answer is `200 { success: true, skipped: '<which one is missing>' }`, and
-Settings → Data & backup shows the owner the same reason and points at the
-download instead.
 
 ## Tests
 

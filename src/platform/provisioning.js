@@ -748,14 +748,12 @@ async function endPlatformBilling(gym, { cancelledByHand = false } = {}) {
  * the `count`) until the caller says it knows
  * (`memberSubscriptionsAcknowledged`).
  *
- * Its stored backups go either way (services/backupJobs.js
- * removeGymBackups): encrypted for this gym's id, nothing could open them
- * again, even for the same data registered anew. So do its usernames in the
- * phone app's sign-in directory (platform_member_logins): they point at a
- * gym id that no longer exists, and would stay taken for ever. Its stored
- * files (services/gymFiles.js) go with the database and stay with it: data
- * kept to be registered again still points at them. The answer says how many
- * of each went, and what the store would not remove.
+ * Its usernames in the phone app's sign-in directory (platform_member_logins)
+ * go either way: they point at a gym id that no longer exists, and would
+ * stay taken for ever. Its stored files (services/gymFiles.js) go with the
+ * database and stay with it: data kept to be registered again still points
+ * at them. The answer says how many of each went, and what the store would
+ * not remove.
  */
 async function deleteGym(
   gym,
@@ -797,8 +795,7 @@ async function deleteGym(
   await Gym.deleteOne({ _id: gym._id });
   invalidateTenantCache();
   // After the gym is gone, so a deletion that fails never costs a live gym
-  // its backups, its members' sign-ins or its files. None of these throw.
-  const backups = await require('../services/backupJobs').removeGymBackups(gym._id);
+  // its members' sign-ins or its files. Neither of these throws.
   const logins = await MemberDirectory.deleteMany({ gymId: gym._id }).catch((error) => {
     console.error(`[platform] could not remove the sign-in names of deleted gym ${gym.slug}:`, error.message);
     return null;
@@ -808,8 +805,6 @@ async function deleteGym(
     deleted: true,
     databaseDropped: !!dropDatabase,
     billing,
-    backupsRemoved: backups.removed,
-    ...(backups.left ? { backupsLeft: backups.left, backupsError: backups.error } : {}),
     memberLoginsRemoved: logins ? logins.deletedCount || 0 : 0,
     ...(logins ? {} : { memberLoginsLeft: true }),
     filesRemoved: files ? files.removed : 0,

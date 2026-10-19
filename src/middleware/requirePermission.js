@@ -1,8 +1,7 @@
 // src/middleware/requirePermission.js
 //
-// The route-level half of the permission system. requireAdmin answers "is this
-// an administrator"; this answers the question roles actually made possible:
-// "may THIS account touch THIS tab, at this depth".
+// The route-level half of the permission system. It answers the question
+// roles made possible: "may THIS account touch THIS tab, at this depth".
 //
 //   router.get('/packages',   auth, requirePermission('packages'), ...)
 //   router.delete('/packages/:id', auth, requirePermission('packages', 'manage'), ...)

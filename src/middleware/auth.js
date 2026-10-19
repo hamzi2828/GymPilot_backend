@@ -53,12 +53,6 @@ function forgetSession(userId) {
   sessions.delete(`${tenantKey()}:${userId}`);
 }
 
-/** Drops the cached state for every account of the gym in context (a restore). */
-function forgetGymSessions() {
-  const prefix = `${tenantKey()}:`;
-  for (const key of sessions.keys()) if (key.startsWith(prefix)) sessions.delete(key);
-}
-
 /**
  * Why this decoded token may no longer be used, or null when it may.
  * Tokens issued before `tv` existed count as version 0. A token that names
@@ -201,6 +195,5 @@ module.exports.tenantMismatch = tenantMismatch;
 module.exports.sessionProblem = sessionProblem;
 module.exports.forgetSession = forgetSession;
 module.exports.newSessionId = newSessionId;
-module.exports.forgetGymSessions = forgetGymSessions;
 module.exports.memberAppRefusal = memberAppRefusal;
 module.exports.MEMBER_APP_CLAIM = MEMBER_APP_CLAIM;

@@ -23,12 +23,10 @@ none of it is code.
 | `FINGERPRINT_ENCRYPTION_KEY` | if already set: **leave as it is**; if unset: the **current** `JWT_SECRET` value, copied | Encrypts fingerprint and face templates at rest, falling back to `JWT_SECRET` while unset. Existing templates were encrypted with whichever secret was in effect when they were enrolled; changing it makes them all unreadable (`/api/desktop/templates` and `/api/desktop/face-templates` then count them as `unreadable`, and every enrolled person must be enrolled again). Copying today's `JWT_SECRET` in keeps them readable and decouples them from it. |
 | `JWT_SECRET` | **do not rotate** until the two keys above are set | Rotating it signs everyone out — and, while `SETTINGS_ENCRYPTION_KEY` or `FINGERPRINT_ENCRYPTION_KEY` is unset, also makes the data that key protects unreadable. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` | working credentials | The platform's own mail: owner invites, billing notices, super-admin sign-in codes and resets, and every gym that has set no SMTP of its own under Settings → Email. If the mail server rejects them (a `535`), none of that is sent — 2FA codes, password resets and email-confirmation links included — and self-serve sign-up stays off. |
-| `CRON_SECRET` | already set | The daily job now also rolls platform subscriptions, resumes freezes and closes visits nobody checked out of (FEATURES.md → *Daily job*). The daily backup (`/api/jobs/backups`, 02:00 UTC) uses the same secret. |
+| `CRON_SECRET` | already set | The daily job now also rolls platform subscriptions, resumes freezes and closes visits nobody checked out of (FEATURES.md → *Daily job*). |
 | `DAILY_JOB_BUDGET_MS` | `45000` (default) for a 60-second function; `240000` for a 300-second one | How long after the cron fired the daily job still starts new gyms. Gyms already running are left to finish, so keep it below the function's maximum duration by about one gym's run. Gyms not reached are listed under `schedule.deferred` and go first on the next run. |
 | `DAILY_JOB_CONCURRENCY` | `3` (default; 1–10) | Gyms the daily job works on side by side. |
-| `BLOB_READ_WRITE_TOKEN` | the Vercel Blob store's read-write token | Vercel has no writable disk: without it every upload fails there ("set BLOB_READ_WRITE_TOKEN"). It is also what lets the admin pages send a file too big for the API straight to the store (`POST /api/uploads/blob`), and where the daily backups are kept. |
-| `BACKUP_ENCRYPTION_KEY` | a fresh random 64-char string, **never changed** once set | Encrypts every stored backup (the Blob store is public). No fallback on purpose: without it the daily backup stores nothing and says so, and owners see "daily backups are not running". Changing it makes every backup stored before unreadable. Keep a copy somewhere other than Vercel: a backup is only as recoverable as its key. |
-| `BACKUP_KEEP_DAILY` | `7` (default; 1–90) | Stored backups kept per gym, of each kind (daily, "back up now", taken before a restore). |
+| `BLOB_READ_WRITE_TOKEN` | the Vercel Blob store's read-write token | Vercel has no writable disk: without it every upload fails there ("set BLOB_READ_WRITE_TOKEN"). It is also what lets the admin pages send a file too big for the API straight to the store (`POST /api/uploads/blob`). |
 | `UPLOAD_MAX_FILE_SIZE_MB` / `UPLOAD_MAX_VIDEO_SIZE_MB` | `5` / `100` (defaults) | Per-file ceilings for images and videos through the API. On Vercel anything sent through the API stops at **4 MB** whatever these say (Vercel refuses bodies over 4.5 MB). Bigger files go straight to Blob when the token is set: images up to 20 MB, videos up to `UPLOAD_MAX_VIDEO_SIZE_MB`. |
 
 Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
@@ -37,10 +35,8 @@ Generate secrets with: `node -e "console.log(require('crypto').randomBytes(32).t
 runs with the project's (Vercel → Project → Settings → Functions). Two things
 run long inside one request: the daily job, which paces itself by
 `DAILY_JOB_BUDGET_MS`, and a self-serve sign-up's webhook, which builds a
-whole gym before it answers. The daily backup paces itself by the same
-budget, and a restore (Settings → Data & backup) rewrites a whole gym inside
-one request. Give the function as long as the plan allows and set
-`DAILY_JOB_BUDGET_MS` to match.
+whole gym before it answers. Give the function as long as the plan allows
+and set `DAILY_JOB_BUDGET_MS` to match.
 
 Everything else the API reads, with its default or an example in `.env.example`:
 
@@ -136,34 +132,22 @@ Faces need a desk build with the camera and a webcam on the desk PC.
    platform's Stripe account (§2) are set up: `GET /api/platform/public/config`
    answers `self_serve_signup: true` when they are. Until then checkout sends
    a request to **Demo requests** for you to set up.
-4. Backups: with `BLOB_READ_WRITE_TOKEN` and `BACKUP_ENCRYPTION_KEY` set, the
-   `vercel.json` cron backs up every gym at 02:00 UTC (FEATURES.md → *Daily
-   backup*); check the first run with
-   `curl -H "Authorization: Bearer $CRON_SECRET" "https://<api>/api/jobs/backups?dryRun=1"`.
-   Those copies live in the same Vercel account as everything else, so also
-   run `node scripts/backupGym.js --all --out /some/where` somewhere else now
-   and then (cron or a GitHub Action) — it is the only copy of the platform's
-   own collections. Each gym's owner can download the whole gym at any time
-   from Settings → Data & backup (SECURITY_AND_DATA.md → *Backups*).
 
 ## 6. Deploying this release
 
 **Pushing `main` deploys.** The API's Vercel project is linked to the Git
 repository, so a push to `main` goes to production — there is no separate
-"deploy" step to forget, and none to hold back. Do steps 1–3 below first,
+"deploy" step to forget, and none to hold back. Do steps 1–2 below first,
 with §1 (environment) and §2 (Stripe) already in place: a gym whose
 Settings still hold placeholder Stripe keys cannot take card payments.
 Before pushing, run `npm test` and `npm run test:integration`; in CI set
 `GYMPILOT_INTEGRATION_REQUIRED=1` so an integration suite that cannot start
 fails rather than skips (FEATURES.md → *Tests*).
 
-1. **Backups key.** Set `BACKUP_ENCRYPTION_KEY` (§1) and keep a copy of it
-   somewhere other than Vercel. Never change it afterwards: every backup
-   stored before would be unreadable.
-2. **The platform's email.** Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+1. **The platform's email.** Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
    `SMTP_PASS` and `EMAIL_FROM` to credentials the mail server accepts, and
    check `PLATFORM_ADMIN_ORIGIN` is set (§1).
-3. **Once per gym, from a checkout of this release** with the production
+2. **Once per gym, from a checkout of this release** with the production
    `MONGO_URI` in `.env`. Each is a dry run until `--apply` is added: read
    what it reports, then run it again with `--apply`. All four are safe to
    run twice.
@@ -179,15 +163,15 @@ fails rather than skips (FEATURES.md → *Tests*).
    text, figures and stock photos off gyms created before the defaults were
    rewritten — only where the gym never changed them, and the dry run lists
    each line it would replace.
-4. **Deploy the API**: push `main`.
-5. **Check it.** `GET https://<api>/health` answers `200`.
-   `GET https://<api>/api/jobs/backups` with no `Authorization` header
+3. **Deploy the API**: push `main`.
+4. **Check it.** `GET https://<api>/health` answers `200`.
+   `GET https://<api>/api/jobs/reminders` with no `Authorization` header
    answers `401` (a `503` means `CRON_SECRET` is not set, and no scheduled
-   job will run). Vercel → Project → Settings → Cron Jobs lists two:
-   `/api/jobs/backups` at 02:00 UTC and `/api/jobs/reminders` at 03:00 UTC.
-6. **Deploy the two web apps**, `GymPilot_frontend` and
+   job will run). Vercel → Project → Settings → Cron Jobs lists one:
+   `/api/jobs/reminders` at 03:00 UTC.
+5. **Deploy the two web apps**, `GymPilot_frontend` and
    `GymPilot_marketing`, after the API: they use what this release adds.
-7. Front-desk PCs (§4) in their own time.
+6. Front-desk PCs (§4) in their own time.
 
 ### Rolling back
 
@@ -200,9 +184,8 @@ for one, sends categories an older API refuses.
 Nothing the steps above did needs undoing. What the four scripts wrote is
 ordinary data that older code reads as it is, and the fields this release
 writes (an order's `imported` mark, request ids, email confirmation) are
-simply not looked at by it. Leave the environment variables set — above all
-`BACKUP_ENCRYPTION_KEY`, which must stay exactly as it is for the backups
-already stored. What a rollback does bring back is the old behaviour, until
-this release is deployed again: an imported membership counts as money taken
-on the day it was imported, a punch or an "Add member" sent twice is
-recorded twice, and an account's unconfirmed email is trusted.
+simply not looked at by it. Leave the environment variables set. What a
+rollback does bring back is the old behaviour, until this release is
+deployed again: an imported membership counts as money taken on the day it
+was imported, a punch or an "Add member" sent twice is recorded twice, and
+an account's unconfirmed email is trusted.

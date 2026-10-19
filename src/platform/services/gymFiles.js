@@ -15,7 +15,7 @@
 // removed by prefix -- and provisioning reserves the names, so no new gym
 // gets one.
 const SHARED_FOLDERS = new Set([
-  'uploads', 'backups', 'settings', 'banks', 'trainers', 'members', 'member-documents', 'payment-proofs',
+  'uploads', 'settings', 'banks', 'trainers', 'members', 'member-documents', 'payment-proofs',
   'gym-classes', 'products', 'screenshots', 'home-sections', 'home-videos', 'hero-slides', 'testimonials',
   'blogs', 'blog-hero'
 ]);

@@ -53,10 +53,6 @@ async function main() {
         : `Stripe subscription ${result.billing.subscriptionId} was not cancelled from here (${result.billing.error}); you said it is cancelled already.`
     );
   }
-  console.log(`Stored backups removed: ${result.backupsRemoved}.`);
-  if (result.backupsLeft) {
-    console.log(`${result.backupsLeft} stored backup(s) could not be removed (${result.backupsError}); they are still listed in platform_backups.`);
-  }
   console.log(`Phone app sign-in names removed: ${result.memberLoginsRemoved}.`);
   if (dropDatabase) {
     console.log(`Stored files removed: ${result.filesRemoved}.`);

@@ -1,6 +1,6 @@
 // vercel.json: the API is not something to index, /robots.txt reaches the
 // app (which answers it) instead of a static file that was never deployed,
-// and the two scheduled jobs are as they were.
+// and the one scheduled job is the daily reminders run.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -21,9 +21,6 @@ test('every path, robots.txt included, is routed to the app', () => {
   assert.deepEqual(config.builds, [{ src: 'index.js', use: '@vercel/node' }]);
 });
 
-test('the scheduled jobs are unchanged', () => {
-  assert.deepEqual(config.crons, [
-    { path: '/api/jobs/reminders', schedule: '0 3 * * *' },
-    { path: '/api/jobs/backups', schedule: '0 2 * * *' }
-  ]);
+test('the only scheduled job is the daily reminders run', () => {
+  assert.deepEqual(config.crons, [{ path: '/api/jobs/reminders', schedule: '0 3 * * *' }]);
 });

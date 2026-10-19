@@ -763,8 +763,7 @@ module.exports = {
         memberLoginsRemoved: result.memberLoginsRemoved,
         filesRemoved: result.filesRemoved,
         // What the store would not give up, so there is a trail to clear it by.
-        ...(result.filesLeft ? { filesLeft: true, filesError: result.filesError } : {}),
-        ...(result.backupsLeft ? { backupsLeft: result.backupsLeft } : {})
+        ...(result.filesLeft ? { filesLeft: true, filesError: result.filesError } : {})
       });
 
       return res.json({ success: true, data: result });
