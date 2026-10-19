@@ -49,12 +49,24 @@ const saleSchema = new mongoose.Schema(
     notes: { type: String, default: '', trim: true },
     paidAt: { type: Date, default: Date.now, index: true },
     refundedAt: { type: Date, default: null },
-    refundReason: { type: String, default: '' }
+    refundReason: { type: String, default: '' },
+    // The till's own id for this sale attempt (`request_id`), when it sent
+    // one: the same id again is this sale, not another (posController
+    // createSale). Absent on sales rung up without one.
+    requestId: { type: String }
   },
   {
     timestamps: true,
     collection: 'gym_sales'
   }
+);
+
+// One sale per till request: two copies sent together both find nothing
+// under their id, and this lets only one receipt be written. Only sales that
+// carry an id are indexed.
+saleSchema.index(
+  { requestId: 1 },
+  { unique: true, name: 'one_sale_per_till_request', partialFilterExpression: { requestId: { $type: 'string' } } }
 );
 
 saleSchema.plugin(recordCurrencyDefault);

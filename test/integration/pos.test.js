@@ -441,3 +441,80 @@ test('over HTTP: the sales list and export take the range, and cost follows the 
     assert.ok(!('Profit' in rows[0]));
   });
 });
+
+// ---- A sale sent again (request_id) ----------------------------------------
+//
+// The till sends its own id with each sale attempt and the same id again
+// when it retries. The retry is the sale already rung up -- answered with
+// `repeated: true` -- and never a second receipt, a second stock take or a
+// second movement, even when the copies arrive together.
+
+const sellOnce = (productId, quantity, requestId) =>
+  h.call(pos.createSale, as({ body: { items: [{ productId, quantity }], paymentMethod: 'cash', request_id: requestId } }));
+
+test('a sale sent again with its request_id is the sale already made: one receipt, stock taken once', async () => {
+  await h.inGym(gym, async () => {
+    const shake = await product('Shake', 10, 4);
+    const first = await sellOnce(shake.id, 2, 'till-attempt-0001');
+    assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+    assert.equal(first.body.repeated, undefined);
+
+    const again = await sellOnce(shake.id, 2, 'till-attempt-0001');
+    assert.equal(again.statusCode, 201, JSON.stringify(again.body));
+    assert.equal(again.body.repeated, true);
+    assert.equal(again.body.data.id, first.body.data.id);
+    assert.equal(again.body.data.receipt_number, first.body.data.receipt_number);
+    assert.equal(again.body.message, first.body.message);
+
+    assert.equal(await stockOf(shake.id), 8);
+    assert.equal(await Sale.countDocuments({ 'items.productId': shake.id }), 1);
+    assert.equal(await StockMovement.countDocuments({ productId: shake.id, reason: 'sale' }), 1);
+
+    // A new attempt is a new sale.
+    const next = await sellOnce(shake.id, 1, 'till-attempt-0002');
+    assert.equal(next.body.repeated, undefined);
+    assert.notEqual(next.body.data.id, first.body.data.id);
+    assert.equal(await stockOf(shake.id), 7);
+  });
+});
+
+test('over HTTP: copies of one sale sent together make one sale, and the stock the others took goes back', async () => {
+  const gloves = await h.inGym(gym, () => product('Gloves', 10, 12));
+  const results = await withServer((send) =>
+    Promise.all(Array.from({ length: 5 }, () => send(cashier, 'POST', '/admin/pos/sales', { items: [{ productId: gloves.id, quantity: 2 }], paymentMethod: 'card', request_id: 'till-race-0001' })))
+  );
+  for (const r of results) assert.equal(r.status, 201, r.text);
+  assert.equal(new Set(results.map((r) => r.body.data.receipt_number)).size, 1, 'every copy is answered with the same receipt');
+  assert.equal(results.filter((r) => !r.body.repeated).length, 1);
+  await h.inGym(gym, async () => {
+    assert.equal(await Sale.countDocuments({ 'items.productId': gloves.id }), 1);
+    assert.equal(await stockOf(gloves.id), 8, 'two taken, not ten');
+    assert.equal(await StockMovement.countDocuments({ productId: gloves.id, reason: 'sale' }), 1);
+  });
+});
+
+test('over HTTP: copies of a sale of the last unit are all answered with that sale, not "out of stock"', async () => {
+  const mat = await h.inGym(gym, () => product('Yoga mat', 1, 20));
+  const results = await withServer((send) =>
+    Promise.all(Array.from({ length: 3 }, () => send(cashier, 'POST', '/admin/pos/sales', { items: [{ productId: mat.id, quantity: 1 }], paymentMethod: 'cash', request_id: 'till-race-last-01' })))
+  );
+  for (const r of results) assert.equal(r.status, 201, r.text);
+  assert.equal(new Set(results.map((r) => r.body.data.id)).size, 1);
+  await h.inGym(gym, async () => {
+    assert.equal(await Sale.countDocuments({ 'items.productId': mat.id }), 1);
+    assert.equal(await stockOf(mat.id), 0);
+  });
+});
+
+test('a request_id that is not one is refused and nothing is sold', async () => {
+  await h.inGym(gym, async () => {
+    const bottle = await product('Bottle', 5, 3);
+    for (const requestId of ['short', 'has spaces in it', 'x'.repeat(101), 'dots.not.allowed']) {
+      const res = await sellOnce(bottle.id, 1, requestId);
+      assert.equal(res.statusCode, 400, requestId);
+      assert.match(res.body.message, /^request_id must be 8 to 100 letters, digits, hyphens or underscores/);
+    }
+    assert.equal(await stockOf(bottle.id), 5);
+    assert.equal(await Sale.countDocuments({ 'items.productId': bottle.id }), 0);
+  });
+});

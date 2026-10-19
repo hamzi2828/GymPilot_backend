@@ -35,6 +35,53 @@ const RECEIPT_FOOTER_MAX = 300;
 const SALES_LIST_LIMIT = 500;
 const EXPORT_LIMIT = 20000;
 
+// ---- Sales sent again ----
+//
+// The till may send `request_id` with a sale: its own id for that attempt
+// (a UUID will do), sent again unchanged when it retries -- after a timeout,
+// or a second tap while the first is still saving. A sale already rung up
+// under that id is the answer (`repeated: true`), and nothing is sold, taken
+// from stock or written a second time. A unique index on the id is what
+// settles two copies arriving together. Left out, every sale is new.
+const REQUEST_ID = /^[A-Za-z0-9_-]{8,100}$/;
+// How long a copy refused for stock waits for the first copy's receipt: it
+// may have taken the stock a moment ago and still be writing it.
+const REPEAT_WAIT_MS = 2000;
+const REPEAT_POLL_MS = 100;
+
+function readRequestId(value) {
+  if (value === undefined || value === null || value === '') return { id: undefined };
+  const id = String(value).trim();
+  if (!REQUEST_ID.test(id)) return { problem: 'request_id must be 8 to 100 letters, digits, hyphens or underscores (a UUID will do)' };
+  return { id };
+}
+
+function isRequestIdClash(error) {
+  if (!error || error.code !== 11000) return false;
+  const keys = Object.keys(error.keyPattern || error.keyValue || {});
+  return keys.includes('requestId') || /one_sale_per_till_request/.test(String(error.message || ''));
+}
+
+// The sale already rung up under this id, waiting up to `waitMs` for one
+// that is still being written.
+async function saleMadeBy(requestId, { waitMs = 0 } = {}) {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    const sale = await Sale.findOne({ requestId });
+    if (sale || Date.now() >= until) return sale;
+    await new Promise((resolve) => setTimeout(resolve, REPEAT_POLL_MS));
+  }
+}
+
+function saleAnswer(res, sale, { repeated = false } = {}) {
+  return res.status(201).json({
+    success: true,
+    message: `Receipt ${sale.receiptNumber} · ${sale.currency} ${round(sale.total).toFixed(2)}`,
+    data: saleView(sale),
+    repeated: repeated || undefined
+  });
+}
+
 function fail(res, code, message) {
   return res.status(code).json({ success: false, message });
 }
@@ -356,10 +403,26 @@ module.exports = {
 
   // ---- sales --------------------------------------------------------------------
 
-  // POST /admin/pos/sales   { items: [{productId, quantity}], discount, paymentMethod, tendered, memberId, notes }
+  // POST /admin/pos/sales   { items: [{productId, quantity}], discount, paymentMethod, tendered, memberId, notes, request_id? }
+  //
+  // `request_id` (optional): the till's id for this attempt; sent again, the
+  // answer is the sale already made, with `repeated: true` (see above).
   createSale: async (req, res) => {
     try {
       const b = req.body || {};
+      const { id: requestId, problem } = readRequestId(b.request_id);
+      if (problem) return fail(res, 400, problem);
+      if (requestId) {
+        const first = await saleMadeBy(requestId);
+        if (first) return saleAnswer(res, first, { repeated: true });
+      }
+      // Out of stock for a copy of a sale already made -- or being made
+      // right now, the first copy having just taken the stock -- is that sale.
+      const refuseStock = async (message) => {
+        const first = requestId ? await saleMadeBy(requestId, { waitMs: REPEAT_WAIT_MS }) : null;
+        return first ? saleAnswer(res, first, { repeated: true }) : fail(res, 409, message);
+      };
+
       const wanted = Array.isArray(b.items) ? b.items.filter((i) => i && isId(i.productId) && parseInt(i.quantity, 10) > 0) : [];
       if (!wanted.length) return fail(res, 400, 'Add at least one item');
       if (!METHODS.includes(b.paymentMethod)) return fail(res, 400, `paymentMethod must be one of ${METHODS.join(', ')}`);
@@ -375,7 +438,7 @@ module.exports = {
         const p = byId.get(String(w.productId));
         if (!p) return fail(res, 404, 'One of the products is no longer for sale');
         const qty = parseInt(w.quantity, 10);
-        if (p.trackStock !== false && (p.stock || 0) < qty) return fail(res, 409, `Only ${p.stock || 0} × ${p.name} in stock`);
+        if (p.trackStock !== false && (p.stock || 0) < qty) return refuseStock(`Only ${p.stock || 0} × ${p.name} in stock`);
         const unitPrice = w.unitPrice !== undefined && Number(w.unitPrice) >= 0 ? round(w.unitPrice) : p.price;
         items.push({ productId: p._id, name: p.name, sku: p.sku || '', quantity: qty, unitPrice, unitCost: p.cost || 0, total: round(unitPrice * qty), taxable: p.taxable !== false });
       }
@@ -437,13 +500,20 @@ module.exports = {
           memberName: member ? [member.firstName, member.lastName].filter(Boolean).join(' ') || member.email : '',
           soldBy: actorId(req),
           soldByName: await actorName(req),
-          notes: String(b.notes || '').trim().slice(0, 300)
+          notes: String(b.notes || '').trim().slice(0, 300),
+          ...(requestId ? { requestId } : {})
         });
       } catch (error) {
         for (const t of taken) {
           await Product.updateOne({ _id: t.product._id }, { $inc: { stock: t.quantity } }).catch(() => {});
         }
-        if (error && error.status === 409) return fail(res, 409, error.message);
+        // Another copy of this attempt wrote its receipt first: the stock
+        // this copy took is back, and that sale is the answer.
+        if (requestId && isRequestIdClash(error)) {
+          const first = await saleMadeBy(requestId);
+          if (first) return saleAnswer(res, first, { repeated: true });
+        }
+        if (error && error.status === 409) return refuseStock(error.message);
         throw error;
       }
 
@@ -454,7 +524,7 @@ module.exports = {
         await StockMovement.create({ productId: t.product._id, productName: t.product.name, delta: -t.quantity, stockAfter: t.product.stock, reason: 'sale', saleId: sale._id, note: '', by: actorId(req), byName });
       }
 
-      return res.status(201).json({ success: true, message: `Receipt ${sale.receiptNumber} · ${currency} ${total.toFixed(2)}`, data: saleView(sale) });
+      return saleAnswer(res, sale);
     } catch (error) {
       console.error('[pos] sale failed:', error);
       return fail(res, 500, 'Could not record the sale');
