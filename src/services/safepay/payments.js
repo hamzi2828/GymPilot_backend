@@ -575,7 +575,7 @@ async function chargeSavedMethod({ order: orderOrId, amount, currency, savedMeth
     const refused = error && error.code !== 'SAFEPAY_UNREACHABLE' && error.safepayStatus && error.safepayStatus < 500;
     if (refused) {
       await markTrackerFailed(order, tracker, error.message);
-      return { status: 'failed', tracker, reason: error.message, code: 'CARD_DECLINED' };
+      return { status: 'failed', tracker, reason: error.message, code: error.code === 'SAFEPAY_AUTH_FAILED' ? 'SAFEPAY_AUTH_FAILED' : 'CARD_DECLINED' };
     }
     return { status: 'pending', tracker, reason: 'Safepay did not confirm the charge yet; it will be recorded when it does.', code: 'SAFEPAY_PENDING' };
   }
