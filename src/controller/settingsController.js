@@ -559,16 +559,6 @@ const settingsController = {
         rules.resetRulesCache();
       }
 
-      // Renewal reminders and automatic charges (services/billing/settings.js):
-      // merged over what is stored, and refused whole when a field is unusable.
-      if (req.body.billing !== undefined) {
-        const { readBilling } = require('../services/billing/settings');
-        const stored = await Settings.findOne({ isActive: true }).select('billing').lean();
-        const { value, problem } = readBilling(req.body.billing, stored && stored.billing);
-        if (problem) return res.status(400).json({ success: false, message: problem });
-        updateData.billing = value;
-      }
-
       // Update only provided fields
       if (theme !== undefined) updateData.theme = String(theme).trim();
 

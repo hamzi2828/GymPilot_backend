@@ -250,7 +250,7 @@ test('the card is saved only with consent and with the gym\'s automatic charges 
   // Consent, but the gym has not switched automatic charges on.
   let res = await send('POST', `/api/pay/${token}/checkout`, { body: { saveCard: true, autoPayConsent: true } });
   assert.equal(res.body.save_card, false);
-  await h.inGym(gym, () => Settings.updateOne({}, { $set: { 'billing.autoCharge.enabled': true } }));
+  await h.inGym(gym, () => Settings.collection.updateOne({}, { $set: { 'billing.autoCharge.enabled': true } }));
   try {
     const on = (await send('GET', `/api/pay/${token}`)).body.data;
     assert.equal(on.can_save_card, true);
@@ -266,7 +266,7 @@ test('the card is saved only with consent and with the gym\'s automatic charges 
     assert.equal(stored.metadata.autoPayConsent, 'true');
     assert.ok(!Number.isNaN(Date.parse(stored.metadata.autoPayConsentAt)));
   } finally {
-    await h.inGym(gym, () => Settings.updateOne({}, { $set: { 'billing.autoCharge.enabled': false } }));
+    await h.inGym(gym, () => Settings.collection.updateOne({}, { $set: { 'billing.autoCharge.enabled': false } }));
   }
 });
 
@@ -315,7 +315,7 @@ test('the member\'s own orders carry pay_link_url on the open renewal only, also
 });
 
 test('staff make a link for an unpaid order and send it on the gym\'s billing channels', async () => {
-  await h.inGym(gym, () => Settings.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: true, whatsapp: false, push: true } } }));
+  await h.inGym(gym, () => Settings.collection.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: true, whatsapp: false, push: true } } }));
   h.calls.emails.length = 0;
   texts.length = 0;
   try {
@@ -348,13 +348,13 @@ test('staff make a link for an unpaid order and send it on the gym\'s billing ch
     assert.equal(push.payload.title, 'Iron Gym');
     assert.equal(push.payload.url, `${SITE}/pay/${token}`);
   } finally {
-    await h.inGym(gym, () => Settings.updateOne({}, { $unset: { 'billing.sendVia': 1 } }));
+    await h.inGym(gym, () => Settings.collection.updateOne({}, { $unset: { 'billing.sendVia': 1 } }));
   }
 });
 
 test('the member\'s own preferences are kept: a channel they switched off is not used', async () => {
   await h.inGym(gym, async () => {
-    await Settings.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: true, whatsapp: true, push: true } } });
+    await Settings.collection.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: true, whatsapp: true, push: true } } });
     await User.updateOne({ _id: member._id }, { $set: { 'notificationPreferences.sms': false, 'notificationPreferences.email': false } });
   });
   h.calls.emails.length = 0;
@@ -368,7 +368,7 @@ test('the member\'s own preferences are kept: a channel they switched off is not
     assert.deepEqual(texts.map((t) => t.channel).sort(), ['push', 'sendWhatsApp']);
   } finally {
     await h.inGym(gym, async () => {
-      await Settings.updateOne({}, { $unset: { 'billing.sendVia': 1 } });
+      await Settings.collection.updateOne({}, { $unset: { 'billing.sendVia': 1 } });
       await User.updateOne({ _id: member._id }, { $set: { 'notificationPreferences.sms': true, 'notificationPreferences.email': true } });
     });
   }

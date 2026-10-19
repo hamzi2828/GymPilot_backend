@@ -33,7 +33,7 @@ const PackageOrder = require('../../gymfolio/models/packageOrderModel');
 const Settings = require('../../models/settings');
 const T = require('../../attendance/services/timeUtils');
 const { billingSettings, leadDays } = require('./settings');
-const { activeProvider, canAutoCharge } = require('./provider');
+const { activeProvider, canAutoCharge, canCheckout } = require('./provider');
 const { activeBanks } = require('./banks');
 const due = require('./dueRenewals');
 const savedMethods = require('./savedMethods');
@@ -41,9 +41,13 @@ const savedMethods = require('./savedMethods');
 const DECLINED = 'Your card was declined';
 const CARD_EXPIRED = 'Your saved card has expired';
 
-/** Whether this gym's billing reminders run, and if not, why not. */
+/**
+ * Whether this gym's billing reminders run, and if not, why not. A member
+ * must be able to pay the link: through the gateway (one that takes payment
+ * links -- not Stripe's), or by transfer to a bank account on file.
+ */
 function billingState({ billing, provider, banks }) {
-  const canBePaid = !!provider || banks.length > 0;
+  const canBePaid = canCheckout(provider) || banks.length > 0;
   const anyChannel = Object.values(billing.sendVia).some(Boolean);
   const remindersOn = anyChannel && (billing.reminderDaysBefore.length > 0 || billing.dueDayReminder || billing.lastDayAfterDue > 0);
   const autoChargeOn = billing.autoCharge.enabled && canAutoCharge(provider);

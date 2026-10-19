@@ -375,28 +375,6 @@ const settingsSchema = new mongoose.Schema(
     // Named rooms / studios a class can be put in.
     rooms: { type: [String], default: [] },
 
-    // Renewal reminders with a payment link, and automatic card charges on
-    // the due date (services/billing/). Read through billingSettings(), which
-    // fills in these defaults for a gym that has never saved the block.
-    billing: {
-      // Days before the due date a "renewal due" message goes, each 0..30.
-      reminderDaysBefore: { type: [Number], default: [3] },
-      dueDayReminder: { type: Boolean, default: true },
-      // The last day to pay is the due date plus this many days; 0 sends no
-      // last-day message.
-      lastDayAfterDue: { type: Number, default: 3, min: 0, max: 30 },
-      sendVia: {
-        email: { type: Boolean, default: true },
-        sms: { type: Boolean, default: false },
-        // Only goes when the gym has its own WhatsApp provider (Settings → Messaging).
-        whatsapp: { type: Boolean, default: true },
-        push: { type: Boolean, default: true }
-      },
-      // Switched on by the gym once its payment gateway has confirmed
-      // merchant-initiated (saved card) charges for its account.
-      autoCharge: { enabled: { type: Boolean, default: false } }
-    },
-
     // Search engines and social previews.
     seo: {
       title: { type: String, default: '', trim: true },

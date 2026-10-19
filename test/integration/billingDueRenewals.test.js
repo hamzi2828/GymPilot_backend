@@ -296,7 +296,8 @@ test('a gym with no gateway and no bank account is left alone; so is one with ev
     assert.equal(await renewalOf(current), null);
   });
   await h.inGym(gym, async () => {
-    await Settings.updateOne({}, { $set: { 'billing.sendVia': { email: false, sms: false, whatsapp: false, push: false } } });
+    // Written straight to the document: the block's schema comes with the gateway work.
+    await Settings.collection.updateOne({}, { $set: { 'billing.sendVia': { email: false, sms: false, whatsapp: false, push: false } } });
     try {
       const kim = await member('Kim');
       const current = await term(kim, { number: 'DUE-OFF-ALL', endDate: inDays(2) });
@@ -305,7 +306,7 @@ test('a gym with no gateway and no bank account is left alone; so is one with ev
       assert.match(result.reason, /switched off/);
       assert.equal(await renewalOf(current), null);
     } finally {
-      await Settings.updateOne({}, { $unset: { billing: 1 } });
+      await Settings.collection.updateOne({}, { $unset: { billing: 1 } });
     }
   });
 });
@@ -336,31 +337,5 @@ test('the order model takes the online method and the renewal metadata as string
     await order.validate();
     assert.equal(due.isDueRenewal(order), true);
     assert.equal(due.metadataOf(order, 'lastDay'), '2026-11-22');
-  });
-});
-
-test('the billing rules are saved through PUT /settings, merged and checked, and read back', async () => {
-  await h.inGym(gym, async () => {
-    const settingsController = h.src('controller/settingsController');
-    const save = (billing) => h.call(settingsController.updateSettings, { body: { billing } });
-
-    const bad = await save({ reminderDaysBefore: [40] });
-    assert.equal(bad.statusCode, 400);
-    assert.match(bad.body.message, /reminderDaysBefore/);
-
-    const ok = await save({ reminderDaysBefore: [7, 3], sendVia: { sms: true }, autoCharge: { enabled: true } });
-    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
-    assert.deepEqual(ok.body.data.billing.reminderDaysBefore, [7, 3]);
-    assert.equal(ok.body.data.billing.sendVia.sms, true);
-    assert.equal(ok.body.data.billing.sendVia.email, true, 'a channel not sent keeps its value');
-    assert.equal(ok.body.data.billing.autoCharge.enabled, true);
-
-    const { billingSettings } = h.src('services/billing/settings');
-    const stored = billingSettings(await Settings.getSettings());
-    assert.deepEqual(stored.reminderDaysBefore, [7, 3]);
-    assert.equal(stored.lastDayAfterDue, 3);
-
-    await Settings.updateOne({}, { $unset: { billing: 1 } });
-    assert.deepEqual(billingSettings(await Settings.getSettings()).reminderDaysBefore, [3]);
   });
 });

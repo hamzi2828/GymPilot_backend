@@ -66,9 +66,14 @@ function capabilities(provider) {
   return (provider && provider.capabilities) || {};
 }
 
-/** Whether a provider can open a checkout a member pays on. */
+/**
+ * Whether a provider can take a payment link's payment on its own page: it
+ * opens checkouts, and for an order that already exists (Stripe's does not:
+ * `paymentLinks: false`; the bank-transfer gateway opens none at all).
+ */
 function canCheckout(provider) {
-  return !!provider && typeof provider.createCheckout === 'function' && capabilities(provider).checkout !== false;
+  const caps = capabilities(provider);
+  return !!provider && typeof provider.createCheckout === 'function' && caps.checkout !== false && caps.paymentLinks !== false;
 }
 
 /** Whether a provider can charge a saved card without the member present. */

@@ -109,7 +109,10 @@ const test = h.suite(async () => {
     ['billing-noauto-gym', 'Steel Gym', false],
     ['billing-generic-gym', 'Bronze Gym', true]
   ]) {
-    gyms[slug] = await h.createGym(slug, { name, timezone: zone, currency: 'PKR', settings: { billing: { autoCharge: { enabled: autoCharge } } } });
+    gyms[slug] = await h.createGym(slug, { name, timezone: zone, currency: 'PKR' });
+    // The billing block, written straight to the document (its schema comes
+    // with the gateway work): these gyms also send by WhatsApp.
+    await h.inGym(gyms[slug], () => Settings.collection.updateOne({}, { $set: { billing: { autoCharge: { enabled: autoCharge }, sendVia: { email: true, sms: false, whatsapp: true, push: true } } } }));
   }
 
   t0 = new Date();
@@ -351,7 +354,7 @@ test('a message no channel took is tried again on the next run, and then only on
       status: 'active'
     });
     // Email only, and it is failing.
-    await Settings.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: false, whatsapp: false, push: false } } });
+    await Settings.collection.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: false, whatsapp: false, push: false } } });
     return user;
   });
   h.setEmailFailure('SMTP is down');
@@ -369,7 +372,7 @@ test('a message no channel took is tried again on the next run, and then only on
   await run(slug, 20);
   await run(slug, 20);
   assert.deepEqual(h.calls.emails.map((e) => e.to), [hal.email]);
-  await h.inGym(gym, () => Settings.updateOne({}, { $unset: { 'billing.sendVia': 1 } }));
+  await h.inGym(gym, () => Settings.collection.updateOne({}, { $set: { 'billing.sendVia': { email: true, sms: false, whatsapp: true, push: true } } }));
 });
 
 test('the old expiry notice is not sent on top for a term the payment-link reminders cover', async () => {

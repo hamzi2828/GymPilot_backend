@@ -290,8 +290,7 @@ const payLinkController = {
     try {
       const me = req.user ? req.user._id || req.user.id : null;
       if (!me) return fail(res, 401, 'AUTH_REQUIRED', 'Please sign in.');
-      const methods = await savedMethods.savedMethodsOf(me);
-      return res.json({ success: true, data: methods.map(savedMethods.savedMethodView) });
+      return res.json({ success: true, data: await savedMethods.listSavedMethods(me) });
     } catch (error) {
       console.error('[billing] saved cards could not be listed:', error);
       return fail(res, 500, 'SERVER_ERROR', 'Your saved cards could not be loaded.');

@@ -3,9 +3,10 @@
 //
 //   * GET /api/billing/me/saved-methods lists the member's own cards --
 //     brand, last four, expiry, auto-pay, consent -- and never a token;
-//   * DELETE /api/billing/me/saved-methods/:id takes the card off the member
-//     before the gateway is asked to forget it, so automatic payment stops
-//     at once; another member's card, or none, is 404;
+//   * DELETE /api/billing/me/saved-methods/:id takes the card off the member,
+//     so automatic payment stops at once (with the gateway work merged its
+//     connector also deletes it from the gateway's wallet); another
+//     member's card, or none, is 404;
 //   * both need a signed-in member; /api/billing's own (the gym's
 //     GymsPilotPro subscription) routes are untouched, and the payment link
 //     routes are reached past the tenant gate.
@@ -31,8 +32,6 @@ let ana;
 let ben;
 let server;
 let base;
-
-const forgotten = [];
 
 const test = h.suite(async () => {
   User = h.src('models/user');
@@ -61,16 +60,7 @@ const test = h.suite(async () => {
     await User.collection.updateOne({ _id: ben._id }, { $set: { billing: { savedMethods: [card('card_b1')] } } });
   });
 
-  provider.setProviderForTests({
-    id: 'safepay',
-    capabilities: { checkout: true, savedCards: true, autoCharge: true },
-    createCheckout: async () => ({ url: 'https://gateway.test/x' }),
-    async forgetSavedMethod({ userId, savedMethod }) {
-      // Asked only once the member no longer holds it.
-      const still = await User.collection.findOne({ _id: userId, 'billing.savedMethods.id': savedMethod.id });
-      forgotten.push({ userId: String(userId), id: savedMethod.id, token: savedMethod.token, stillOnMember: !!still });
-    }
-  });
+  provider.setProviderForTests(null);
 
   // index.js as it runs: its app captured at listen(), .env never read.
   const dotenvPath = require.resolve('dotenv');
@@ -130,16 +120,13 @@ test('a member lists their own saved cards: what may be shown, never a token', a
   assert.deepEqual(none.body, { success: true, data: [] });
 });
 
-test('removing a card takes it off the member first, then the gateway forgets it; auto-pay stops at once', async () => {
-  forgotten.length = 0;
+test('removing a card takes it off the member: auto-pay stops at once', async () => {
   const res = await call('DELETE', '/api/billing/me/saved-methods/card_a1', ana);
   assert.equal(res.status, 200, res.text);
   assert.equal(res.body.success, true);
 
   const left = await call('GET', '/api/billing/me/saved-methods', ana);
   assert.deepEqual(left.body.data.map((m) => m.id), ['card_a2']);
-  assert.deepEqual(forgotten.map(({ id, stillOnMember }) => ({ id, stillOnMember })), [{ id: 'card_a1', stillOnMember: false }]);
-  assert.ok(secretBox.isSealed(forgotten[0].token), 'handed over as stored: the gateway opens it');
 
   const raw = await h.inGym(gym, () => User.collection.findOne({ _id: ana._id }));
   assert.deepEqual(raw.billing.savedMethods.map((m) => m.id), ['card_a2'], 'the token reference is gone from the member');
@@ -153,27 +140,6 @@ test('another member\'s card, or one that does not exist, is not found; signed o
   assert.equal((await call('DELETE', '/api/billing/me/saved-methods/nope', ana)).status, 404);
   assert.equal((await call('GET', '/api/billing/me/saved-methods')).status, 401);
   assert.equal((await call('DELETE', '/api/billing/me/saved-methods/card_a2')).status, 401);
-});
-
-test('a gateway that fails to forget the card does not keep it on the member', async () => {
-  provider.setProviderForTests({
-    id: 'safepay',
-    capabilities: { checkout: true },
-    createCheckout: async () => ({ url: 'x' }),
-    forgetSavedMethod: async () => {
-      throw new Error('gateway down');
-    }
-  });
-  const warn = console.warn;
-  console.warn = () => {};
-  try {
-    const res = await call('DELETE', '/api/billing/me/saved-methods/card_b1', ben);
-    assert.equal(res.status, 200);
-    assert.deepEqual((await call('GET', '/api/billing/me/saved-methods', ben)).body.data, []);
-  } finally {
-    console.warn = warn;
-    provider.setProviderForTests(null);
-  }
 });
 
 test('through index.js: the payment link routes are past the tenant gate, and /api/billing keeps its own routes', async () => {

@@ -2,17 +2,32 @@
 //
 // The cards a member saved, with their consent, to be charged on each due
 // date: `user.billing.savedMethods[]` (written by the gateway when a
-// checkout saves a card). Never card data -- the gateway's token for the
-// card (sealed at rest), and what may be shown: brand, last four digits,
-// expiry, when and to what the member agreed.
+// checkout saves a card; `select: false` on the user). Never card data --
+// the gateway's token for the card (sealed at rest), and what may be shown:
+// brand, last four digits, expiry, when and to what the member agreed.
 //
-// Gateway-neutral on purpose: listing and removing are about the member's
-// own record. Removing stops automatic payment at once -- the card is gone
-// from the member before anything else is tried -- and then, best effort,
-// asks the gateway the card belongs to to forget it as well.
+// Listing and removing go through the gateway connector's own helpers
+// (services/safepay listSavedMethods / removeSavedMethod -- removing also
+// deletes the card from the member's Safepay wallet) when it is there, and
+// read and pull the member's record directly otherwise. Either way removal
+// takes the card off the member at once, so automatic payment stops.
+//
+// The due-date charge picks its card here (autoPayMethod: auto-pay on,
+// saved through the gym's current gateway, not past its expiry) and hands
+// it over as stored, token sealed: the gateway opens it.
 
 const User = require('../../models/user');
-const { activeProvider } = require('./provider');
+
+/** The gateway connector's saved-card helpers, or null when this build has none. */
+function connector() {
+  try {
+    const safepay = require('../safepay');
+    return typeof safepay.listSavedMethods === 'function' && typeof safepay.removeSavedMethod === 'function' ? safepay : null;
+  } catch (error) {
+    if (error && error.code === 'MODULE_NOT_FOUND') return null;
+    throw error;
+  }
+}
 
 /** The member's saved cards as stored (tokens still sealed), or []. */
 async function savedMethodsOf(userId) {
@@ -36,6 +51,13 @@ function savedMethodView(method) {
     consent_text: method.consentText || '',
     created_at: method.createdAt || null
   };
+}
+
+/** The member's cards for GET /api/billing/me/saved-methods. */
+async function listSavedMethods(userId) {
+  const helpers = connector();
+  if (helpers) return helpers.listSavedMethods(userId);
+  return (await savedMethodsOf(userId)).map(savedMethodView);
 }
 
 /** Whether a card's expiry month has passed (an unknown expiry is not). */
@@ -67,29 +89,13 @@ function autoPayMethod(methods, providerId, now = new Date()) {
  */
 async function removeSavedMethod(userId, id) {
   const wanted = String(id || '');
+  if (!wanted) return false;
+  const helpers = connector();
+  if (helpers) return !!(await helpers.removeSavedMethod(userId, wanted));
   const method = (await savedMethodsOf(userId)).find((entry) => String(entry.id) === wanted);
   if (!method) return false;
-
-  const pull = () => User.updateOne({ _id: userId }, { $pull: { 'billing.savedMethods': { id: method.id } } }, { strict: false });
-  const warn = (error) => console.warn(`[billing] card ${wanted} removed here but not at the gateway: ${error.message}`);
-
-  // The gateway the card belongs to, if it is still the gym's, is asked to
-  // forget it too; failing that leaves only an unusable token at the gateway.
-  const gateway = await activeProvider();
-  const ours = gateway && (!method.provider || gateway.id === method.provider);
-  if (ours && typeof gateway.forgetSavedMethod === 'function') {
-    // Off the member first, so no charge can use it while the gateway answers.
-    await pull();
-    await Promise.resolve().then(() => gateway.forgetSavedMethod({ userId, savedMethod: method })).catch(warn);
-    return true;
-  }
-  if (ours && typeof gateway.removeSavedMethod === 'function') {
-    // A gateway that takes the card off the member itself, then forgets it.
-    await Promise.resolve().then(() => gateway.removeSavedMethod(userId, wanted)).catch(warn);
-  }
-  // Whatever the gateway said, the member's record no longer has it.
-  await pull();
+  await User.updateOne({ _id: userId }, { $pull: { 'billing.savedMethods': { id: method.id } } }, { strict: false });
   return true;
 }
 
-module.exports = { savedMethodsOf, savedMethodView, isExpired, autoPayMethod, removeSavedMethod };
+module.exports = { savedMethodsOf, savedMethodView, listSavedMethods, isExpired, autoPayMethod, removeSavedMethod };

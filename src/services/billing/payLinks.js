@@ -56,14 +56,25 @@ function issuePayLink(order, now = new Date()) {
 }
 
 /**
- * The gym site's page for a token, on the gym's PRIMARY domain from its
- * platform record (tenantContext.siteUrlFor, as the platform's own emailed
- * links are built) -- never Settings.siteUrl, and never whichever of its
- * hosts a request happened to arrive on, so a link is the same however it
- * was made.
+ * The gym's website: its PRIMARY domain from its platform record -- never
+ * Settings.siteUrl, and never whichever of its hosts a request happened to
+ * arrive on, so a link is the same however it was made. The gateway
+ * registry's gymSiteOrigin() (services/payments/site.js) when it is there,
+ * which is the same rule (tenantContext.siteUrlFor) the platform's own
+ * emailed links use.
  */
+function gymSite() {
+  try {
+    return require('../payments/site').gymSiteOrigin();
+  } catch (error) {
+    if (!error || error.code !== 'MODULE_NOT_FOUND') throw error;
+    return String(siteUrlFor(currentTenant()) || '').replace(/\/+$/, '');
+  }
+}
+
+/** The gym site's page for a token. */
 function payUrl(token) {
-  return `${siteUrlFor(currentTenant())}${PAY_PATH}/${token}`;
+  return `${gymSite()}${PAY_PATH}/${token}`;
 }
 
 /**
