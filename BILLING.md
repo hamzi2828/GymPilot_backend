@@ -335,9 +335,10 @@ cancelled, expiring (14/7/1 days), expired.
 
 Everything above is a gym charging its members through the gym's own Stripe
 account. This part is the platform charging the gym for its plan, through the
-**platform's** Stripe account (keys under the panel's System → Stripe,
-`platform_settings`; client in `src/platform/services/platformStripe.js`).
-The two are never crossed.
+**platform's** own accounts — its Stripe account, its Safepay account or its
+bank accounts (all under the panel's System → Payments, `platform_settings`;
+see *How gyms pay GymsPilotPro* below). The platform's keys and a gym's are
+never crossed.
 
 ## The subscription record
 
@@ -428,10 +429,102 @@ has each payment recorded by hand from the platform panel:
 | Route (super admin) | Answer |
 |---|---|
 | `GET /api/platform/gyms/:id/payments` | `{ success, data: [payment], next }` — the payments recorded for the gym, newest first, and `next`: whether another can be recorded (`canRecord`, with the `reason` when not) and what the form starts from — `amount`, `currency`, `billingCycle`, `paidFrom`, `paidUntil`, `methods`. |
-| `POST /api/platform/gyms/:id/payments { amount, method, receivedAt?, reference?, note?, paidUntil?, requestId }` | `201 { success, data: payment, duplicate: false, gym, warnings }`. `method` is `bank_transfer`, `jazzcash`, `easypaisa`, `cash` or `other`; the first three need a `reference` (the transaction id). The payment is kept in the gym's history, its paid-until date (`subscription.currentPeriodEnd`) moves to `paidUntil` — by default one billing cycle on from the later of today and the date already paid until — and the subscription becomes `active` whatever it was, so a gym cut off for not paying is served again at once. The form's `requestId` (at least 8 characters) makes a second click the same payment: `200` with `duplicate: true` and nothing moved. Refused: `400 INVALID_PAYMENT` (the first problem found, in words), `409 DUPLICATE_REFERENCE` (that reference is already on record for the gym), `409 STRIPE_BILLED` (the gym pays by card; Stripe records its payments and moves its dates itself). A suspended gym stays suspended, and `warnings` says so. |
+| `POST /api/platform/gyms/:id/payments { amount, method, receivedAt?, reference?, note?, paidUntil?, requestId }` | `201 { success, data: payment, duplicate: false, gym, warnings }`. `method` is `bank_transfer`, `jazzcash`, `easypaisa`, `cash` or `other` (the form's `next.methods`; `safepay` is recorded by the platform Safepay webhook, not offered here); the first three need a `reference` (the transaction id). The payment is kept in the gym's history, its paid-until date (`subscription.currentPeriodEnd`) moves to `paidUntil` — by default one billing cycle on from the later of today and the date already paid until — and the subscription becomes `active` whatever it was, so a gym cut off for not paying is served again at once. The form's `requestId` (at least 8 characters) makes a second click the same payment: `200` with `duplicate: true` and nothing moved. Refused: `400 INVALID_PAYMENT` (the first problem found, in words), `409 DUPLICATE_REFERENCE` (that reference is already on record for the gym), `409 STRIPE_BILLED` (the gym pays by card; Stripe records its payments and moves its dates itself). A suspended gym stays suspended, and `warnings` says so. |
 
 The daily roll-over needs nothing more: a gym with no Stripe subscription
 goes past due when `currentPeriodEnd` passes, and this is what moves it.
+
+`recordPayment` is also the one path an approved receipt and a Safepay
+payment take (below), each with a request id of its own (`receipt:<request
+id>`, `safepay:<tracker>`), so each is recorded once however often it
+arrives. Its optional `change` (`{ plan?, billingCycle, planAmount, addons,
+amount, currency }`) is a payment for another cycle or plan: written in the
+same update as the date, and the date worked out in that cycle.
+
+## How gyms pay GymsPilotPro — System → Payments
+
+The super admin chooses ONE way for every gym, as each gym chooses how its
+members pay (`platform_settings.onlinePayments.provider`, the registry in
+`src/platform/services/payments/`, mirroring `src/services/payments/`):
+
+| Way | What the gym does | What records it |
+|---|---|---|
+| `generic` — Bank transfer + receipt | transfers to one of GymsPilotPro's bank accounts (with QR codes) and uploads the receipt on its Billing tab | the super admin approves it in **Payments to verify** |
+| `safepay` — Safepay (Pakistan) | **Pay now**: card, JazzCash, Easypaisa or any bank app on Safepay's page, into **GymsPilotPro's own** Safepay account | the platform Safepay webhook |
+| `stripe` — Stripe (international) | Subscribe / Manage billing, exactly as before (*Paying by card*) | the platform Stripe webhook |
+| `none` | contacts GymsPilotPro | the super admin, by hand (*Paying outside Stripe*) |
+
+A platform that never chose reads as `stripe` while `stripe.enabled` is on and
+`none` otherwise, and the choice is stored only once one is made. **Choosing
+switches that gateway on and never switches Stripe off**: Safepay's
+`enabled` follows the choice, choosing Stripe sets `stripe.enabled`, and a
+gym Stripe already bills keeps its portal, its plan changes and its webhook
+whatever is chosen later (`platformStripeAvailable`: keys + switch). A
+gym's NEW card subscription (`/api/billing/checkout`, and `stripeConfigured`
+on its Billing tab) needs Stripe to be the way too (`platformBillingAvailable`;
+`409 PLATFORM_STRIPE_NOT_CONFIGURED` otherwise); for a gym Stripe bills,
+`stripeConfigured` only needs Stripe usable. Self-serve sign-up on the marketing site always pays by card and
+only needs Stripe usable.
+
+Super-admin routes (platform session; writes go to the audit log):
+
+| Route | Answer |
+|---|---|
+| `GET /api/platform/settings` | `{ success, data: { stripe, webhookUrl, onlinePayments: { provider, providerChosen }, safepay: { enabled, environment, publicKey, secretKey, webhookSecret, secretKeySet, webhookSecretSet, webhook_url }, bankAccounts: [{ id, bankName, accountTitle, accountNumber, iban, qrCodeUrl, active }], billingReminders: { daysBefore, onDueDay, lastDayAfterDue }, platform_email_configured, updatedByEmail, updatedAt } }`. Secrets are masked (`••••••••` + the last four) with a `…Set` flag; `safepay.webhook_url` (read-only) is `https://<API>/api/platform/safepay/webhook`; `platform_email_configured` says whether SMTP_* is set (reminders and approve / reject emails need it). |
+| `PUT /api/platform/settings` `{ stripe?, onlinePayments?: { provider }, safepay?, billingReminders? }` | the same answer (+ `warnings` when an edited mask kept a secret). Secrets sent back masked are kept; Safepay's are sealed at rest like Stripe's. Choosing `safepay` without its public key, secret key and webhook secret is `400 { code: 'SECRET_REQUIRED', field }` and saves nothing. `billingReminders` is read strictly: `daysBefore` whole days 0–30 (at most 10, stored largest first), `onDueDay`, `lastDayAfterDue` 0–30. |
+| `GET /api/platform/settings/payment-gateways` | `{ success, data: [{ id, label, description, checkout_label, settings_key, configured, selected, config_fields: [{ name, label, type: text \| secret \| select \| boolean, required, options?, placeholder?, help? }], webhook_url }], selected }` — the gym side's shape. No `enabled` field: choosing is the switch. Configured: Stripe with its secret key and webhook secret, Safepay with both keys and the webhook secret, bank transfer with an active account. |
+| `POST /api/platform/settings/:gatewayId/test` `{ ...fields }` | `200 / 400 { success, message, data? }`: Safepay is asked for a checkout token and a payment session that is never paid (typed keys, or the saved ones for a masked or empty field); bank transfer counts the active accounts; Stripe answers as `POST /settings/stripe/test`, which stays. `404` for an unknown gateway. |
+| `POST /api/platform/settings/bank-accounts` `{ bankName, accountTitle, accountNumber?, iban?, active? }` | `201 { success, data: { bankAccounts, bankAccount } }` — name and title required, an account number or a valid IBAN (stored without spaces, upper case); at most 10 accounts. |
+| `PUT /api/platform/settings/bank-accounts/:id` (any of the fields; `{ active }` toggles) · `DELETE …/:id` | `{ success, data: { bankAccounts } }`; `404` for an id not on the list. Deleting removes its QR image. |
+| `POST …/bank-accounts/:id/qr` (multipart `qrCode`, a real JPG / PNG / WebP / GIF — `helper/upload.js imageUploadChecked`) · `DELETE …/:id/qr` | `{ success, data: { bankAccounts } }`. Stored with no gym in context: the Blob store's `platform-bank-qr/` (a name no gym can take) or the top of the local uploads folder; the previous image is removed. |
+| `GET /api/platform/payment-requests?status=pending&gymId=&page=&limit=` | `{ success, data: [{ id, gymId, gymSlug, gymName, amount, currency, billingCycle, receiptUrl, reference, note, submittedAt, submittedBy: { id, email, name }, status, reason, reviewedAt, reviewedBy: { id, email } \| null, paymentId }], total }`, newest first. `receiptUrl` is a Blob https URL or `/uploads/<slug>/…` on the API's origin. |
+| `POST /api/platform/payment-requests/:id/approve` `{}` | `{ success, data: { request, payment, subscription: { status, billingCycle, currentPeriodEnd, amount, currency } }, emailed, duplicate }` — the payment recorded through `recordPayment` (method `bank_transfer`, the gym's reference, or `receipt-<id>` when it gave none; received when the receipt was sent), the subscription extended and active. Approving again: `duplicate: true`, nothing recorded twice (also two clicks at once). `409 ALREADY_REJECTED`, `409 DUPLICATE_REFERENCE` (that transfer is already on record), `409 STRIPE_BILLED`, `404`. |
+| `POST /api/platform/payment-requests/:id/reject` `{ reason }` | `{ success, data: { request }, emailed }`; `400 REASON_REQUIRED`, `409 ALREADY_APPROVED`, `409 APPROVAL_IN_PROGRESS`. The gym sees the reason and uploads again. |
+| `GET /api/platform/overview` | as before, plus `pending_count` (receipts waiting) at the top level and in `data`, for the sidebar badge. |
+
+`emailed` is true when the owner was told ("payment received — thank you" /
+"we could not confirm your payment", with the reason and an upload link):
+only with platform email (SMTP_*), silently skipped otherwise.
+
+Gym-admin routes (`/api/billing`, `auth` + Settings permission):
+
+| Route | Permission | Answer |
+|---|---|---|
+| `GET /api/billing/subscription` | settings · view | as before, plus `pay: { provider: 'none' \| 'stripe' \| 'safepay' \| 'generic', label, amount_due, currency, due_date: 'YYYY-MM-DD' \| null, bank_accounts: [{ bank_name, account_title, account_number, iban, qr_code_url }], pending_request: { status: 'pending' \| 'rejected', reason, submitted_at, amount } \| null }` (`platformPay.payBlock`; `null` if it could not be worked out). `provider` is `stripe` for a gym Stripe bills whatever was chosen, else the way chosen when it is set up, else `none`; `label` is what to call it on the button ("Card, JazzCash, Easypaisa or any bank app", "Bank transfer — upload your receipt", "Card"); `bank_accounts` only for `generic` (active ones); `pending_request` is the latest receipt while it waits, or was rejected and nothing has been paid since — `null` once approved. |
+| `POST /api/billing/pay` `{ billingCycle?, planSlug? }` (`paymentLimiter`) | settings · manage | `{ success, data: { url } }` — Safepay's hosted checkout with the PLATFORM's keys for what the gym owes (`platformPay.payTerms`: its agreed `amount`, or another cycle or plan priced from the list as Stripe checkout prices it), returning to `<gym's primary site>/admin/settings?tab=billing&paid=1` (cancel: `…?tab=billing`). Recorded in `platform_safepay_checkouts` (one per tracker). `409 STRIPE_CHECKOUT` (the gym pays by Stripe: use checkout / portal), `409 BANK_TRANSFER_ONLY`, `409 ONLINE_PAYMENT_OFF`; `400 INVALID_CYCLE / CYCLE_NOT_OFFERED / NOTHING_TO_PAY`, `404 PLAN_NOT_FOUND`, `409 SAFEPAY_CURRENCY_UNSUPPORTED`, `409 NO_SITE_ADDRESS`, `429 TOO_MANY_ATTEMPTS` (30 a day), `502` from Safepay. |
+| `POST /api/billing/receipt` multipart `receipt` (JPG / PNG / WebP / PDF, ≤ 4 MB, its bytes matching its type) + `reference?`, `note?`, `billingCycle?` (20 per 15 minutes) | settings · manage | `201 { success, data: { pending_request } }`. Taken while GymsPilotPro lists an active bank account (bank transfer chosen, or the accounts there as a fallback); the amount is worked out on the server. One waiting receipt per gym: a new upload replaces it (and its file). `400 RECEIPT_REQUIRED / FILE_NOT_ALLOWED`, `413 FILE_TOO_LARGE`, `409 STRIPE_BILLED`, `409 BANK_TRANSFER_OFF`, `409 REVIEW_IN_PROGRESS` (being approved this moment). Stored as the gym's file (`<slug>/platform-receipts/` in Blob, `/uploads/<slug>/` locally). |
+
+**Platform Safepay webhook — `POST /api/platform/safepay/webhook`.** Raw body
+(index.js leaves it unparsed), believed only when `X-SFPY-SIGNATURE` matches
+the PLATFORM's webhook secret (`services/safepay` `verifyWebhook`; a gym's
+secret proves nothing here). A paid tracker (`payment.succeeded`, or any
+other event Safepay then confirms with the platform keys) is recorded once
+(`platformSafepay.applyPaid`: the checkout found paid with its payment, or
+the payment's request id `safepay:<tracker>`), method `safepay`, reference
+the tracker, and the subscription extended (and moved to the cycle / plan
+paid for); an amount below what was asked, or another currency, is not
+recorded and is noted on the checkout. Payments opened while Safepay was the
+way are still recorded after it stops being it. Failed and refunded events
+are noted on the checkout; the subscription is not changed by them. Answers
+`200 { received, applied?, duplicate?, ignored? }`, `400` for a bad
+signature, `500` (Safepay retries) without a webhook secret or when
+recording failed. Audit: `platform_safepay_event`.
+
+**Reminders to gym owners — `ownerPayReminders.sendOwnerPayReminders`.** In
+the daily job, after the gyms (`payReminders` in its answer): for each
+active gym billed by hand / Safepay / bank transfer (not Stripe-billed, not
+trialing — the trial emails say it — not free) with an owner email, the
+latest milestone of its due date reached today — `daysBefore` days before,
+the due day (`onDueDay`), `lastDayAfterDue` days after — once per period
+(`subscription.payReminders`, `"<milestone>@<due date>"`, recorded before
+sending and given back when the email fails). Plan, amount, due date and
+how to pay ("Pay now", GymsPilotPro's bank accounts with "Upload receipt",
+or whom to contact), linking to `<gym's primary site>/admin/settings?tab=billing`;
+the last one says when the gym is cut off. A gym that went past due that
+same morning got the overdue notice already: its due-day reminder is marked,
+not sent (`covered`). Without platform email: `{ skipped: 'no platform
+email' }`. The milestones are the pure `milestonesFor` / `currentMilestone`
+(unit-tested).
 
 ## Paying by card — `src/platform/services/platformBilling.js`
 
@@ -532,7 +625,7 @@ Public routes (`src/platform/routes/platformRoutes.js`, no session):
 * `PLATFORM_ROOT_DOMAIN` is set — a self-served gym's only web address is
   `<slug>.<root>`, and provisioning refuses a gym with none (`requireSite`);
 * the platform's Stripe secret key is saved and charging is switched on
-  (panel → System → Stripe);
+  (panel → System → Payments → Stripe);
 * `PLATFORM_ADMIN_ORIGIN` is set — Stripe sends the buyer back to it, and in
   production nothing stands in for it (only a developer's machine falls back
   to `http://localhost:3001`);
@@ -630,7 +723,8 @@ If Stripe will not cancel, nothing is marked and the next run tries again.
 
 ## Owner lifecycle emails — `jobs.sendOwnerBillingNotices({ dryRun })`
 
-Called by the cron after `rollSubscriptionStatuses`. For every active gym
+Called by the cron after `rollSubscriptionStatuses` (the reminders to pay —
+*How gyms pay GymsPilotPro* — come later, after the gyms). For every active gym
 with an owner email, once each (recorded in `subscription.notices`):
 trial ending in 7, 3 and 1 days (`trial7 / trial3 / trial1`; when the cron
 missed days only the most urgent goes out and the rest are marked), moved to

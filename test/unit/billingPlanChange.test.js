@@ -472,3 +472,23 @@ test('a paid checkout for another plan moves the gym to it, and clears the page 
     restore.forEach((r) => r());
   }
 });
+
+test('with another way chosen for gyms to pay, a gym Stripe already bills still changes plan through Stripe', async () => {
+  const gym = gymOn(STARTER);
+  const { calls, restore } = billingWorld(gym);
+  const chosen = stub(PlatformSettings, { getSettings: async () => ({ stripe: { secretKey: 'sk_test_unit_plans', enabled: true }, onlinePayments: { provider: 'safepay' } }) });
+  try {
+    const res = fakeRes();
+    await billing.changePlan(req(gym, { planSlug: 'growth' }), res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(calls.syncs.length, 1, 'Stripe was asked');
+    // ...and its Billing tab still offers its card buttons.
+    const shown = fakeRes();
+    await billing.subscription({ ...req(gym), query: { usage: '0' } }, shown);
+    assert.equal(shown.body.data.stripeConfigured, true);
+    assert.equal(shown.body.data.hasStripeSubscription, true);
+  } finally {
+    chosen();
+    restore();
+  }
+});

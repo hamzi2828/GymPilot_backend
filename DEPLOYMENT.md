@@ -65,10 +65,19 @@ tests (FEATURES.md → *Tests*); none belongs on the server.
 
 ## 2. Stripe
 
-**The platform's own account** — what gyms pay GymsPilotPro through, and what a
-self-serve sign-up pays with (BILLING.md → *Platform billing*):
+**How gyms pay GymsPilotPro** is chosen once, for every gym, under the panel's
+**System → Payments** (BILLING.md → *How gyms pay GymsPilotPro*): bank
+transfer + receipt, Safepay, Stripe, or none (payments recorded by hand).
+Choosing one never switches Stripe off: gyms Stripe already bills go on
+being billed. The reminders to gym owners and the approve / reject emails go
+by the platform's own email (`SMTP_*`); without it they are skipped, and
+the Payments page says so.
 
-* Under the panel's **System → Stripe**: the secret key, charging switched
+**The platform's own Stripe account** — what gyms pay GymsPilotPro through
+when Stripe is chosen (and gyms Stripe already bills), and what a self-serve
+sign-up always pays with (BILLING.md → *Platform billing*):
+
+* Under the panel's **System → Payments → Stripe**: the secret key, charging switched
   on, and the signing secret of a webhook endpoint
   `https://<api>/api/platform/stripe/webhook` (shown on that screen) with
   events `checkout.session.completed, invoice.paid, invoice.payment_failed,
@@ -77,6 +86,27 @@ self-serve sign-up pays with (BILLING.md → *Platform billing*):
   since no payment could ever create its gym.
 * **Billing → Customer portal**: activate the default configuration here too,
   or a gym's **Manage billing** fails.
+
+**GymsPilotPro's own Safepay account** (System → Payments → Safepay) — for
+gyms in Pakistan paying their subscription by card, JazzCash, Easypaisa or a
+bank app. This is GymsPilotPro's merchant account, not a gym's:
+
+* Safepay dashboard (sandbox first, then live) → Developers → API keys: the
+  **public key** and the **secret key** go into System → Payments → Safepay,
+  with Test or Live.
+* Developers → Endpoints → **Add an endpoint**:
+  `https://<api>/api/platform/safepay/webhook` (shown on the Payments page,
+  with Copy), subscribed to the 2.0.0 payment events (`payment.succeeded`,
+  `payment.failed`, `payment.refunded`). **View shared secret** → the
+  webhook secret there. Safepay cannot be chosen without it
+  (`SECRET_REQUIRED`): no payment would ever be recorded.
+* **Test connection**, choose Safepay, and pay once from a test gym's
+  Billing tab in sandbox before switching to Live.
+
+**Bank transfer + receipt** (System → Payments → Bank transfer): add
+GymsPilotPro's bank accounts with their QR images; gyms transfer and upload
+the receipt on their Billing tab, and the super admin approves or rejects it
+under **Payments to verify** (the sidebar shows how many are waiting).
 
 **Each gym's own dashboard:**
 
