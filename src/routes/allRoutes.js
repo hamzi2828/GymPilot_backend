@@ -168,6 +168,9 @@ router.delete('/admin/lockers/:id', auth, requirePermission('lockers', 'manage')
 const reportsController = require('../controller/reportsController');
 router.get('/admin/reports/overview', auth, requirePermission('reports'), reportsController.overview);
 router.get('/admin/reports/daily-sales', auth, requirePermission('reports'), reportsController.dailySales);
+// Reports lets the request in; the export itself also checks the tab its
+// rows belong to (members -> Users, payslips -> Staff, expenses -> Accounts,
+// leads -> Leads, ...) against the role this gate read.
 router.get('/admin/reports/export/:kind', auth, requirePermission('reports'), reportsController.export);
 
 // ---------------------------------------------------------------------------

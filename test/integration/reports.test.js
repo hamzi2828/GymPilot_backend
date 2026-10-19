@@ -192,7 +192,7 @@ test("expenses export names the gym's own heads, not their stored keys", async (
     const head = await categories.createHead('expense', 'Tea for members');
     const tea = await Expense.create({ reference: 'EXP-TEA-1', title: 'Tea', category: head.key, amount: 3, currency: 'GBP', status: 'paid', incurredOn: at('2026-08-12T10:00:00Z'), paidOn: at('2026-08-12T10:00:00Z') });
     try {
-      const res = await h.call(reports.export, { params: { kind: 'expenses' }, query: AUGUST });
+      const res = await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'expenses' }, query: AUGUST });
       assert.equal(res.statusCode, 200);
       const rows = csvRows(res);
       const title = rows[0].indexOf('Title');
@@ -209,14 +209,14 @@ test("expenses export names the gym's own heads, not their stored keys", async (
 
 test('members export: those who joined in the range, or everyone with all=1', async () => {
   await h.inGym(gym, async () => {
-    const joined = await h.call(reports.export, { params: { kind: 'members' }, query: AUGUST });
+    const joined = await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'members' }, query: AUGUST });
     assert.equal(joined.statusCode, 200);
     assert.match(joined.headers['content-disposition'], /members_joined_2026-08-01_2026-08-31\.csv/);
     const rows = csvRows(joined);
     const email = rows[0].indexOf('Email');
     assert.deepEqual(rows.slice(1).map((r) => r[email]).sort(), ['ann@reports.test', 'ben@reports.test', 'cat@reports.test']);
 
-    const everyone = await h.call(reports.export, { params: { kind: 'members' }, query: { ...AUGUST, all: '1' } });
+    const everyone = await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'members' }, query: { ...AUGUST, all: '1' } });
     assert.match(everyone.headers['content-disposition'], /members_\d{4}-\d{2}-\d{2}\.csv/);
     assert.deepEqual(csvRows(everyone).slice(1).map((r) => r[email]).sort(), ['ann@reports.test', 'ben@reports.test', 'cat@reports.test', 'dan@reports.test']);
   });
@@ -230,8 +230,8 @@ test('every export also comes as a real .xlsx: the CSV\'s rows, amounts as numbe
   await h.inGym(gym, async () => {
     for (const kind of kinds) {
       const [csv, book] = await Promise.all([
-        h.call(reports.export, { params: { kind }, query: AUGUST }),
-        h.call(reports.export, { params: { kind }, query: { ...AUGUST, format: 'xlsx' } })
+        h.call(reports.export, { roleSlug: 'admin', params: { kind }, query: AUGUST }),
+        h.call(reports.export, { roleSlug: 'admin', params: { kind }, query: { ...AUGUST, format: 'xlsx' } })
       ]);
       assert.equal(book.statusCode, 200, `${kind}: ${JSON.stringify(book.body)}`);
       assert.equal(book.headers['content-type'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -248,20 +248,20 @@ test('every export also comes as a real .xlsx: the CSV\'s rows, amounts as numbe
     }
 
     // The same export by its old name, with the ending instead of ?format.
-    const suffixed = await h.call(reports.export, { params: { kind: 'orders.xlsx' }, query: AUGUST });
+    const suffixed = await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'orders.xlsx' }, query: AUGUST });
     assert.equal(suffixed.headers['content-type'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 
-    const orders = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'orders' }, query: { ...AUGUST, format: 'xlsx' } })).body));
+    const orders = sheetObjects(unzip((await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'orders' }, query: { ...AUGUST, format: 'xlsx' } })).body));
     const r1 = orders.find((row) => row.Order === 'R-1');
     assert.equal(r1.Total, 100, 'an amount is a number cell');
     assert.equal(r1.Paid, 100);
     assert.equal(r1['Paid on'], dateSerial('2026-08-03'), 'a date is a date cell');
 
-    const expenses = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'expenses' }, query: { ...AUGUST, format: 'xlsx' } })).body));
+    const expenses = sheetObjects(unzip((await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'expenses' }, query: { ...AUGUST, format: 'xlsx' } })).body));
     assert.deepEqual(expenses.map((row) => row.Amount).sort((a, b) => a - b), [5, 50, 60, 80, 1000]);
     assert.equal(expenses.find((row) => row.Reference === 'E-1').Date, dateSerial('2026-08-02'));
 
-    const members = sheetObjects(unzip((await h.call(reports.export, { params: { kind: 'members' }, query: { ...AUGUST, format: 'xlsx' } })).body));
+    const members = sheetObjects(unzip((await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'members' }, query: { ...AUGUST, format: 'xlsx' } })).body));
     assert.deepEqual(members.map((row) => row.Joined).sort(), [dateSerial('2026-08-03'), dateSerial('2026-08-03'), dateSerial('2026-08-20')]);
   });
 });
@@ -330,7 +330,7 @@ test('daily sales export: CSV with a totals row; a workbook with the days and a 
   const { unzip, readSheet, sheetNames, sheetObjects } = require('../helpers/readXlsx');
   const { dateSerial } = h.src('services/xlsx');
   await h.inGym(gym, async () => {
-    const csv = await h.call(reports.export, { params: { kind: 'daily-sales' }, query: AUGUST });
+    const csv = await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'daily-sales' }, query: AUGUST });
     assert.equal(csv.statusCode, 200);
     assert.match(csv.headers['content-disposition'], /daily_sales_2026-08-01_2026-08-31\.csv/);
     const lines = csvRows(csv);
@@ -338,7 +338,7 @@ test('daily sales export: CSV with a totals row; a workbook with the days and a 
     assert.equal(lines.length, 1 + 31 + 1);
     assert.deepEqual(lines[lines.length - 1].slice(0, 9), ['Total', '140', '0', '0', '0', '0', '-40', '42', '142']);
 
-    const book = await h.call(reports.export, { params: { kind: 'daily-sales' }, query: { ...AUGUST, format: 'xlsx' } });
+    const book = await h.call(reports.export, { roleSlug: 'admin', params: { kind: 'daily-sales' }, query: { ...AUGUST, format: 'xlsx' } });
     const files = unzip(book.body);
     assert.deepEqual(sheetNames(files), ['Daily sales', 'By payment method']);
     const days = readSheet(files, 1);
@@ -394,5 +394,91 @@ test("top products: a product's margin is the till's profit on it -- its takings
     assert.deepEqual(product('Shaker'), { name: 'Shaker', quantity: 2, total: 20, margin: 9.43 });
     const margins = report.body.top_products.reduce((sum, row) => sum + row.margin, 0);
     assert.equal(Math.round(margins * 100) / 100, sales.body.summary.gross_profit.GBP, 'the products add up to the till');
+  });
+});
+
+// ---- Who may export what ----------------------------------------------------
+//
+// Reports opens the export route, but each export is another tab's rows too:
+// the members with their contact details and dates of birth, the payslips,
+// the expenses, the leads. A role that may not open that tab is refused its
+// file (403 EXPORT_NOT_ALLOWED, naming the tab), over HTTP through allRoutes
+// so the gate in front of the handler is the real one.
+
+test('over HTTP: an export also needs the tab its rows come from', async () => {
+  const jwt = require('jsonwebtoken');
+  const express = require('express');
+  const User = h.src('models/user');
+  const Role = h.src('models/roleModel');
+  const roleService = h.src('services/roleService');
+
+  const people = await h.inGym(gym, async () => {
+    await roleService.ensureDefaultRoles();
+    // Reports and nothing else.
+    await Role.create({ name: 'Analyst', slug: 'analyst', isStaff: true, permissions: { reports: 'view' } });
+    roleService.invalidate();
+    const make = (firstName, role) => User.create({ firstName, lastName: 'Export', email: `${firstName.toLowerCase()}@reports-export.test`, role, employment: { isStaff: true } });
+    return { accountant: await make('Abe', 'accountant'), analyst: await make('Ana', 'analyst'), manager: await make('Mo', 'manager') };
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => {
+    req.tenant = gym;
+    h.inGym(gym, async () => next()).catch(next);
+  });
+  app.use('/', h.src('routes/allRoutes'));
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const get = async (user, kind) => {
+    const token = jwt.sign({ id: String(user._id), email: user.email, role: user.role, tid: String(gym._id), tv: 0 }, process.env.JWT_SECRET, { expiresIn: '5m' });
+    const res = await fetch(`${base}/admin/reports/export/${kind}?from=${AUGUST.from}&to=${AUGUST.to}`, { headers: { Authorization: `Bearer ${token}` } });
+    const text = await res.text();
+    let body = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    return { status: res.status, body, text };
+  };
+
+  try {
+    // The default Accountant: Reports, Accounts, Staff, Package Orders and
+    // Attendance -- not Users, Leads, Bookings or Personal Training.
+    const allowed = ['orders', 'daily-sales', 'attendance', 'expenses', 'payslips'];
+    for (const kind of allowed) assert.equal((await get(people.accountant, kind)).status, 200, kind);
+    const refused = { members: 'Users', leads: 'Leads', bookings: 'Bookings', 'pt-sessions': 'Personal Training' };
+    for (const [kind, tab] of Object.entries(refused)) {
+      const res = await get(people.accountant, kind);
+      assert.equal(res.status, 403, `${kind}: ${res.text}`);
+      assert.equal(res.body.code, 'EXPORT_NOT_ALLOWED');
+      assert.match(res.body.message, new RegExp(`needs access to ${tab} as well as Reports`));
+      assert.ok(!/ann@reports\.test/.test(res.text), 'no rows in the refusal');
+    }
+
+    // Reports alone: the report's own daily sales, none of the other tabs' rows.
+    assert.equal((await get(people.analyst, 'daily-sales')).status, 200);
+    for (const kind of ['members', 'orders', 'attendance', 'bookings', 'leads', 'pt-sessions', 'expenses', 'payslips']) {
+      assert.equal((await get(people.analyst, kind)).status, 403, kind);
+    }
+    assert.match((await get(people.analyst, 'payslips')).body.message, /Exporting payslips needs access to Staff/);
+
+    // A manager holds every one of those tabs.
+    const members = await get(people.manager, 'members');
+    assert.equal(members.status, 200, members.text);
+    assert.match(members.text, /ann@reports\.test/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a members export called with no role behind it is refused', async () => {
+  await h.inGym(gym, async () => {
+    const res = await h.call(reports.export, { params: { kind: 'members' }, query: AUGUST });
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.body.code, 'EXPORT_NOT_ALLOWED');
   });
 });

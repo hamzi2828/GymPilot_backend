@@ -72,8 +72,8 @@ test('orders export: total, paid and balance, real payment dates, member code, p
 
   await h.inGym(gym, async () => {
     const [csv, book] = await Promise.all([
-      h.call(reports.export, { params: { kind: 'orders' }, query: OCTOBER }),
-      h.call(reports.export, { params: { kind: 'orders' }, query: { ...OCTOBER, format: 'xlsx' } })
+      h.call(reports.export, { roleSlug: 'admin', params: { kind: 'orders' }, query: OCTOBER }),
+      h.call(reports.export, { roleSlug: 'admin', params: { kind: 'orders' }, query: { ...OCTOBER, format: 'xlsx' } })
     ]);
     assert.equal(csv.statusCode, 200);
     assert.equal(book.statusCode, 200);

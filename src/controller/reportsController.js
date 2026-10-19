@@ -26,9 +26,48 @@ const { dailySales, exportColumns: dailySalesColumns } = require('../services/da
 const { saleLineStages } = require('../services/saleMoney');
 const { methodLabel } = require('../services/paymentMethods');
 const { round2, paidSoFar } = require('../gymfolio/services/orderMoney');
+const { can, ADMIN_SLUG } = require('../services/roleService');
+const { PERMISSION_TABS } = require('../config/permissions');
 
 const EXPIRING_WINDOW_DAYS = 14;
 const EXPORT_LIMIT = 20000;
+
+// ---- Who may export what ----
+//
+// The route lets in anyone with Reports. Each export is also another tab's
+// own data -- the members with their contact details and dates of birth,
+// the payslips, the expenses, the leads -- and a role that may not open
+// that tab may not take its rows away in a file either. Daily sales is the
+// report's own summary and needs Reports alone.
+const EXPORT_TABS = {
+  members: 'users',
+  orders: 'package-orders',
+  attendance: 'attendance',
+  bookings: 'bookings',
+  leads: 'leads',
+  'pt-sessions': 'pt',
+  expenses: 'accounts',
+  payslips: 'staff'
+};
+
+function tabLabel(tab) {
+  const found = PERMISSION_TABS.find((t) => t.key === tab);
+  return found ? found.label : tab;
+}
+
+/**
+ * Why this request may not have the `kind` export, or null when it may.
+ * The role is the live one requirePermission read (req.roleSlug); with none
+ * the answer is no.
+ */
+async function exportRefusal(req, kind) {
+  const tab = EXPORT_TABS[kind];
+  if (!tab) return null;
+  const slug = req.roleSlug;
+  if (slug === ADMIN_SLUG) return null;
+  if (slug && (await can(slug, tab, 'view'))) return null;
+  return `Exporting ${kind.replace('-', ' ')} needs access to ${tabLabel(tab)} as well as Reports, and your role does not have it.`;
+}
 
 function paidAtExpr() {
   return { $ifNull: ['$payment.paidAt', '$createdAt'] };
@@ -423,10 +462,15 @@ module.exports = {
   },
 
   // GET /admin/reports/export/:kind?from=&to=[&format=xlsx]
+  //
+  // Beside Reports, each kind needs view access to the tab its rows come
+  // from (EXPORT_TABS); without it, 403 EXPORT_NOT_ALLOWED naming that tab.
   export: async (req, res) => {
     try {
       const range = L.readRange(req.query);
       const kind = String(req.params.kind || '').replace(/\.(csv|xlsx)$/i, '');
+      const refusal = await exportRefusal(req, kind);
+      if (refusal) return res.status(403).json({ success: false, code: 'EXPORT_NOT_ALLOWED', message: refusal });
       const stamp = `${range.from}_${range.to}`;
       const inRange = { $gte: range.start, $lt: range.end };
       const keyRange = { $gte: range.from, $lte: range.to };
