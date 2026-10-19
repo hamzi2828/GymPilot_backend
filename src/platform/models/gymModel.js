@@ -131,7 +131,12 @@ const gymSchema = new mongoose.Schema(
         pastDue: { type: Date, default: null },
         expired: { type: Date, default: null },
         cancelled: { type: Date, default: null }
-      }
+      },
+      // The reminders to pay already sent to the owner, as "<milestone>@<due
+      // date>" -- 'before3@2026-11-19', 'due@…', 'last@…' -- so each goes
+      // once per period (services/ownerPayReminders.js). Only the current
+      // due date's are kept.
+      payReminders: { type: [String], default: undefined }
     },
 
     locale: {

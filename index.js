@@ -584,11 +584,24 @@ async function runRemindersRoute(req, res) {
     if (gymSlug && !Object.keys(gyms).length) {
       return res.status(404).json({ success: false, message: `No active gym "${gymSlug}".` });
     }
+    // Then the platform pass after the gyms: owners reminded to pay
+    // GymsPilotPro before, on and after their due date -- each reminder once
+    // per period, after the lifecycle emails above, so a gym that went
+    // overdue this morning gets one email, not two. A failure here is
+    // reported, never the whole run's.
+    const payReminders = gymSlug
+      ? { skipped: 'single gym run' }
+      : await require('./src/platform/services/ownerPayReminders')
+          .sendOwnerPayReminders({ dryRun })
+          .catch((error) => {
+            console.error('[jobs] payment reminders failed:', error);
+            return { error: error.message };
+          });
     if (schedule.deferred.length) {
       console.warn(`[jobs] time budget used; ${schedule.deferred.length} gym(s) left for the next run: ${schedule.deferred.join(', ')}`);
     }
 
-    return res.json({ success: true, dryRun, subscriptions, notices, signups, gyms, schedule });
+    return res.json({ success: true, dryRun, subscriptions, notices, signups, gyms, schedule, payReminders });
   } catch (error) {
     console.error('[jobs] reminders failed:', error);
     return res.status(500).json({ success: false, message: error.message });

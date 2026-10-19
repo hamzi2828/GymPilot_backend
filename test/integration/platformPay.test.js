@@ -821,3 +821,111 @@ test("receipts are taken while GymsPilotPro lists an account to pay into, whatev
   await panel('PUT', `/settings/bank-accounts/${account.id}`, { body: { active: true } });
   await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'generic' } } });
 });
+
+/* ----------------------- reminders to gym owners ----------------------- */
+
+const CRON = 'cron-secret-for-platform-pay';
+const dayStart = (offset) => {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + offset));
+};
+
+async function dailyJob() {
+  process.env.CRON_SECRET = CRON;
+  try {
+    const res = await send('GET', '/api/jobs/reminders', { headers: { Authorization: `Bearer ${CRON}` } });
+    assert.equal(res.status, 200, res.text);
+    return res.body;
+  } finally {
+    delete process.env.CRON_SECRET;
+  }
+}
+
+let remindGym;
+const emailsTo = (address, since) => h.calls.emails.slice(since).filter((e) => e.to === address);
+
+test('the daily job reminds owners to pay: skipped without platform email, then each milestone once per period', async () => {
+  remindGym = await h.createGym('remind-gym', { currency: 'PKR' });
+  await Gym.updateOne(
+    { _id: remindGym._id },
+    { $set: { plan: plan._id, owner: { firstName: 'Sara', email: 'sara@remind-gym.test' }, subscription: { status: 'active', billingCycle: 'monthly', amount: 5000, planAmount: 5000, currency: 'PKR', currentPeriodEnd: dayStart(3), startedAt: new Date() } } }
+  );
+
+  const quiet = await dailyJob();
+  assert.deepEqual(quiet.payReminders, { skipped: 'no platform email' });
+
+  await withPlatformEmail(async () => {
+    const since = h.calls.emails.length;
+    const first = await dailyJob();
+    assert.deepEqual(first.payReminders.errors, []);
+    const mine = first.payReminders.sent.filter((s) => s.slug === 'remind-gym');
+    assert.deepEqual(mine, [{ slug: 'remind-gym', milestone: 'before3', to: 'sara@remind-gym.test', due_date: dayStart(3).toISOString().slice(0, 10) }]);
+    // Not the gym Stripe bills, nor one paid up for months.
+    assert.ok(!first.payReminders.sent.some((s) => ['card-gym', 'pay-gym'].includes(s.slug)));
+    const [mail] = emailsTo('sara@remind-gym.test', since);
+    assert.equal(mail.subject, 'Gym remind-gym: your GymsPilotPro payment is due in 3 days');
+    for (const part of ['Growth', 'PKR 5,000', 'Meezan Bank', 'PK36MEZN0001010123456702', 'Upload receipt', 'http://remind-gym.test/admin/settings?tab=billing']) {
+      assert.ok(mail.html.includes(part), part);
+    }
+
+    // The same day again: nothing more.
+    const again = await dailyJob();
+    assert.ok(!again.payReminders.sent.some((s) => s.slug === 'remind-gym'));
+    assert.equal(emailsTo('sara@remind-gym.test', since).length, 1);
+    assert.deepEqual((await gymNow(remindGym)).subscription.payReminders, [`before3@${dayStart(3).toISOString().slice(0, 10)}`]);
+  });
+});
+
+test('on the due day an owner whose gym just went overdue gets one email; the last-day reminder follows, once', async () => {
+  // Due today: the roll-over makes it past due and the overdue notice goes;
+  // the due-day reminder is then marked, not sent as a second email.
+  await Gym.updateOne({ _id: remindGym._id }, { $set: { 'subscription.currentPeriodEnd': dayStart(0), 'subscription.status': 'active', 'subscription.notices.pastDue': null } });
+  await withPlatformEmail(async () => {
+    const since = h.calls.emails.length;
+    const run = await dailyJob();
+    assert.deepEqual(run.payReminders.covered.map((c) => [c.slug, c.milestone]), [['remind-gym', 'due']]);
+    const mails = emailsTo('sara@remind-gym.test', since);
+    assert.equal(mails.length, 1, mails.map((m) => m.subject).join(' | '));
+    assert.match(mails[0].subject, /overdue/);
+    assert.equal((await gymNow(remindGym)).subscription.status, 'past_due');
+
+    // Three days later, the last reminder -- with when it is cut off -- and only once.
+    const { sendOwnerPayReminders } = h.src('platform/services/ownerPayReminders');
+    const later = new Date(dayStart(3).getTime() + 4 * 3600000);
+    const last = await sendOwnerPayReminders({ now: later });
+    assert.deepEqual(last.sent.map((s) => [s.slug, s.milestone]), [['remind-gym', 'last']]);
+    const reminder = h.calls.emails[h.calls.emails.length - 1];
+    assert.match(reminder.subject, /^Last reminder: Gym remind-gym/);
+    assert.match(reminder.html, /website, member app and admin stop being served/);
+    assert.deepEqual((await sendOwnerPayReminders({ now: later })).sent, []);
+    // A dry run says what would go and records nothing.
+    const dry = await sendOwnerPayReminders({ now: new Date(dayStart(2).getTime() + 3600000), dryRun: true });
+    assert.equal(dry.dry_run, true);
+  });
+
+  // The markers are kept for the current due date only: the earlier one's went.
+  const markers = (await gymNow(remindGym)).subscription.payReminders;
+  assert.deepEqual([...markers].sort(), [`due@${dayStart(0).toISOString().slice(0, 10)}`, `last@${dayStart(0).toISOString().slice(0, 10)}`]);
+});
+
+test('a reminder whose email fails is given back and goes on the next run', async () => {
+  const other = await h.createGym('retry-gym', { currency: 'PKR' });
+  await Gym.updateOne(
+    { _id: other._id },
+    { $set: { owner: { firstName: 'Omar', email: 'omar@retry-gym.test' }, subscription: { status: 'active', billingCycle: 'monthly', amount: 3000, currency: 'PKR', currentPeriodEnd: dayStart(3) } } }
+  );
+  const { sendOwnerPayReminders } = h.src('platform/services/ownerPayReminders');
+  await withPlatformEmail(async () => {
+    h.setEmailFailure('mail server down');
+    let run;
+    try {
+      run = await sendOwnerPayReminders();
+    } finally {
+      h.setEmailFailure(null);
+    }
+    assert.deepEqual(run.errors.map((e) => [e.slug, e.error]), [['retry-gym', 'mail server down']]);
+    assert.deepEqual((await gymNow(other)).subscription.payReminders, []);
+    const retry = await sendOwnerPayReminders();
+    assert.deepEqual(retry.sent.map((s) => s.slug), ['retry-gym']);
+  });
+});

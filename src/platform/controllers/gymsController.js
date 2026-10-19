@@ -537,6 +537,9 @@ module.exports = {
       const periodBefore = current.currentPeriodEnd ? new Date(current.currentPeriodEnd).getTime() : 0;
       const periodAfter = next.currentPeriodEnd ? new Date(next.currentPeriodEnd).getTime() : 0;
       next.notices = periodBefore === periodAfter && current.notices ? { ...current.notices } : {};
+      // The payment reminders already sent are kept by due date
+      // (services/ownerPayReminders.js): a new date starts afresh by itself.
+      if (Array.isArray(current.payReminders)) next.payReminders = [...current.payReminders];
 
       // A gym that pays by card is charged whatever Stripe says, so a change
       // to its price goes to Stripe first -- prorated -- and is written here
