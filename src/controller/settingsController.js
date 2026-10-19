@@ -507,7 +507,9 @@ const settingsController = {
   },
 
   // POST /settings/safepay/test { publicKey?, secretKey?, environment? }
+  // POST /settings/generic/test, POST /settings/<gatewayId>/test
   // POST /settings/payment-gateways/:id/test { ...that gateway's fields }
+  // (POST /settings/stripe/test stays testStripe above.)
   //
   // Checks keys against the gateway: the ones the admin has just typed, or
   // -- for a field left as its masked preview -- the stored ones, so "Test
@@ -516,7 +518,7 @@ const settingsController = {
   testGateway: async (req, res) => {
     try {
       const payments = require('../services/payments');
-      const id = req.params.id || 'safepay';
+      const id = (req.params && (req.params.id || req.params.gatewayId)) || 'safepay';
       const provider = payments.getProvider(id);
       if (!provider) return res.status(404).json({ success: false, message: `There is no payment gateway called "${id}".` });
       const body = (req.body && typeof req.body === 'object' && req.body) || {};
@@ -760,6 +762,33 @@ const settingsController = {
         const unchosen = await payments.selectedProviderId({ ...current, stripe: updateData.stripe || current.stripe, onlinePayments: {} });
         if (stored || wanted !== unchosen.id) updateData.onlinePayments = { provider: wanted };
         else choiceAlreadyRead = true;
+
+        // The choice is the source of truth: Safepay is switched on exactly
+        // when it is the gateway chosen (the screen sends <id>.enabled with
+        // it; a request that does not still gets the two in step).
+        const safepayNow = updateData.safepay || mergeSafepay(current.safepay || {}, {}, warnings);
+        if (updateData.safepay || safepayNow.enabled !== (wanted === 'safepay')) {
+          updateData.safepay = { ...safepayNow, enabled: wanted === 'safepay' };
+        }
+      }
+      // Switched on, Safepay needs both keys and the webhook secret: without
+      // the secret no payment made after the member closes the tab would
+      // ever be recorded. Refused before anything is saved, as a changed
+      // mail host without its password is.
+      if (updateData.safepay && updateData.safepay.enabled) {
+        const missing = [
+          ['secretKey', 'the Safepay secret key'],
+          ['webhookSecret', 'the Safepay webhook shared secret'],
+          ['publicKey', 'the Safepay API key (public)']
+        ].find(([field]) => !updateData.safepay[field]);
+        if (missing) {
+          return res.status(400).json({
+            success: false,
+            code: 'SECRET_REQUIRED',
+            field: `safepay.${missing[0]}`,
+            message: `To switch Safepay on, enter ${missing[1]}. Nothing was saved.`
+          });
+        }
       }
 
       if (smtp && typeof smtp === 'object') {

@@ -26,7 +26,7 @@ test('the claim filter and update express exactly that rule for the database', (
   assert.equal(filter.$or.length, 2);
   assert.deepEqual([...byStatus['payment.status'].$nin].sort(), ['cancelled', 'paid', 'processing', 'refunded']);
   // ...or a card order's claim that nothing has touched for ten minutes.
-  assert.deepEqual(stale, { 'payment.status': 'processing', 'payment.method': { $in: ['stripe', 'online'] }, updatedAt: { $lt: new Date('2026-10-09T09:50:00Z') } });
+  assert.deepEqual(stale, { 'payment.status': 'processing', 'payment.method': { $in: ['stripe', 'online', 'safepay'] }, updatedAt: { $lt: new Date('2026-10-09T09:50:00Z') } });
   assert.equal(claim.STALE_CLAIM_MS, 10 * 60 * 1000);
   assert.deepEqual([...claim.UNDONE_STATUSES].sort(), ['cancelled', 'refunded']);
   assert.deepEqual(claim.claimUpdate(), { $set: { 'payment.status': 'processing' } });

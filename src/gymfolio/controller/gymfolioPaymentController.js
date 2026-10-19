@@ -16,6 +16,7 @@ const { afterResponse } = require('../../services/afterResponse');
 const membership = require('../services/membershipService');
 const { getStripe, stripeConfig, StripeNotConfiguredError } = require('../../services/stripeClient');
 const { activeBanks } = require('./membershipController');
+const { ONLINE_METHODS } = require('../../services/paymentMethods');
 
 function userIdOf(req) {
   return req.user ? req.user._id || req.user.id : null;
@@ -98,11 +99,15 @@ const gymfolioPaymentController = {
    *
    * `card` is the online checkout (create-package-checkout-session), through
    * whichever gateway the gym chose (services/payments): Stripe as always, or
-   * Safepay. `online` names that gateway and what to call the option:
-   * { provider: 'safepay', label: 'Card, JazzCash, Easypaisa or any bank app' },
-   * { provider: 'stripe', label: 'Card' }, { provider: 'generic', label:
-   * 'Bank transfer — upload your receipt' } (no checkout of its own: members
-   * use the bank transfer), or null when nothing can be paid online now.
+   * Safepay. `online` names that gateway, what to call the option, whether it
+   * has a checkout page of its own, and whether the member may opt into
+   * automatic card payments there (the gateway charges saved cards AND the
+   * gym switched billing.autoCharge on):
+   *   { provider: 'safepay', label: 'Card, JazzCash, Easypaisa or any bank app', checkout: true, auto_pay_available }
+   *   { provider: 'stripe', label: 'Card', checkout: true, auto_pay_available: false }
+   *   { provider: 'generic', label: 'Bank transfer — upload your receipt', checkout: false, auto_pay_available: false }
+   *     (members use the bank-transfer checkout)
+   * or null when nothing can be paid online now.
    */
   async paymentMethods(req, res) {
     try {
@@ -127,7 +132,15 @@ const gymfolioPaymentController = {
           bankTransfer: banks.length > 0,
           banks,
           currency: (settings && settings.currency) || 'USD',
-          online: online.available && online.provider ? { provider: online.provider, label: online.label } : null
+          online:
+            online.available && online.provider
+              ? {
+                  provider: online.provider,
+                  label: online.label,
+                  checkout: card,
+                  auto_pay_available: !!(online.autoCharge && settings && settings.billing && settings.billing.autoCharge && settings.billing.autoCharge.enabled)
+                }
+              : null
         }
       });
     } catch (error) {
@@ -202,7 +215,7 @@ const gymfolioPaymentController = {
       // Unpaid orders are paid online only when they were meant to be (a
       // renewal raised for online payment, a checkout left unfinished): a
       // bank transfer waiting for its receipt is not turned into one.
-      if (order.payment.status !== 'paid' && order.payment.method !== 'online') {
+      if (order.payment.status !== 'paid' && !ONLINE_METHODS.includes(order.payment.method)) {
         return res.status(409).json({ success: false, code: 'ORDER_NOT_PAYABLE', message: 'This order is paid another way. Ask at the front desk if you would like to pay it online.' });
       }
       if (order.payment.status === 'paid' && membership.stripeBilled(order)) {
@@ -257,8 +270,16 @@ const gymfolioPaymentController = {
     try {
       const { sessionId } = req.params;
       if (!sessionId) return res.status(400).json({ success: false, message: 'Session ID is required' });
+      // ?provider=safepay (or any gateway but Stripe): the id is an order id.
+      const askedFor = String((req.query && req.query.provider) || (req.body && req.body.provider) || '').trim().toLowerCase();
+      const byOrder = !!askedFor && askedFor !== 'stripe';
+      const orderNotFound = () =>
+        res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'We could not find an order for this payment. If you have paid, contact the gym with your receipt.' });
+      if (byOrder && !/^[a-f\d]{24}$/i.test(sessionId)) return orderNotFound();
       if (/^[a-f\d]{24}$/i.test(sessionId)) {
         const gatewayOrder = await PackageOrder.findById(sessionId);
+        const gatewayOf = gatewayOrder && gatewayOrder.payment && gatewayOrder.payment.provider;
+        if (byOrder && (!gatewayOf || gatewayOf === 'stripe')) return orderNotFound();
         if (gatewayOrder && gatewayOrder.payment && gatewayOrder.payment.provider && gatewayOrder.payment.provider !== 'stripe') {
           const payments = require('../../services/payments');
           const provider = payments.getProvider(gatewayOrder.payment.provider);

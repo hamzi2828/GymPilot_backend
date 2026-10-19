@@ -18,12 +18,14 @@
 //                  than Stripe -- Safepay today (payment.provider says which):
 //                  card, JazzCash, Easypaisa or a bank app on the gateway's
 //                  page, or a saved card charged on the due date
+//   safepay        the same, named for the gateway (accepted as stored by the
+//                  payment links; this connector itself writes `online`)
 //
 // A method this list does not have is refused (422), never quietly filed as
 // cash: the desk's takings by method would otherwise be wrong without anyone
 // being told.
 
-const PAYMENT_METHODS = ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet', 'online'];
+const PAYMENT_METHODS = ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet', 'online', 'safepay'];
 
 const METHOD_LABELS = {
   stripe: 'Card (Stripe)',
@@ -33,12 +35,17 @@ const METHOD_LABELS = {
   jazzcash: 'JazzCash',
   easypaisa: 'Easypaisa',
   wallet: 'Other mobile wallet',
-  online: 'Online payment'
+  online: 'Online payment',
+  safepay: 'Online (Safepay)'
 };
 
 // The methods only a gateway records: a payment made through it is
 // confirmed by the gateway, never typed in at the desk.
-const GATEWAY_METHODS = ['stripe', 'online'];
+const GATEWAY_METHODS = ['stripe', 'online', 'safepay'];
+
+// Of those, the ones paid against an order through a gateway other than
+// Stripe (services/payments): Safepay's checkout, payment links, saved cards.
+const ONLINE_METHODS = ['online', 'safepay'];
 
 // What staff may record by hand. A Stripe payment is only ever made through
 // Stripe: recorded at the desk, a later refund would go looking for a card
@@ -69,7 +76,7 @@ function readDeskMethod(value, { fallback = 'cash', allowed = DESK_METHODS } = {
   if (value === 'stripe') {
     return { method: null, problem: 'Card (Stripe) payments are taken through online checkout. For a card taken on the desk terminal, choose Card.' };
   }
-  if (value === 'online') {
+  if (ONLINE_METHODS.includes(value)) {
     return { method: null, problem: 'Online payments are recorded by the payment gateway when the member pays. For money taken at the desk, choose how it was paid (cash, card, bank transfer or a wallet).' };
   }
   const offered = allowed.map((method) => `${method} (${METHOD_LABELS[method]})`).join(', ');
@@ -114,6 +121,7 @@ module.exports = {
   PAYMENT_METHODS,
   METHOD_LABELS,
   GATEWAY_METHODS,
+  ONLINE_METHODS,
   DESK_METHODS,
   isPaymentMethod,
   methodLabel,

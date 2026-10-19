@@ -208,7 +208,7 @@ test('"Test connection" asks Safepay with the saved keys, or the typed ones, and
     assert.match(wrongKey.body.message, /merchant_api_key/);
 
     // The generic gateway reports its bank accounts.
-    const generic = (await h.call(settings.testGateway, req({ params: { id: 'generic' }, body: {} }))).body;
+    const generic = (await h.call(settings.testGateway, req({ params: { gatewayId: 'generic' }, body: {} }))).body;
     assert.deepEqual([generic.success, /Settings → Banks/.test(generic.message)], [false, true]);
     await Bank.create({ name: 'Meezan Bank', accountTitle: 'Gateways Gym', accountNumber: '0101-1234567', iban: 'PK36MEZN0001010101234567' });
     const ready = (await h.call(settings.testGateway, req({ params: { id: 'generic' }, body: {} }))).body;
@@ -223,8 +223,13 @@ test('the checkout is told what the chosen gateway offers right now', async () =
     let m = await methods();
     assert.equal(m.card, true);
     assert.equal(m.cardUnavailable, null);
-    assert.deepEqual(m.online, { provider: 'safepay', label: 'Card, JazzCash, Easypaisa or any bank app' });
+    assert.deepEqual(m.online, { provider: 'safepay', label: 'Card, JazzCash, Easypaisa or any bank app', checkout: true, auto_pay_available: true });
     assert.equal(m.bankTransfer, true);
+
+    // Automatic payments are on offer only while the gym has them switched on.
+    await put({ billing: { autoCharge: { enabled: false } } });
+    assert.equal((await methods()).online.auto_pay_available, false);
+    await put({ billing: { autoCharge: { enabled: true } } });
 
     // Without the webhook secret no new payment starts.
     await Settings.updateOne({ isActive: true }, { $set: { 'safepay.webhookSecret': '' } });
@@ -236,20 +241,55 @@ test('the checkout is told what the chosen gateway offers right now', async () =
     await put({ onlinePayments: { provider: 'generic' } });
     m = await methods();
     assert.deepEqual([m.card, m.cardUnavailable.code], [false, 'BANK_TRANSFER_ONLY']);
-    assert.deepEqual(m.online, { provider: 'generic', label: 'Bank transfer — upload your receipt' });
+    assert.deepEqual(m.online, { provider: 'generic', label: 'Bank transfer — upload your receipt', checkout: false, auto_pay_available: false });
+    assert.equal((await Settings.getSettings()).safepay.enabled, false, 'choosing another gateway switches Safepay off');
 
     // Switched off on purpose.
     await put({ onlinePayments: { provider: 'none' } });
     m = await methods();
     assert.deepEqual([m.card, m.cardUnavailable.code, m.online], [false, 'ONLINE_PAYMENTS_OFF', null]);
     await put({ onlinePayments: { provider: 'safepay' } });
+    assert.equal((await Settings.getSettings()).safepay.enabled, true, 'choosing Safepay switches it on');
+  });
+});
+
+test('choosing a gateway as the screen does: the choice wins, and Safepay is not switched on without its secrets', async () => {
+  const bare = await h.createGym('gateways-bare-gym', { currency: 'PKR' });
+  await h.inGym(bare, async () => {
+    for (const [safepay, field] of [
+      [{ enabled: true }, 'safepay.secretKey'],
+      [{ enabled: true, secretKey: SECRET }, 'safepay.webhookSecret'],
+      [{ enabled: true, secretKey: SECRET, webhookSecret: WEBHOOK }, 'safepay.publicKey']
+    ]) {
+      const res = await put({ onlinePayments: { provider: 'safepay' }, safepay, stripe: { enabled: false } });
+      assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+      assert.deepEqual([res.body.code, res.body.field], ['SECRET_REQUIRED', field]);
+      assert.match(res.body.message, /Nothing was saved/);
+    }
+    // The choice alone switches Safepay on, so it is refused the same way.
+    assert.equal((await put({ onlinePayments: { provider: 'safepay' } })).body.field, 'safepay.secretKey');
+    const row = await h.rawDb(bare.database.name).collection('settings').findOne({ isActive: true });
+    assert.equal((row.onlinePayments || {}).provider, undefined, 'nothing was saved');
+    assert.ok(!row.safepay || !row.safepay.enabled);
+
+    // With its keys, the screen's request is accepted as sent.
+    const ok = await put({ onlinePayments: { provider: 'safepay' }, safepay: { enabled: true, environment: 'sandbox', publicKey: PUBLIC, secretKey: SECRET, webhookSecret: WEBHOOK }, stripe: { enabled: false } });
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+    assert.deepEqual([ok.body.data.onlinePayments.provider, ok.body.data.safepay.enabled, ok.body.data.safepay.secretKeySet, ok.body.data.safepay.webhookSecretSet], ['safepay', true, true, true]);
+    // A request that says otherwise about Safepay loses to the choice.
+    const stays = await put({ onlinePayments: { provider: 'safepay' }, safepay: { ...ok.body.data.safepay, enabled: false } });
+    assert.equal(stays.body.data.safepay.enabled, true);
+    // Switching Safepay off on its own is allowed: the gateway is then not set up.
+    const off = await put({ safepay: { enabled: false } });
+    assert.equal(off.statusCode, 200);
+    assert.deepEqual([(await methods()).card, (await methods()).cardUnavailable.code], [false, 'SAFEPAY_NOT_CONFIGURED']);
   });
 });
 
 test('every new payment setting route needs settings, and the writes need manage', async () => {
   const router = h.src('routes/allRoutes');
   const find = (method, path) => router.stack.find((entry) => entry.route && entry.route.path === path && entry.route.methods[method]);
-  for (const [method, path] of [['get', '/settings/payment-gateways'], ['post', '/settings/safepay/test'], ['post', '/settings/payment-gateways/:id/test']]) {
+  for (const [method, path] of [['get', '/settings/payment-gateways'], ['post', '/settings/safepay/test'], ['post', '/settings/payment-gateways/:id/test'], ['post', '/settings/:gatewayId/test']]) {
     const layer = find(method, path);
     assert.ok(layer, `${method} ${path} is routed`);
     assert.equal(layer.route.stack[1].handle.name, 'permissionGate', `${method} ${path} is gated`);

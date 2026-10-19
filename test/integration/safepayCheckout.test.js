@@ -110,8 +110,14 @@ test('the success page is answered by order id: not yet, then paid once Safepay 
     assert.equal(answer.body.order.packageName, 'Monthly');
     // Only what the page shows: no payer details.
     assert.equal(answer.body.order.customerInfo, undefined);
-    // An id with no order is not found; a Stripe session id still goes to Stripe.
-    assert.equal((await verify('64b7f0c2a1b2c3d4e5f60718')).statusCode, 404);
+    // As the success page asks: ?provider=safepay with the order id.
+    const asked = await verify(id, { provider: 'safepay' });
+    assert.deepEqual([asked.statusCode, asked.body.success, asked.body.paid, asked.body.order.orderNumber], [200, true, true, res.body.orderNumber]);
+    // An id with no order is not found, with or without the provider; so is a session id sent as a Safepay order.
+    for (const [missing, query] of [['64b7f0c2a1b2c3d4e5f60718', {}], ['64b7f0c2a1b2c3d4e5f60718', { provider: 'safepay' }], ['cs_test_abc', { provider: 'safepay' }]]) {
+      const answer = await verify(missing, query);
+      assert.deepEqual([answer.statusCode, answer.body.code], [404, 'ORDER_NOT_FOUND'], `${missing} ${JSON.stringify(query)}`);
+    }
   });
 });
 
@@ -237,7 +243,10 @@ test('a gym on Stripe sells through Stripe exactly as before, and Safepay is nev
       assert.equal(order.payment.provider, undefined);
 
       const methods = (await h.call(controller.paymentMethods, {})).body.data;
-      assert.deepEqual([methods.card, methods.online], [true, { provider: 'stripe', label: 'Card' }]);
+      assert.deepEqual([methods.card, methods.online], [true, { provider: 'stripe', label: 'Card', checkout: true, auto_pay_available: false }]);
+      // A Stripe order is not answered as a Safepay one.
+      const asSafepay = await h.call(controller.verifyPackagePayment, { params: { sessionId: String(order._id) }, query: { provider: 'safepay' } });
+      assert.deepEqual([asSafepay.statusCode, asSafepay.body.code], [404, 'ORDER_NOT_FOUND']);
     });
   } finally {
     h.setStripe(null);

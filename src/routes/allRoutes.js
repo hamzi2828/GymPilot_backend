@@ -353,6 +353,8 @@ router.post('/settings/stripe/test', auth, requirePermission('settings', 'manage
 router.get('/settings/payment-gateways', auth, requirePermission('settings'), settingsController.paymentGateways);
 router.post('/settings/safepay/test', auth, requirePermission('settings', 'manage'), settingsController.testGateway);
 router.post('/settings/payment-gateways/:id/test', auth, requirePermission('settings', 'manage'), settingsController.testGateway);
+// Any other gateway by its id (generic today; Stripe keeps its own route above).
+router.post('/settings/:gatewayId/test', auth, requirePermission('settings', 'manage'), settingsController.testGateway);
 
 // Hero Slide routes
 router.get('/hero-slides/active', heroSlideController.getActiveSlides); // Public route

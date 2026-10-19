@@ -66,7 +66,7 @@ const STALE_CLAIM_MS = 10 * 60 * 1000;
 // one paid online through another gateway (Safepay: method 'online'). A bank
 // transfer sits at 'processing' while its receipt waits to be checked,
 // however long that takes, and is never a claim gone stale.
-const CLAIMED_METHODS = ['stripe', 'online'];
+const CLAIMED_METHODS = ['stripe', 'online', 'safepay'];
 
 function staleBefore(now = new Date()) {
   return new Date(new Date(now).getTime() - STALE_CLAIM_MS);

@@ -112,6 +112,7 @@ async function onlineStatus(settings) {
     provider: provider.id,
     available: !!status.available,
     checkout: !!(status.available && provider.capabilities.checkout),
+    autoCharge: !!provider.capabilities.autoCharge,
     code: status.code || null,
     reason: status.reason || '',
     label: provider.checkoutLabel
