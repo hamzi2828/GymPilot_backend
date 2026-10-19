@@ -14,12 +14,16 @@
 //   jazzcash, easypaisa, wallet
 //                  mobile wallets, common where gyms are paid by phone;
 //                  `wallet` is any other one
+//   online         paid online through the gym's own payment gateway other
+//                  than Stripe -- Safepay today (payment.provider says which):
+//                  card, JazzCash, Easypaisa or a bank app on the gateway's
+//                  page, or a saved card charged on the due date
 //
 // A method this list does not have is refused (422), never quietly filed as
 // cash: the desk's takings by method would otherwise be wrong without anyone
 // being told.
 
-const PAYMENT_METHODS = ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet'];
+const PAYMENT_METHODS = ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet', 'online'];
 
 const METHOD_LABELS = {
   stripe: 'Card (Stripe)',
@@ -28,13 +32,18 @@ const METHOD_LABELS = {
   cash: 'Cash',
   jazzcash: 'JazzCash',
   easypaisa: 'Easypaisa',
-  wallet: 'Other mobile wallet'
+  wallet: 'Other mobile wallet',
+  online: 'Online payment'
 };
+
+// The methods only a gateway records: a payment made through it is
+// confirmed by the gateway, never typed in at the desk.
+const GATEWAY_METHODS = ['stripe', 'online'];
 
 // What staff may record by hand. A Stripe payment is only ever made through
 // Stripe: recorded at the desk, a later refund would go looking for a card
-// charge that does not exist.
-const DESK_METHODS = PAYMENT_METHODS.filter((method) => method !== 'stripe');
+// charge that does not exist. The same goes for an online payment.
+const DESK_METHODS = PAYMENT_METHODS.filter((method) => !GATEWAY_METHODS.includes(method));
 
 function isPaymentMethod(value) {
   return PAYMENT_METHODS.includes(value);
@@ -59,6 +68,9 @@ function readDeskMethod(value, { fallback = 'cash', allowed = DESK_METHODS } = {
   if (allowed.includes(value)) return { method: value, problem: null };
   if (value === 'stripe') {
     return { method: null, problem: 'Card (Stripe) payments are taken through online checkout. For a card taken on the desk terminal, choose Card.' };
+  }
+  if (value === 'online') {
+    return { method: null, problem: 'Online payments are recorded by the payment gateway when the member pays. For money taken at the desk, choose how it was paid (cash, card, bank transfer or a wallet).' };
   }
   const offered = allowed.map((method) => `${method} (${METHOD_LABELS[method]})`).join(', ');
   return { method: null, problem: `"${value}" is not a payment method this gym records. Use one of: ${offered}.` };
@@ -101,6 +113,7 @@ function readExpenseMethod(value, { fallback = 'cash', current = null } = {}) {
 module.exports = {
   PAYMENT_METHODS,
   METHOD_LABELS,
+  GATEWAY_METHODS,
   DESK_METHODS,
   isPaymentMethod,
   methodLabel,

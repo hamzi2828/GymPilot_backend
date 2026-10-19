@@ -18,7 +18,10 @@ const SECRET_PATHS = [
   'messaging.whatsapp.authToken',
   'messaging.whatsapp.accessToken',
   'messaging.whatsapp.webhookToken',
-  'messaging.push.vapidPrivateKey'
+  'messaging.push.vapidPrivateKey',
+  // ---- Safepay (online payments in Pakistan) ----
+  'safepay.secretKey',
+  'safepay.webhookSecret'
 ];
 
 const settingsSchema = new mongoose.Schema(
@@ -222,6 +225,56 @@ const settingsSchema = new mongoose.Schema(
       webhookSecret: secretString(),
       enabled: { type: Boolean, default: false }
     },
+
+    // ---- Online payments: which gateway, Safepay's keys, billing reminders ----
+    //
+    // A gym takes online payments through ONE gateway at a time
+    // (services/payments: the registry of gateways). `provider` is unset on
+    // a gym from before the choice existed; it then reads as 'stripe' when
+    // Stripe is switched on and 'none' otherwise (payments.selectedProviderId),
+    // so no gym needs migrating. Not an enum: a gateway added later is a new
+    // module in services/payments/providers, and the controller checks the
+    // value against that list.
+    onlinePayments: {
+      provider: { type: String, default: undefined, trim: true }
+    },
+    // The gym's own Safepay account (services/safepay). Members pay straight
+    // into the gym's bank account; GymsPilotPro never holds the money. The
+    // secret key and the webhook's shared secret are sealed at rest, masked
+    // in the admin response and never in the public one.
+    safepay: {
+      enabled: { type: Boolean, default: false },
+      environment: { type: String, enum: ['sandbox', 'production'], default: 'sandbox' },
+      // Safepay calls this the API key: it identifies the account and is not
+      // a secret (it goes into every payment session).
+      publicKey: { type: String, default: '', trim: true },
+      secretKey: secretString(),
+      webhookSecret: secretString()
+    },
+    // Payment reminders before, on and after a membership's due date, and
+    // whether a member's saved card may be charged on it (services/safepay
+    // chargeSavedMethod). The defaults below are what an unset field means.
+    billing: {
+      // Days before the due date a reminder goes out, each 0..30.
+      reminderDaysBefore: { type: [Number], default: () => [3] },
+      dueDayReminder: { type: Boolean, default: true },
+      // The last day to pay is the due date plus this many days; 0 sends no
+      // last-day message.
+      lastDayAfterDue: { type: Number, default: 3, min: 0, max: 30 },
+      sendVia: {
+        email: { type: Boolean, default: true },
+        sms: { type: Boolean, default: false },
+        whatsapp: { type: Boolean, default: false },
+        push: { type: Boolean, default: true }
+      },
+      // Switched on by the gym once Safepay has confirmed merchant-initiated
+      // (automatic) charges for its account. Off, no card is saved at
+      // checkout and none is charged.
+      autoCharge: {
+        enabled: { type: Boolean, default: false }
+      }
+    },
+    // ---- end of online payments ----
 
     // Outbound mail configuration, used for member credential emails.
     smtp: {

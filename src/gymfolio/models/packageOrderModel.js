@@ -151,6 +151,57 @@ const packageOrderSchema = new mongoose.Schema(
       stripeInvoiceId: { type: String, default: null },
       lastPaymentError: { type: String, default: '' },
 
+      // ---- Online gateways other than Stripe (services/payments) ----
+      // Which gateway took (or is taking) this order's online payment, when
+      // it is not Stripe: 'safepay'. Unset on every other order.
+      provider: { type: String, default: undefined },
+      // Safepay: every checkout opened for this order (a member may open
+      // more than one, and pay the balance of a part-paid order separately),
+      // and the one that paid. Card details are never here -- Safepay keeps
+      // the card; at most a saved card's token is kept, sealed, on the member.
+      safepay: {
+        type: new mongoose.Schema(
+          {
+            // The tracker that paid the order (or, before that, the latest opened).
+            tracker: { type: String, default: null },
+            fee: { type: Number, default: null },   // Safepay's fee on the paying tracker, major units
+            net: { type: Number, default: null },   // what reached the gym, major units
+            trackers: {
+              type: [
+                new mongoose.Schema(
+                  {
+                    token: { type: String, required: true },
+                    // 'order': pays the order and activates it; 'balance':
+                    // pays what is still owed on a part-paid order.
+                    purpose: { type: String, enum: ['order', 'balance'], default: 'order' },
+                    // 'checkout': the member on Safepay's page; 'auto': a
+                    // saved card charged by the gym (chargeSavedMethod).
+                    kind: { type: String, enum: ['checkout', 'auto'], default: 'checkout' },
+                    amount: { type: Number, required: true },        // major units
+                    amountMinor: { type: Number, required: true },   // what Safepay was asked for
+                    currency: { type: String, default: '' },
+                    status: { type: String, enum: ['pending', 'paid', 'failed', 'refunded'], default: 'pending' },
+                    saveCard: { type: Boolean, default: false },
+                    autoPayConsent: { type: Boolean, default: false },
+                    customerToken: { type: String, default: null },
+                    savedMethodId: { type: String, default: null },
+                    fee: { type: Number, default: null },
+                    net: { type: Number, default: null },
+                    error: { type: String, default: '' },
+                    createdAt: { type: Date, default: Date.now },
+                    paidAt: { type: Date, default: null }
+                  },
+                  { _id: false }
+                )
+              ],
+              default: []
+            }
+          },
+          { _id: false }
+        ),
+        default: undefined
+      },
+
       // ---- Bank transfer: the receipt the member sent and what staff did with it ----
       proof: {
         url: { type: String, default: '' },
@@ -419,6 +470,9 @@ packageOrderSchema.index({ status: 1, 'payment.status': 1, 'subscription.endDate
 // The webhook's lookup for one-off card payments; sparse because most orders
 // (subscriptions, bank transfers, cash) never have one.
 packageOrderSchema.index({ 'payment.stripePaymentIntentId': 1 }, { sparse: true });
+// The Safepay webhook's lookup: which order a tracker belongs to. Sparse,
+// like the one above: only orders paid through Safepay carry any.
+packageOrderSchema.index({ 'payment.safepay.trackers.token': 1 }, { sparse: true });
 // Revenue over a period is read by when the money arrived: the first payment,
 // and each renewal (see accounts/services/ledger.js).
 packageOrderSchema.index({ 'payment.paidAt': -1 });

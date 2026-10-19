@@ -1,6 +1,6 @@
 // src/gymfolio/services/activationClaim.js
 //
-// Who gets to activate a Stripe-paid order.
+// Who gets to activate an order paid online (Stripe, or another gateway).
 //
 // Three callers can learn that the money arrived: the success page's verify
 // call, the checkout.session.completed webhook, and payment_intent.succeeded
@@ -62,10 +62,11 @@ const CLAIMED_STATUS = 'processing';
 // makes the takeover wait a little longer.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
-// Only a card order's 'processing' is a claim. A bank transfer sits at
-// 'processing' while its receipt waits to be checked, however long that
-// takes, and is never a claim gone stale.
-const CLAIMED_METHOD = 'stripe';
+// Only a gateway order's 'processing' is a claim: a Stripe card order, or
+// one paid online through another gateway (Safepay: method 'online'). A bank
+// transfer sits at 'processing' while its receipt waits to be checked,
+// however long that takes, and is never a claim gone stale.
+const CLAIMED_METHODS = ['stripe', 'online'];
 
 function staleBefore(now = new Date()) {
   return new Date(new Date(now).getTime() - STALE_CLAIM_MS);
@@ -87,7 +88,7 @@ function claimable(order, now = new Date()) {
   if (canClaimActivation(payment.status)) return true;
   return (
     payment.status === CLAIMED_STATUS &&
-    payment.method === CLAIMED_METHOD &&
+    CLAIMED_METHODS.includes(payment.method) &&
     !!order.updatedAt &&
     new Date(order.updatedAt).getTime() < staleBefore(now).getTime()
   );
@@ -96,7 +97,7 @@ function claimable(order, now = new Date()) {
 /** Whether an order, as it was read, is held by a claim (live or stale). */
 function held(order) {
   const payment = (order && order.payment) || {};
-  return payment.status === CLAIMED_STATUS && payment.method === CLAIMED_METHOD;
+  return payment.status === CLAIMED_STATUS && CLAIMED_METHODS.includes(payment.method);
 }
 
 /**
@@ -111,7 +112,7 @@ function claimFilter(orderId, now = new Date()) {
     _id: orderId,
     $or: [
       { 'payment.status': { $nin: [...REFUSED] } },
-      { 'payment.status': CLAIMED_STATUS, 'payment.method': CLAIMED_METHOD, updatedAt: { $lt: staleBefore(now) } }
+      { 'payment.status': CLAIMED_STATUS, 'payment.method': { $in: [...CLAIMED_METHODS] }, updatedAt: { $lt: staleBefore(now) } }
     ]
   };
 }
@@ -139,6 +140,7 @@ module.exports = {
   BLOCKING_STATUSES: [...BLOCKING],
   UNDONE_STATUSES: [...UNDONE],
   CLAIMED_STATUS,
+  CLAIMED_METHODS: [...CLAIMED_METHODS],
   STALE_CLAIM_MS,
   canClaimActivation,
   claimable,

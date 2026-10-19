@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const M = require('../../src/services/paymentMethods');
 
 test('every method has a label, and the list is the one the contract names', () => {
-  assert.deepEqual(M.PAYMENT_METHODS, ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet']);
+  assert.deepEqual(M.PAYMENT_METHODS, ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet', 'online']);
   for (const method of M.PAYMENT_METHODS) assert.ok(M.METHOD_LABELS[method], method);
   assert.equal(M.methodLabel('stripe'), 'Card (Stripe)');
   assert.equal(M.methodLabel('card'), 'Card');
@@ -40,4 +40,13 @@ test('Stripe is not a desk method: it is only ever taken through checkout', () =
   const read = M.readDeskMethod('stripe');
   assert.equal(read.method, null);
   assert.match(read.problem, /online checkout/);
+});
+
+test('an online payment is not a desk method either: only the gateway records one', () => {
+  assert.ok(!M.DESK_METHODS.includes('online'));
+  assert.deepEqual(M.GATEWAY_METHODS, ['stripe', 'online']);
+  const read = M.readDeskMethod('online');
+  assert.equal(read.method, null);
+  assert.match(read.problem, /recorded by the payment gateway/);
+  assert.doesNotMatch(M.readDeskMethod('paypal').problem, /Online payment/);
 });

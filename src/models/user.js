@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { secretString } = require('../services/secretBox');
 
 // Address sub-schema
 const addressSchema = new mongoose.Schema({
@@ -142,6 +143,32 @@ const medicalSchema = new mongoose.Schema({
         answers: { type: [{ question: String, answer: Boolean }], default: [] },
         flagged: { type: Boolean, default: false }
     }
+}, { _id: false });
+
+// ---- Online payments: saved cards ----
+// One card the member saved through the gym's payment gateway. `token` is
+// the gateway's reference for the card (Safepay: the wallet payment-method
+// token), sealed at rest like a Settings secret; `customerToken` is the
+// gateway customer the card is saved under. `autoPay` is whether it is
+// charged on each due date; `consentText` is the sentence the member agreed
+// to, `consentAt` when.
+const savedMethodSchema = new mongoose.Schema({
+    id: { type: String, required: true },
+    provider: { type: String, required: true, default: 'safepay' },
+    token: secretString(),
+    customerToken: { type: String, default: null },
+    brand: { type: String, default: '' },
+    last4: { type: String, default: '' },
+    expMonth: { type: Number, default: null },
+    expYear: { type: Number, default: null },
+    autoPay: { type: Boolean, default: true },
+    consentAt: { type: Date, default: null },
+    consentText: { type: String, default: '' },
+    createdAt: { type: Date, default: Date.now }
+}, { _id: false });
+
+const billingSchema = new mongoose.Schema({
+    savedMethods: { type: [savedMethodSchema], default: [] }
 }, { _id: false });
 
 // '' and null are "no email": left unset rather than stored, so the partial
@@ -363,6 +390,17 @@ const userSchema = new mongoose.Schema({
     // The staff equivalent of memberCode ("TR-0007"), so a cleaner can be
     // found at the desk the same way a member can.
     staffCode: { type: String, default: null, trim: true },
+
+    // ---- Online payments: saved cards (services/safepay/cards.js) ----
+    //
+    // Cards the member saved, with their consent, to be charged on each due
+    // date. Never card data: only the gateway's token for the card (sealed
+    // at rest) and what may be shown -- brand, last four digits, expiry.
+    // `select: false`, like `medical`: it leaves the database only for a
+    // query that names it (`.select('+billing')`), so no profile, list or
+    // sign-in response can carry it by accident.
+    // No default: an account that never saved a card has no such field.
+    billing: { type: billingSchema, default: undefined, select: false },
 
     // ---- Password reset ---------------------------------------------------
     //
