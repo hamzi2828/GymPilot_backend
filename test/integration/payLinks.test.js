@@ -466,9 +466,11 @@ async function upload(token, { file = PNG, type = 'image/png', name = 'receipt.p
   return { status: res.status, body: json, text };
 }
 
+// Every receipt this file uploaded is in its gym's own folder: removed whole.
 require('node:test').after(() => {
   const root = path.resolve(__dirname, '..', '..');
   for (const url of stored) fs.promises.unlink(path.join(root, url)).catch(() => {});
+  fs.rmSync(path.join(root, 'uploads', 'pay-links-gym'), { recursive: true, force: true });
 });
 
 async function freshRenewal(first) {
