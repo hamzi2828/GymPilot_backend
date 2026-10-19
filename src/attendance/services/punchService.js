@@ -45,13 +45,15 @@ function operatorLabel(user) {
   return [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.email;
 }
 
-function punchContext(operator, device, method, requestId, offline) {
+function punchContext(operator, device, method, requestId, offline, matchScore) {
   return {
     // Only when the desk sent one (see repeatedPunch).
     ...(requestId ? { requestId } : {}),
     // A scan the desk queued while it had no connection and sent later, at
     // the time it was scanned (see readScannedAt).
     ...(offline ? { offline: true } : {}),
+    // How close the face the camera saw was to the one on file (readMatchScore).
+    ...(matchScore !== undefined ? { matchScore } : {}),
     by: operator._id,
     byName: operatorLabel(operator),
     device: device.deviceLabel || '',
@@ -573,6 +575,21 @@ function readRequestId(value) {
   return REQUEST_ID.test(id) ? id : null;
 }
 
+/**
+ * The `match_score` a face punch carries -- the desk's cosine similarity
+ * between the face it saw and the one on file -- rounded to three places:
+ * undefined when it has none, null when it is not a number from 0 to 1 (the
+ * caller refuses the punch). Kept with the visit so an office looking at a
+ * doubtful check-in can see how sure the desk was.
+ */
+function readMatchScore(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const score = Math.round(value * 1000) / 1000;
+  // `|| 0`: a rounded -0.0004 is a score of 0, not -0.
+  return score >= 0 && score <= 1 ? score || 0 : null;
+}
+
 // The visit as it stood when it was opened, for answering a repeated
 // check-in after the person has since checked out.
 function asCheckedIn(record) {
@@ -752,7 +769,7 @@ async function refusedEntry({ person, standing, refusal, at, voice }) {
   };
 }
 
-async function recordPunch({ personType, personId, operator, device, method = 'fingerprint', requestId, scannedAt }) {
+async function recordPunch({ personType, personId, operator, device, method = 'fingerprint', requestId, scannedAt, matchScore }) {
   const person = await resolvePerson(personType, personId);
   if (!person) {
     return {
@@ -763,7 +780,7 @@ async function recordPunch({ personType, personId, operator, device, method = 'f
 
   // A queued scan is judged at the moment it was scanned (see readScannedAt).
   const now = scannedAt || new Date();
-  const context = punchContext(operator, device, method, requestId, Boolean(scannedAt));
+  const context = punchContext(operator, device, method, requestId, Boolean(scannedAt), matchScore);
   // The gym's attendance settings, read at most once per scan and only by a
   // scan that needs them (see attendanceSettings).
   let settingsRead = null;
@@ -1132,6 +1149,7 @@ module.exports = {
   recordPunch,
   readRequestId,
   readScannedAt,
+  readMatchScore,
   OFFLINE_MAX_HOURS,
   entryRefusal,
   refuseEntrySettings,

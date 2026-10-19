@@ -20,6 +20,7 @@ const controller = require('../controller/adminAttendanceController');
 const corrections = require('../controller/attendanceCorrectionController');
 const myController = require('../controller/myAttendanceController');
 const deskCode = require('../controller/deskCodeController');
+const faces = require('../controller/faceController');
 
 // A member reading their OWN attendance. Registered before the permission gate
 // below, so it needs nothing but a valid token -- asking a member to hold the
@@ -33,11 +34,16 @@ router.get('/me', auth, myController.me);
 router.get('/me/qr', auth, myController.qr);
 
 // A member (or a member of staff) checking themselves in with their phone, by
-// scanning the code on a front-desk screen. The one write a website or phone
+// scanning the code on a front-desk screen. The one punch a website or phone
 // session can make here, and only for the account itself: the visit is the
 // desk's -- recorded under the desk account and the PC that showed the code
 // (controller/deskCodeController.js) -- and the code is good for a minute.
 router.post('/me/checkin', auth, deskCode.limitCheckins, deskCode.checkIn);
+
+// Whether the account's face is on file for the desk's camera, and taking it
+// off -- withdrawing consent. Theirs alone (controller/faceController.js).
+router.get('/me/face', auth, faces.mine);
+router.delete('/me/face', auth, faces.removeMine);
 
 // Both gates on every route BELOW: `auth` only proves the token is valid, not
 // that the account may touch the gym's attendance. The level follows the

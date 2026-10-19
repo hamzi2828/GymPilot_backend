@@ -148,7 +148,7 @@ test('a kiosk is refused the fingerprint endpoints outright, unlock or not; the 
   });
 });
 
-test('the routes: templates and enrolment carry the kiosk refusal, and nothing else does', () => {
+test('the routes: templates, faces and enrolment carry the kiosk refusal, and nothing else does', () => {
   const chains = new Map(
     desktopRoutes.stack
       .filter((layer) => layer.route)
@@ -158,6 +158,10 @@ test('the routes: templates and enrolment carry the kiosk refusal, and nothing e
   assert.deepEqual(chains.get('/templates'), ['desktopAuth', 'notOnKiosk', 'templates']);
   // Refused before the enrolment grant is even asked about.
   assert.deepEqual(chains.get('/enroll'), ['desktopAuth', 'notOnKiosk', 'requireEnrollPermission', 'enroll']);
+  // Faces on the same terms as fingers.
+  assert.deepEqual(chains.get('/face-templates'), ['desktopAuth', 'notOnKiosk', 'faceTemplates']);
+  assert.deepEqual(chains.get('/face-enroll'), ['desktopAuth', 'notOnKiosk', 'requireEnrollPermission', 'faceEnroll']);
+  assert.deepEqual(chains.get('/face-remove'), ['desktopAuth', 'notOnKiosk', 'requireEnrollPermission', 'faceRemove']);
 
   for (const path of ['/session', '/logout', '/recent', '/unlock', '/people', '/punch', '/checkin-code']) {
     assert.ok(chains.has(path), path);

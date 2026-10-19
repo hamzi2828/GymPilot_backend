@@ -56,6 +56,7 @@ test('controllers load with their handlers in place', () => {
   loads('../../src/gymfolio/controller/classBookingController', ['create', 'cancel']);
   loads('../../src/attendance/controller/desktopAppController', ['recent', 'punch', 'punchReply', 'logPunch']);
   loads('../../src/attendance/controller/deskCodeController', ['checkinCode', 'checkIn', 'limitCheckins']);
+  loads('../../src/attendance/controller/faceController', ['faceTemplates', 'faceEnroll', 'faceRemove', 'list', 'remove', 'mine', 'removeMine']);
   loads('../../src/controller/heroSlideController', ['createSlide', 'updateSlide', 'toggleSlideStatus']);
   loads('../../src/controller/homeSectionController', ['uploadVideo', 'uploadImage']);
   loads('../../src/controller/posController', ['createSale', 'adjustStock', 'refundSale']);

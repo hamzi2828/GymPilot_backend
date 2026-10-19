@@ -12,6 +12,7 @@ const PackageOrder = require('../gymfolio/models/packageOrderModel');
 const ClassBooking = require('../gymfolio/models/classBookingModel');
 const Attendance = require('../attendance/models/attendanceModel');
 const Fingerprint = require('../attendance/models/fingerprintModel');
+const FaceTemplate = require('../attendance/models/faceTemplateModel');
 const Contact = require('../models/contactModel');
 const AdminAuditLog = require('../models/adminAuditLogModel');
 const twoFactor = require('../services/twoFactorService');
@@ -308,17 +309,24 @@ module.exports = {
       user.consents.biometric = consentRecord(given, 'portal', user._id);
       await user.save();
 
-      // Withdrawing consent means the templates go too.
+      // Withdrawing consent means the templates go too -- a face for the
+      // desk's camera as well as the fingerprints: the answer is no to both.
       let removed = 0;
+      let facesRemoved = 0;
       if (!given) {
-        const result = await Fingerprint.deleteMany({ personType: { $in: ['member', 'staff'] }, personId: user._id });
-        removed = result.deletedCount || 0;
+        const [fingers, faces] = await Promise.all([
+          Fingerprint.deleteMany({ personType: { $in: ['member', 'staff'] }, personId: user._id }),
+          FaceTemplate.deleteMany({ personId: user._id })
+        ]);
+        removed = fingers.deletedCount || 0;
+        facesRemoved = faces.deletedCount || 0;
       }
+      const gone = [removed && `${removed} stored fingerprint(s)`, facesRemoved && 'your stored face'].filter(Boolean).join(' and ');
 
       return res.json({
         success: true,
-        message: given ? 'Thanks — you can now register a fingerprint at reception.' : `Consent withdrawn${removed ? ` and ${removed} stored fingerprint(s) deleted` : ''}.`,
-        data: { biometric: user.consents.biometric, fingerprintsRemoved: removed }
+        message: given ? 'Thanks — you can now register a fingerprint at reception.' : `Consent withdrawn${gone ? ` and ${gone} deleted` : ''}.`,
+        data: { biometric: user.consents.biometric, fingerprintsRemoved: removed, facesRemoved }
       });
     } catch (error) {
       console.error('[security] consent failed:', error);
@@ -346,13 +354,19 @@ module.exports = {
       await user.save();
 
       let removed = 0;
+      let facesRemoved = 0;
       if (!given) {
-        const result = await Fingerprint.deleteMany({ personId: user._id });
-        removed = result.deletedCount || 0;
+        const [fingers, faces] = await Promise.all([
+          Fingerprint.deleteMany({ personId: user._id }),
+          FaceTemplate.deleteMany({ personId: user._id })
+        ]);
+        removed = fingers.deletedCount || 0;
+        facesRemoved = faces.deletedCount || 0;
       }
+      const gone = [removed && `${removed} fingerprint(s)`, facesRemoved && 'their face'].filter(Boolean).join(' and ');
       return res.json({
         success: true,
-        message: given ? `Biometric consent recorded for ${labelOf(user)}.` : `Consent withdrawn for ${labelOf(user)}${removed ? `; ${removed} fingerprint(s) deleted` : ''}.`,
+        message: given ? `Biometric consent recorded for ${labelOf(user)}.` : `Consent withdrawn for ${labelOf(user)}${gone ? `; ${gone} deleted` : ''}.`,
         data: { biometric: user.consents.biometric }
       });
     } catch (error) {
@@ -376,13 +390,14 @@ module.exports = {
       // be theirs: sign-up takes any address, and this is a download of
       // whatever was bought or asked under it (services/emailVerification.js).
       const ownsEmail = !!user.email && verification.emailIsVerified(user);
-      const [orders, bookings, attendance, fingerprints, contacts] = await Promise.all([
+      const [orders, bookings, attendance, fingerprints, faces, contacts] = await Promise.all([
         PackageOrder.find(ownsEmail ? { $or: [{ userId: user._id }, { 'customerInfo.email': user.email }] } : { userId: user._id }).lean(),
         ClassBooking.find({ userId: user._id }).lean(),
         // Every visit on record, voided ones included: an export is the
         // member's whole data, not what the totals count.
         Attendance.find({ personId: user._id }).setOptions({ withVoided: true }).sort({ checkInAt: -1 }).lean(),
         Fingerprint.find({ personId: user._id }).select('fingerIndex enrolledByName enrolledDevice isActive createdAt updatedAt').lean(),
+        FaceTemplate.find({ personId: user._id }).select('model count consentAt enrolledByName device isActive createdAt updatedAt').lean(),
         // Enquiries keep the address as `emailAddress`.
         ownsEmail ? Contact.find({ emailAddress: user.email }).lean().catch(() => []) : []
       ]);
@@ -403,13 +418,14 @@ module.exports = {
 
       const payload = {
         exported_at: new Date().toISOString(),
-        note: 'A copy of the personal data this gym holds about you. Fingerprint templates are encrypted and not included; only the fact that they exist.'
+        note: 'A copy of the personal data this gym holds about you. Fingerprint and face templates are encrypted and not included; only the fact that they exist.'
           + (user.email && !ownsEmail ? ' Your email address is not confirmed yet, so anything bought or asked as a guest under it is left out: confirm it from the link we emailed you and download again.' : ''),
         account,
         memberships: orders,
         class_bookings: bookings,
         attendance,
         fingerprints_on_file: fingerprints,
+        face_on_file: faces,
         enquiries: contacts
       };
 

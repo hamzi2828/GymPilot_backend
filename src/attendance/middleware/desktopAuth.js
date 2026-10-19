@@ -98,7 +98,7 @@ function requireEnrollPermission(req, res, next) {
   if (!req.desktopUser || !req.desktopUser.allowFingerprintEnrollment) {
     return res.status(403).json({
       success: false,
-      message: 'This account is not allowed to register fingerprints.'
+      message: 'This account is not allowed to register fingerprints or faces.'
     });
   }
   return next();
@@ -191,20 +191,20 @@ function kioskStaffOnly(selfService) {
   };
 }
 
-// The fingerprint side of the desk -- /templates, which hands out every
-// enrolled template decrypted, and /enroll, which writes new ones -- belongs
-// to the Windows app behind the counter, next to the reader. A kiosk has no
-// reader and stands on the public side, so it is refused outright; a staff
-// unlock does not open these. 403: this client may never do it, whatever
-// is typed. (The kiosk never calls either, so its "403 means sign in again"
-// is not reached by accident.)
+// The biometric side of the desk -- /templates and /face-templates, which
+// hand out every enrolled template decrypted, and the enrolment and removal
+// routes -- belongs to the Windows app behind the counter, next to the reader
+// and the camera. A kiosk stands on the public side, so it is refused
+// outright; a staff unlock does not open these. 403: this client may never do
+// it, whatever is typed. (The kiosk never calls any of them, so its "403
+// means sign in again" is not reached by accident.)
 function notOnKiosk(req, res, next) {
   if (!isKioskToken(req.desktopToken)) return next();
 
   return res.status(403).json({
     success: false,
     code: 'KIOSK_NOT_ALLOWED',
-    message: 'The web kiosk cannot use fingerprints. Use the front-desk app for that.'
+    message: 'The web kiosk cannot use fingerprints or faces. Use the front-desk app for that.'
   });
 }
 

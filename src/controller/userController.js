@@ -55,9 +55,9 @@ async function activeAdminCount() {
 // What has to happen when an account is deleted, beyond the document going:
 // its username is released in the platform directory (or the phone app keeps
 // resolving it to a gym), its front-desk tokens stop working, and any
-// fingerprint templates -- biometric data that must not outlive the person --
-// are removed. None of these may block the deletion itself; a failure is
-// logged and the account is still gone.
+// fingerprint and face templates -- biometric data that must not outlive the
+// person -- are removed. None of these may block the deletion itself; a
+// failure is logged and the account is still gone.
 async function releaseAccount(user, { by = null } = {}) {
     const id = user._id || user.id;
     try {
@@ -74,9 +74,10 @@ async function releaseAccount(user, { by = null } = {}) {
     }
     try {
         const Fingerprint = require('../attendance/models/fingerprintModel');
-        await Fingerprint.deleteMany({ personId: id });
+        const FaceTemplate = require('../attendance/models/faceTemplateModel');
+        await Promise.all([Fingerprint.deleteMany({ personId: id }), FaceTemplate.deleteMany({ personId: id })]);
     } catch (error) {
-        console.error('[users] could not delete fingerprints of', String(id), '-', error.message);
+        console.error('[users] could not delete fingerprints or faces of', String(id), '-', error.message);
     }
     // A deleted account's phones and browsers must stop getting the gym's
     // notifications.

@@ -209,6 +209,10 @@ module.exports = {
   fingerName,
   readFinger,
   groupFingers,
+  // The faces on file are listed the same way (faceController.js).
+  describeOwners,
+  matchesSearch,
+  readPaging,
 
   // -------------------------------------------------------------------------
   // GET /api/attendance/fingerprints

@@ -40,7 +40,10 @@ const punchContextSchema = new mongoose.Schema(
     requestId: { type: String },
     // Scanned while the desk had no connection, queued on that PC and sent
     // later under the time it was scanned (punchService.readScannedAt).
-    offline: { type: Boolean }
+    offline: { type: Boolean },
+    // A face punch: how close, 0 to 1, the face the camera saw was to the one
+    // on file (punchService.readMatchScore).
+    matchScore: { type: Number }
   },
   { _id: false }
 );

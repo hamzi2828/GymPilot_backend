@@ -233,6 +233,12 @@ router.get('/api/attendance/fingerprints', auth, requirePermission('attendance',
 router.delete('/api/attendance/fingerprints/:personType/:personId', auth, requirePermission('attendance', 'manage'), fingerprintAdminController.remove);
 router.delete('/api/attendance/fingerprints/:personType/:personId/:finger', auth, requirePermission('attendance', 'manage'), fingerprintAdminController.remove);
 
+// Faces on file for the desk's camera, on the same terms -- see
+// attendance/controller/faceController.js.
+const faceController = require('../attendance/controller/faceController');
+router.get('/api/attendance/faces', auth, requirePermission('attendance', 'view'), faceController.list);
+router.delete('/api/attendance/faces/:personType/:personId', auth, requirePermission('attendance', 'manage'), faceController.remove);
+
 // Google OAuth 2.0 redirect flow
 router.get('/auth/google', userController.startGoogleOAuth);
 // Google calls back to the API's own address; the gym is read from `state`.

@@ -20,7 +20,7 @@ const AttendanceLog = require('../models/attendanceLogModel');
 const { deviceContext, issueStaffUnlock, isKioskToken } = require('../middleware/desktopAuth');
 const { listPeople, resolvePerson, activePersonKeys, trainerProfilesOf } = require('../services/peopleDirectory');
 const { currentPalette } = require('../services/deskTheme');
-const { recordPunch, readRequestId, readScannedAt, currentVerdict } = require('../services/punchService');
+const { recordPunch, readRequestId, readScannedAt, readMatchScore, currentVerdict } = require('../services/punchService');
 const { openVisitExpr, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 const T = require('../services/timeUtils');
 const { verifyQrToken } = require('../services/qrToken');
@@ -601,6 +601,12 @@ module.exports = {
         scannedAt = read.at;
       }
 
+      // Optional, and only for a face: how sure the desk's camera was.
+      const matchScore = method === 'face' ? readMatchScore(body.match_score) : undefined;
+      if (matchScore === null) {
+        return res.status(400).json({ success: false, message: 'match_score must be a number from 0 to 1.' });
+      }
+
       const result = await recordPunch({
         personType,
         personId,
@@ -608,7 +614,8 @@ module.exports = {
         device: req.deviceContext,
         method,
         requestId,
-        scannedAt
+        scannedAt,
+        matchScore
       });
 
       logPunch({
@@ -618,7 +625,7 @@ module.exports = {
         personId,
         method,
         result,
-        meta: { requestId, scannedAt }
+        meta: { requestId, scannedAt, matchScore }
       });
 
       return res.json(punchReply(result));

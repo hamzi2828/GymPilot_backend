@@ -25,7 +25,12 @@ const attendanceLogSchema = new mongoose.Schema(
         'punch_denied',
         // The web kiosk's staff unlock: the desk password typed again.
         'staff_unlock',
-        'staff_unlock_denied'
+        'staff_unlock_denied',
+        // Faces for the desk's webcam, logged as the fingerprints are: the
+        // download hands decrypted biometric templates to a desk PC.
+        'face_template_download',
+        'face_enroll',
+        'face_remove'
       ],
       required: true,
       index: true

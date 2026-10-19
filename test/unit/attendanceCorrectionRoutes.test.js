@@ -78,18 +78,23 @@ test('every route is gated on its own, and nothing is gated router-wide', () => 
     assert.ok(!chain.includes('permissionGate'), `${path} is not behind the attendance permission`);
   }
 
-  // So does checking in with the desk's code -- with a per-account limit.
+  // So does checking in with the desk's code -- with a per-account limit --
+  // and seeing or deleting one's own face.
   assert.deepEqual(
     routes.get('post /me/checkin').stack.map((layer) => layer.handle.name),
     ['auth', 'limitCheckins', 'checkIn']
   );
+  assert.deepEqual(routes.get('get /me/face').stack.map((layer) => layer.handle.name), ['auth', 'mine']);
+  assert.deepEqual(routes.get('delete /me/face').stack.map((layer) => layer.handle.name), ['auth', 'removeMine']);
 });
 
-test('the fingerprint routes pass through untouched, to be gated once where they are mounted', async () => {
+test('the fingerprint and face routes pass through untouched, to be gated once where they are mounted', async () => {
   for (const [method, url] of [
     ['DELETE', '/fingerprints/member/0000000000000000000000a1'],
     ['DELETE', '/fingerprints/staff/0000000000000000000000a1/3'],
-    ['GET', '/fingerprints']
+    ['GET', '/fingerprints'],
+    ['GET', '/faces'],
+    ['DELETE', '/faces/member/0000000000000000000000a1']
   ]) {
     const { passedOn, error, res } = await run(method, url);
     assert.equal(passedOn, true, `${method} ${url} is passed on`);
