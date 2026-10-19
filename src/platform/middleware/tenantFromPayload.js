@@ -28,7 +28,7 @@ const { storage, originForHost, primaryHost } = require('../tenantContext');
 const WEBHOOK_SERVED_WHILE_LAPSED = new Set(['SUBSCRIPTION_INACTIVE']);
 
 function refuseWebhookForNow(res, gym, blocked) {
-  console.warn(`[stripe] webhook for ${gym.slug} refused (${blocked.code}); Stripe will retry`);
+  console.warn(`[webhook] payment webhook for ${gym.slug} refused (${blocked.code}); the gateway will retry`);
   return res.status(503).json({ received: false, code: blocked.code, message: 'This gym is not being served right now; retry later.' });
 }
 
@@ -118,11 +118,13 @@ async function tenantFromStripeWebhook(req, res, next) {
  * POST /api/gymfolio/payment/webhook/:slug -- each gym has its own webhook
  * URL registered in its own Stripe account, so the gym is right there in
  * the path. Signature verification (against that gym's secret) follows in
- * the controller.
+ * the controller. The same for POST /api/payments/safepay/webhook/:gymSlug,
+ * registered in the gym's own Safepay account.
  */
 async function tenantFromSlugParam(req, res, next) {
   try {
-    const { gym, blocked, store } = await contextForSlug(req, req.params.slug, { allowDefault: false, allowLapsed: true });
+    const slug = req.params.slug || req.params.gymSlug;
+    const { gym, blocked, store } = await contextForSlug(req, slug, { allowDefault: false, allowLapsed: true });
     if (!gym) return res.status(404).json({ received: false, message: 'Unknown gym' });
     if (blocked) return refuseWebhookForNow(res, gym, blocked);
     return storage.run(store, () => next());

@@ -30,6 +30,7 @@ if (IS_PRODUCTION && String(process.env.JWT_SECRET || '').length < 32) {
 app.set('trust proxy', 1);
 
 const gymfolioRoutes = require('./src/gymfolio/routes/gymfolioRoutes');
+const paymentWebhookRoutes = require('./src/routes/paymentWebhookRoutes');
 const desktopRoutes = require('./src/attendance/routes/desktopRoutes');
 const attendanceAdminRoutes = require('./src/attendance/routes/adminRoutes');
 const accountsRoutes = require('./src/accounts/routes/accountsRoutes');
@@ -181,11 +182,13 @@ const STRIPE_WEBHOOK_PATH = '/api/gymfolio/payment/webhook';
 // The platform's own webhook (GymsPilotPro charging gyms) needs the same
 // untouched body as a gym's does.
 const PLATFORM_WEBHOOK_PATH = '/api/platform/stripe/webhook';
+// Safepay signs the bytes it sent as well (src/routes/paymentWebhookRoutes.js).
+const SAFEPAY_WEBHOOK_PREFIX = '/api/payments/safepay/webhook/';
 
 app.use((req, res, next) => {
   const path = req.originalUrl.split('?')[0];
   // Both the legacy path and the per-gym one (/webhook/<slug>).
-  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/') || path === PLATFORM_WEBHOOK_PATH) {
+  if (path === STRIPE_WEBHOOK_PATH || path.startsWith(STRIPE_WEBHOOK_PATH + '/') || path === PLATFORM_WEBHOOK_PATH || path.startsWith(SAFEPAY_WEBHOOK_PREFIX)) {
     next();
   } else {
     express.json({ limit: BODY_LIMIT })(req, res, next);
@@ -304,11 +307,12 @@ app.use('/api/desk-link', async (req, res, next) => {
 //   /api/jobs/*                         the cron, which loops over every gym
 //   /auth/google/callback               gym in the OAuth `state`
 //   /api/gymfolio/payment/webhook       gym in the Stripe event metadata
+//   /api/payments/safepay/webhook/<slug> gym in the path (Safepay's webhook)
 // ---------------------------------------------------------------------------
 const { resolveTenant } = require('./src/platform/middleware/resolveTenant');
 
 const TENANT_EXEMPT_EXACT = new Set(['/', '/health', '/robots.txt', '/auth/google/callback', '/api/gymfolio/payment/webhook']);
-const TENANT_EXEMPT_PREFIXES = ['/uploads/', '/api/platform', '/api/jobs', '/api/gymfolio/payment/webhook/'];
+const TENANT_EXEMPT_PREFIXES = ['/uploads/', '/api/platform', '/api/jobs', '/api/gymfolio/payment/webhook/', SAFEPAY_WEBHOOK_PREFIX];
 
 function isTenantExempt(path) {
   const clean = path.split('?')[0];
@@ -392,6 +396,10 @@ app.use('/api/gymfolio', async (req, res, next) => {
     });
   }
 }, gymfolioRoutes);
+
+// Webhooks from payment gateways other than Stripe (Safepay), one address
+// per gym: past the tenant gate on purpose, the gym is read from the path.
+app.use('/api/payments', paymentWebhookRoutes);
 
 // Front-desk attendance app (GymPilot_desktopApp). Native Windows client, so
 // no CORS entry is needed -- it is not a browser.
