@@ -424,16 +424,26 @@ const gymfolioPaymentController = {
         status,
         sort
       });
-      return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });
+      // A renewal waiting on its payment link carries the link, for the
+      // portal's and the app's "Pay now" (services/billing/payLinks.js).
+      const { withPayLinks } = require('../../services/billing/payLinks');
+      return res.status(200).json({ success: true, data: withPayLinks(result.orders), pagination: result.pagination });
     } catch (error) {
       return fail(res, error, 'Failed to fetch orders');
     }
   },
 
-  /** GET /api/gymfolio/package-orders (staff)  ?hasDues=1: only orders with a balance due */
+  /**
+   * GET /api/gymfolio/package-orders (staff)  ?hasDues=1: only orders with a balance due;
+   * ?userId=<member id>: one member's; ?paymentStatus=processing&paymentMethod=bank_transfer:
+   * the transfers waiting to be checked. `pagination.total` counts every match.
+   */
   async getAllOrders(req, res) {
     try {
-      const { page, limit, status, paymentStatus, paymentMethod, search, sort, hasDues } = req.query;
+      const { page, limit, status, paymentStatus, paymentMethod, search, sort, hasDues, userId } = req.query;
+      if (userId !== undefined && !mongoose.Types.ObjectId.isValid(String(userId))) {
+        return res.status(400).json({ success: false, code: 'INVALID_QUERY', message: 'userId is not a valid member id' });
+      }
       await sweepIfDue();
       const result = await gymfolioPaymentService.getAllOrders({
         page: page ? parseInt(page, 10) : 1,
@@ -443,7 +453,8 @@ const gymfolioPaymentController = {
         paymentMethod,
         search,
         hasDues: hasDues === '1' || hasDues === 'true',
-        sort
+        sort,
+        userId: userId !== undefined ? String(userId) : undefined
       });
       return res.status(200).json({ success: true, data: result.orders, pagination: result.pagination });
     } catch (error) {

@@ -314,11 +314,13 @@ const RECENT_PAID_ORDERS = 5;
 // Paid orders, and the one kind of unpaid order the desk is told about: a
 // bank transfer that has been sent (or promised) but not yet confirmed by
 // staff, or a desk sale recorded as unpaid. Card checkouts are left out: an
-// abandoned Stripe session is not a payment anybody is waiting on.
+// abandoned Stripe session is not a payment anybody is waiting on. So is a
+// renewal the member was sent a payment link for (method 'online'): until
+// it is paid the member's term lapses at the door exactly as it always did.
 const PAID_ORDER = { 'payment.status': 'paid' };
 const AWAITING_PAYMENT = {
   'payment.status': { $in: ['pending', 'processing'] },
-  'payment.method': { $ne: 'stripe' },
+  'payment.method': { $nin: ['stripe', 'online'] },
   status: 'pending'
 };
 

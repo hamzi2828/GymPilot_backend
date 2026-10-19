@@ -695,8 +695,10 @@ class GymfolioPaymentService {
   }
 
   async getAllOrders(options = {}) {
-    const { page = 1, limit = 20, status, paymentStatus, paymentMethod, search, hasDues = false, sort = '-createdAt' } = options;
+    const { page = 1, limit = 20, status, paymentStatus, paymentMethod, search, hasDues = false, sort = '-createdAt', userId } = options;
     const query = {};
+    // One member's orders (the member profile's Payments tab).
+    if (userId) query.userId = userId;
     if (status) query.status = status;
     if (paymentStatus) query['payment.status'] = paymentStatus;
     if (paymentMethod) query['payment.method'] = paymentMethod;

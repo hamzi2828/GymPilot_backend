@@ -15,6 +15,7 @@ const MessageTemplate = require('../models/messageTemplateModel');
 const { shell, paragraph, escapeHtml } = require('../templates/gymEmails');
 
 const COMMON = ['firstName', 'siteName', 'portalUrl', 'timetableUrl', 'renewUrl'];
+const BILLING_VARS = ['packageName', 'period', 'amount', 'currency', 'dueDate', 'lastDay', 'dueText', 'payUrl', 'bankText', 'orderNumber'];
 
 const EVENTS = [
   {
@@ -94,6 +95,46 @@ const EVENTS = [
     group: 'Payments',
     vars: [...COMMON, 'packageName', 'endDate', 'reason'],
     text: '{{siteName}}: a payment for your {{packageName}} membership failed. {{reason}} Please update your card: {{portalUrl}}'
+  },
+  // Renewal billing (services/billing/): the payment link before the due
+  // date, on it, after a saved card was declined, and on the last day; and
+  // the link staff send by hand. Their emails are built in
+  // (templates/billingEmails.js); {{bankText}} is the gym's bank / Raast
+  // alternative, empty when it has no account on file.
+  {
+    key: 'payment_due_soon',
+    label: 'Renewal due soon (payment link)',
+    group: 'Payments',
+    vars: [...COMMON, ...BILLING_VARS],
+    text: '{{siteName}}: hi {{firstName}}, your {{packageName}} ({{period}}) renewal of {{currency}} {{amount}} is due on {{dueDate}} (last day to pay {{lastDay}}). Pay here: {{payUrl}} {{bankText}}'
+  },
+  {
+    key: 'payment_due_today',
+    label: 'Renewal due today (payment link)',
+    group: 'Payments',
+    vars: [...COMMON, ...BILLING_VARS],
+    text: '{{siteName}}: hi {{firstName}}, your {{packageName}} ({{period}}) renewal of {{currency}} {{amount}} is due today, {{dueDate}} (last day to pay {{lastDay}}). Pay here: {{payUrl}} {{bankText}}'
+  },
+  {
+    key: 'payment_card_declined',
+    label: 'Saved card declined (payment link)',
+    group: 'Payments',
+    vars: [...COMMON, ...BILLING_VARS, 'reason'],
+    text: '{{siteName}}: hi {{firstName}}, we could not charge your saved card for your {{packageName}} ({{period}}) renewal of {{currency}} {{amount}}, due {{dueDate}}. Please pay by {{lastDay}}: {{payUrl}} {{bankText}}'
+  },
+  {
+    key: 'payment_last_day',
+    label: 'Last day to pay (payment link)',
+    group: 'Payments',
+    vars: [...COMMON, ...BILLING_VARS],
+    text: '{{siteName}}: hi {{firstName}}, today ({{lastDay}}) is the last day to pay your {{packageName}} ({{period}}) renewal of {{currency}} {{amount}}, due {{dueDate}}. Pay here: {{payUrl}} {{bankText}}'
+  },
+  {
+    key: 'payment_link',
+    label: 'Payment link sent by staff',
+    group: 'Payments',
+    vars: [...COMMON, ...BILLING_VARS],
+    text: '{{siteName}}: hi {{firstName}}, your payment link for {{packageName}} ({{period}}), {{currency}} {{amount}}{{dueText}}: {{payUrl}} {{bankText}}'
   },
   {
     key: 'transfer_received',
@@ -284,7 +325,13 @@ function sampleVars(siteName = 'GymsPilotPro', origin = 'https://example.com') {
     orderNumber: 'ORD-000123',
     reason: 'Your card was declined.',
     resumeAt: '20 September 2026',
-    daysAbsent: 14
+    daysAbsent: 14,
+    period: '1 month',
+    dueDate: '30 Sep 2026',
+    lastDay: '03 Oct 2026',
+    dueText: ', due 30 Sep 2026 (last day to pay 03 Oct 2026)',
+    payUrl: `${origin}/pay/GPP1.example`,
+    bankText: 'Or pay by bank transfer / Raast (no fee): Meezan Bank, Iron Gym, IBAN PK36MEZN0000000000000001.'
   };
 }
 

@@ -95,6 +95,18 @@ function tell(name, order) {
   return afterResponse(async () => notify[name](order, await memberOf(order)), name);
 }
 
+/**
+ * Where an uploaded transfer receipt is kept: the Blob store in production,
+ * the uploads folder otherwise. '' for no file. Shared by the member's own
+ * upload and the payment link's (controller/payLinkController.js).
+ */
+async function storedProofUrl(file) {
+  if (!file) return '';
+  return USE_BLOB_STORAGE
+    ? blobUpload.uploadToBlob(file.buffer, file.originalname, file.mimetype, 'payment-proofs', { kind: 'proof' })
+    : `/uploads/${file.filename}`;
+}
+
 async function activeBanks() {
   return Bank.find({ isActive: true, isDeleted: { $ne: true } })
     .select('name accountTitle accountNumber branch iban notes qrCodeUrl')
@@ -104,6 +116,7 @@ async function activeBanks() {
 
 module.exports = {
   activeBanks,
+  storedProofUrl,
 
   // GET /api/gymfolio/payment/banks -- where to send a bank transfer
   banks: async (req, res) => {
@@ -137,12 +150,7 @@ module.exports = {
   submitProof: async (req, res) => {
     try {
       const { order } = await loadOrder(req, { staffLevel: 'manage' });
-      let url = '';
-      if (req.file) {
-        url = USE_BLOB_STORAGE
-          ? await blobUpload.uploadToBlob(req.file.buffer, req.file.originalname, req.file.mimetype, 'payment-proofs', { kind: 'proof' })
-          : `/uploads/${req.file.filename}`;
-      }
+      const url = await storedProofUrl(req.file);
       if (!url && !(req.body && (req.body.reference || req.body.note))) {
         return res.status(400).json({ success: false, message: 'Attach the transfer receipt or enter the transfer reference' });
       }

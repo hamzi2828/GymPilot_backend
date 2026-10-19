@@ -265,5 +265,8 @@ router.post('/package-orders/:id/use-session', auth, requirePermission('package-
 router.post('/package-orders/:id/refund', auth, requirePermission('package-orders', 'manage'), membershipController.refund);
 router.post('/package-orders/:id/payments', auth, requirePermission('package-orders', 'manage'), membershipController.recordPayment);
 router.patch('/package-orders/:id/terms', auth, requirePermission('package-orders', 'manage'), membershipController.editTerms);
+// A payment link for an unpaid order, and sending it to the member
+// (controller/payLinkController.js).
+router.post('/package-orders/:id/pay-link', auth, requirePermission('package-orders', 'manage'), require('../../controller/payLinkController').adminLink);
 
 module.exports = router;

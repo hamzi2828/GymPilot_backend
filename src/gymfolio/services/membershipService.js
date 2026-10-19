@@ -449,6 +449,16 @@ async function markPaidAndActivate(order, { paidAt = new Date(), transactionId, 
   } catch (error) {
     console.error('[membership] invoice number failed:', error.message);
   }
+
+  // A renewal waiting on a payment link for the term this one follows is
+  // stale now, whichever way this was paid (services/billing/dueRenewals.js).
+  // Never allowed to undo the payment just recorded: the daily job checks
+  // again before it sends anything.
+  try {
+    await require('../../services/billing/dueRenewals').supersedeFor(order);
+  } catch (error) {
+    console.error('[membership] closing a stale renewal order failed:', error.message);
+  }
   return order;
 }
 
@@ -1326,7 +1336,10 @@ async function rejectTransfer(order, { by, reason, now = new Date() } = {}) {
     { new: true }
   );
   if (!updated) throw await reviewRefusal(order._id);
-  return updated;
+  // A receipt sent through a payment link: the order opens again, so the
+  // same link takes a new receipt (services/billing/proofs.js).
+  const reopened = await require('../../services/billing/proofs').reopenAfterRejection(updated, now);
+  return reopened || updated;
 }
 
 /* ------------------------------ lifecycle ------------------------------ */

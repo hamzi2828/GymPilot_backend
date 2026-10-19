@@ -488,6 +488,14 @@ packageOrderSchema.index(
   { userId: 1, 'metadata.requestId': 1 },
   { unique: true, name: 'one_order_per_desk_request', partialFilterExpression: { 'metadata.requestId': { $type: 'string' } } }
 );
+// One renewal order per term waiting to be paid by payment link
+// (services/billing/dueRenewals.js): `metadata.dueFor` is the id of the paid
+// order whose term it renews, so the daily job run twice -- or two runs side
+// by side -- can only ever make one. Only those orders are indexed.
+packageOrderSchema.index(
+  { 'metadata.dueFor': 1 },
+  { unique: true, name: 'one_due_renewal_per_term', partialFilterExpression: { 'metadata.dueFor': { $type: 'string' } } }
+);
 
 // Virtual for subscription duration
 packageOrderSchema.virtual('subscriptionDuration').get(function() {
