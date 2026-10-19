@@ -299,7 +299,7 @@ test("the audit log keeps the address express trusts, not the first X-Forwarded-
     const login = await call(controller.login, { ...forged, body: { email: admin.email, password: 'not the password' } });
     assert.equal(login.statusCode, 401);
     // Wrong password on a second-step change (platformTwoFactorController).
-    const change = await call(controller.setTwoFactor, { ...forged, superAdmin: admin, body: { enabled: true, currentPassword: 'not the password' } });
+    const change = await call(controller.setTwoFactor, { ...forged, superAdmin: admin, body: { enabled: false, currentPassword: 'not the password' } });
     assert.equal(change.statusCode, 400);
     assert.equal(change.body.code, 'PASSWORD_INCORRECT');
 

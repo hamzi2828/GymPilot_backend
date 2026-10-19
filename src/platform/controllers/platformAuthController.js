@@ -212,8 +212,10 @@ module.exports = {
 
   // PUT /api/platform/auth/two-factor   { enabled, currentPassword }
   //
-  // Either way the current password is needed: 400 PASSWORD_REQUIRED or
-  // PASSWORD_INCORRECT without it (platformTwoFactorController.passwordRefusal).
+  // Turning the emailed codes OFF needs the current password: 400
+  // PASSWORD_REQUIRED or PASSWORD_INCORRECT without it
+  // (platformTwoFactorController.passwordRefusal). Turning them on does not:
+  // it only adds a step whose codes go to the account's own address.
   setTwoFactor: async (req, res) => {
     try {
       const enabled = !!(req.body && (req.body.enabled === true || req.body.enabled === 'true'));
@@ -224,8 +226,7 @@ module.exports = {
       }
       const admin = await SuperAdmin.findById(req.superAdmin._id).select('+password');
       if (!admin) return res.status(404).json({ success: false, message: 'Account not found' });
-      const toDo = enabled ? 'turn on two-factor sign-in' : 'turn off two-factor sign-in';
-      if (await twoFactorApp.refusedWithoutPassword(req, res, admin, req.body && req.body.currentPassword, toDo, 'email')) return;
+      if (!enabled && (await twoFactorApp.refusedWithoutPassword(req, res, admin, req.body && req.body.currentPassword, 'turn off two-factor sign-in', 'email'))) return;
       if (enabled) {
         const { verifyConnection } = require('../../services/emailService');
         const smtp = await verifyConnection();

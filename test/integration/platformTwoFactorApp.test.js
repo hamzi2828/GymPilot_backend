@@ -1,6 +1,6 @@
 // Super admin two-factor sign-in with an authenticator app, against a real
-// MongoDB: every change to the second step wanting the current password (the
-// emailed-code switch, setup, enable), setting it up (the secret sealed at rest, a code needed before it
+// MongoDB: the current password wanted to switch the emailed codes off and
+// to set up or turn on the app, setting it up (the secret sealed at rest, a code needed before it
 // counts), signing in with an app code and with a backup code (each good
 // once), the account-wide lock after too many wrong codes, and turning it
 // off (password AND a code). Failed sign-ins land in the audit log. No email
@@ -59,23 +59,22 @@ test('a wrong password is refused and written to the audit log', async () => {
   assert.equal(rows[0].meta.reason, 'wrong_password');
 });
 
-test('a signed-in session alone cannot change the second step: the emailed-code switch wants the current password', async () => {
+test('a signed-in session alone cannot switch the emailed codes off: that wants the current password', async () => {
   const stored = async () => (await SuperAdmin.findById(owner._id).lean()).twoFactor || {};
-  for (const enabled of [true, false]) {
-    if (enabled === false) {
-      const on = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled: true, currentPassword: PASSWORD } });
-      assert.equal(on.statusCode, 200, JSON.stringify(on.body));
-      assert.equal((await stored()).enabled, true);
-    }
-    const none = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled } });
-    assert.equal(none.statusCode, 400);
-    assert.equal(none.body.code, 'PASSWORD_REQUIRED');
-    const wrong = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled, currentPassword: 'not the password' } });
-    // 400, never 401: the panel signs out on a 401.
-    assert.equal(wrong.statusCode, 400);
-    assert.equal(wrong.body.code, 'PASSWORD_INCORRECT');
-    assert.equal((await stored()).enabled, !enabled, 'nothing changed');
-  }
+  // On needs none: it only adds a step whose codes go to the account's own address.
+  const on = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled: true } });
+  assert.equal(on.statusCode, 200, JSON.stringify(on.body));
+  assert.equal((await stored()).enabled, true);
+
+  const none = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled: false } });
+  assert.equal(none.statusCode, 400);
+  assert.equal(none.body.code, 'PASSWORD_REQUIRED');
+  const wrong = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled: false, currentPassword: 'not the password' } });
+  // 400, never 401: the panel signs out on a 401.
+  assert.equal(wrong.statusCode, 400);
+  assert.equal(wrong.body.code, 'PASSWORD_INCORRECT');
+  assert.equal((await stored()).enabled, true, 'still on');
+
   const off = await h.call(auth.setTwoFactor, { ...(await signedIn()), body: { enabled: false, currentPassword: PASSWORD } });
   assert.equal(off.statusCode, 200, JSON.stringify(off.body));
   assert.equal((await stored()).enabled, false);

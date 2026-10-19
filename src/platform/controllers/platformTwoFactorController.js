@@ -55,8 +55,8 @@ function usesApp(admin) {
  * "Type your password to change how you sign in." A session can be taken
  * (a shared computer, a copied token) without the password being known, and
  * without this such a session could switch the emailed codes off, or put its
- * own authenticator app in their place, and keep the account. Every change to
- * the second step asks for it.
+ * own authenticator app in their place, and keep the account. Every change
+ * that takes the second step away or replaces it asks for it.
  *
  * Resolves to null when `typed` is the account's password, or to the body of
  * the 400 to send -- never a 401, which the panel takes to mean "signed out".
