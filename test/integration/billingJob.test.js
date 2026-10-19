@@ -189,7 +189,7 @@ test('three days before: one "due on" message each with the link and the bank de
 
   const dueDate = await h.inGym(gyms['billing-job-gym'], () => T.dateLabelForKey(T.shiftDateKey(T.dateKey(t0), 3)));
   const lastDay = await h.inGym(gyms['billing-job-gym'], () => T.dateLabelForKey(T.shiftDateKey(T.dateKey(t0), 6)));
-  for (const who of ['ann', 'bob', 'cat', 'dan', 'eve']) assert.deepEqual(subjects(who), [`Iron Gym: your renewal is due on ${dueDate}`], who);
+  for (const who of ['ann', 'bob', 'cat', 'dan', 'eve']) assert.deepEqual(subjects(who), [`Iron Gym: your membership expires on ${dueDate}`], who);
 
   const renewal = await renewalOf('billing-job-gym', 'ann');
   const url = await h.inGym(gyms['billing-job-gym'], () => links.issuePayLink(renewal).url);
@@ -209,7 +209,7 @@ test('three days before: one "due on" message each with the link and the bank de
   const wa = texts.find((x) => x.channel === 'sendWhatsApp' && x.userId === String(people.ann._id));
   assert.equal(
     wa.body,
-    `Iron Gym: hi Ann, your Monthly Unlimited (1 month) renewal of PKR 5,000 is due on ${dueDate} (last day to pay ${lastDay}). Pay here: ${url} Or pay by bank transfer / Raast (no fee): Meezan Bank, Iron Gym, IBAN PK36MEZN0000000001.`
+    `Iron Gym: hi Ann, your Monthly Unlimited membership expires on ${dueDate}. Renew for PKR 5,000 (1 month), last day to pay ${lastDay}: ${url} Or pay by bank transfer / Raast (no fee): Meezan Bank, Iron Gym, IBAN PK36MEZN0000000001.`
   );
   assert.ok(texts.some((x) => x.channel === 'push' && x.userId === String(people.ann._id) && x.url === url));
   assert.ok(!texts.some((x) => x.channel === 'sendSms'), 'SMS is off for billing by default');
@@ -275,7 +275,7 @@ test('the due day: saved cards are charged first -- paid is activated with one r
   assert.equal((await renewalOf('billing-job-gym', 'eve')).payment.lastPaymentError, 'Your saved card has expired');
 
   // Ann: no card -- the due-day message.
-  assert.deepEqual(subjects('ann'), ['Iron Gym: your renewal is due today']);
+  assert.deepEqual(subjects('ann'), ['Iron Gym: your membership expires today']);
   assert.equal(result.counts.charged, 2);
   assert.equal(result.counts.declined, 2);
 
@@ -315,7 +315,7 @@ test('a gym with automatic charges off never charges a saved card: the member ge
   assert.equal(before.autoChargeOn, false);
   await run('billing-noauto-gym', 3);
   assert.equal(charges.length, 0);
-  assert.deepEqual(subjects('fay'), ['Steel Gym: your renewal is due on ' + (await h.inGym(gyms['billing-noauto-gym'], () => T.dateLabelForKey(T.shiftDateKey(T.dateKey(t0), 3)))), 'Steel Gym: your renewal is due today']);
+  assert.deepEqual(subjects('fay'), ['Steel Gym: your membership expires on ' + (await h.inGym(gyms['billing-noauto-gym'], () => T.dateLabelForKey(T.shiftDateKey(T.dateKey(t0), 3)))), 'Steel Gym: your membership expires today']);
   assert.doesNotMatch(emailsTo('fay')[0].html, /we will charge/);
 });
 

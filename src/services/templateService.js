@@ -103,17 +103,17 @@ const EVENTS = [
   // alternative, empty when it has no account on file.
   {
     key: 'payment_due_soon',
-    label: 'Renewal due soon (payment link)',
+    label: 'Membership expires soon (payment link)',
     group: 'Payments',
     vars: [...COMMON, ...BILLING_VARS],
-    text: '{{siteName}}: hi {{firstName}}, your {{packageName}} ({{period}}) renewal of {{currency}} {{amount}} is due on {{dueDate}} (last day to pay {{lastDay}}). Pay here: {{payUrl}} {{bankText}}'
+    text: '{{siteName}}: hi {{firstName}}, your {{packageName}} membership expires on {{dueDate}}. Renew for {{currency}} {{amount}} ({{period}}), last day to pay {{lastDay}}: {{payUrl}} {{bankText}}'
   },
   {
     key: 'payment_due_today',
-    label: 'Renewal due today (payment link)',
+    label: 'Membership expires today (payment link)',
     group: 'Payments',
     vars: [...COMMON, ...BILLING_VARS],
-    text: '{{siteName}}: hi {{firstName}}, your {{packageName}} ({{period}}) renewal of {{currency}} {{amount}} is due today, {{dueDate}} (last day to pay {{lastDay}}). Pay here: {{payUrl}} {{bankText}}'
+    text: '{{siteName}}: hi {{firstName}}, your {{packageName}} membership expires today ({{dueDate}}). Renew for {{currency}} {{amount}} ({{period}}), last day to pay {{lastDay}}: {{payUrl}} {{bankText}}'
   },
   {
     key: 'payment_card_declined',

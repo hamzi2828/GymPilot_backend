@@ -17,9 +17,9 @@ const KINDS = ['before', 'due', 'declined', 'last', 'link'];
 function subjectFor(kind, { siteName, dueDate }) {
   switch (kind) {
     case 'before':
-      return `${siteName}: your renewal is due on ${dueDate}`;
+      return `${siteName}: your membership expires on ${dueDate}`;
     case 'due':
-      return `${siteName}: your renewal is due today`;
+      return `${siteName}: your membership expires today`;
     case 'declined':
       return `${siteName}: we could not charge your saved card`;
     case 'last':
@@ -34,9 +34,9 @@ function opening(kind, v) {
   const pkg = `<strong>${escapeHtml(v.packageName || 'membership')}</strong>`;
   switch (kind) {
     case 'before':
-      return `Hi ${name}, your ${pkg} renewal at ${escapeHtml(v.siteName)} is due on <strong>${escapeHtml(v.dueDate)}</strong>.`;
+      return `Hi ${name}, your ${pkg} membership at ${escapeHtml(v.siteName)} expires on <strong>${escapeHtml(v.dueDate)}</strong>. Renew it to keep training without a break.`;
     case 'due':
-      return `Hi ${name}, your ${pkg} renewal at ${escapeHtml(v.siteName)} is due today.`;
+      return `Hi ${name}, your ${pkg} membership at ${escapeHtml(v.siteName)} expires today, <strong>${escapeHtml(v.dueDate)}</strong>. Renew it now to keep training without a break.`;
     case 'declined':
       return `Hi ${name}, we tried to take your ${pkg} renewal from your saved card today, but the payment did not go through.`;
     case 'last':

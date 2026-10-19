@@ -144,14 +144,14 @@ test('the emails lead with the gym, carry the package, dates, link and bank deta
     banks: [{ name: 'Meezan', accountTitle: 'Iron', accountNumber: '01', iban: 'PK36' }]
   };
   const before = billingEmail('before', v);
-  assert.equal(before.subject, 'Iron <Gym>: your renewal is due on 19 Nov 2026');
+  assert.equal(before.subject, 'Iron <Gym>: your membership expires on 19 Nov 2026');
   for (const part of ['Iron &lt;Gym&gt;', '1 month', 'PKR 5,000', '19 Nov 2026', '22 Nov 2026', 'https://iron.example/pay/GPP1.x', 'Pay now', 'Meezan', 'PK36', 'Sent with GymsPilotPro']) {
     assert.ok(before.html.includes(part), part);
   }
   assert.ok(!before.html.includes('<b>Ann</b>'), 'a name is text, not markup');
   assert.match(billingEmail('declined', { ...v, reason: 'Your card was declined.' }).html, /Your card was declined\. Your membership is not paid yet/);
   assert.equal(billingEmail('last', v).subject, 'Iron <Gym>: today is the last day to pay your renewal');
-  assert.equal(billingEmail('due', v).subject, 'Iron <Gym>: your renewal is due today');
+  assert.equal(billingEmail('due', v).subject, 'Iron <Gym>: your membership expires today');
   assert.equal(billingEmail('link', v).subject, 'Iron <Gym>: your payment link');
   const bankOnly = billingEmail('due', { ...v, onlineLabel: null });
   assert.match(bankOnly.html, /Pay by bank transfer/);

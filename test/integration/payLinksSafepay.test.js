@@ -200,7 +200,7 @@ function run() {
     const dueDays = Math.round((new Date(terms.Ayesha2.subscription.endDate).getTime() - t0.getTime()) / DAY);
     const lead = await runJob(dueDays - 3);
     assert.equal(lead.counts.created, 2, JSON.stringify(lead.skipped));
-    assert.ok(h.calls.emails.some((e) => e.to === people.Ayesha.email && /due on/.test(e.subject)), 'told three days before');
+    assert.ok(h.calls.emails.some((e) => e.to === people.Ayesha.email && /expires on/.test(e.subject)), 'told three days before');
     h.calls.emails.length = 0;
     const result = await runJob(dueDays);
     assert.equal(result.counts.charged, 1, JSON.stringify(result.quiet));
