@@ -41,37 +41,19 @@ function currentStreak(dateKeys) {
   return streak;
 }
 
-const User = require('../../models/user');
-const { issueQrToken } = require('../services/qrToken');
-const { ensureMemberCode, ensureUserStaffCode } = require('../services/peopleDirectory');
-
 module.exports = {
   // GET /api/attendance/me/qr
-  qr: async (req, res) => {
-    try {
-      const user = await User.findById(req.user.id);
-      if (!user || user.isActive === false) return res.status(401).json({ success: false, message: 'Account not found' });
-
-      const isStaff = !!(user.employment && user.employment.isStaff);
-      const personType = isStaff ? 'staff' : 'member';
-      const code = isStaff ? await ensureUserStaffCode(user) : await ensureMemberCode(user);
-      const { token, expiresAt } = issueQrToken({ personType, personId: user._id });
-
-      return res.json({
-        success: true,
-        data: {
-          token,
-          expires_at: expiresAt,
-          person_type: personType,
-          code,
-          name: [user.firstName, user.lastName].filter(Boolean).join(' ')
-        }
-      });
-    } catch (error) {
-      console.error('[attendance] qr failed:', error);
-      return res.status(500).json({ success: false, message: 'Could not create your check-in code' });
-    }
-  },
+  //
+  // Gone: a member no longer shows their own QR code at the door -- anyone
+  // holding a screenshot of it could check in as them. They scan the code on
+  // the desk's screen instead (deskCodeController). Kept for a release so an
+  // old app or page asking for one is told why in words, not a 404.
+  qr: (req, res) =>
+    res.status(410).json({
+      success: false,
+      code: 'QR_CHECKIN_REMOVED',
+      message: 'Check-in now works by scanning the code at the front desk.'
+    }),
   // GET /api/attendance/me
   me: async (req, res) => {
     try {

@@ -15,12 +15,12 @@ none of it is code.
 | `PLATFORM_DB_NAME` | leave unset (= `GymPilot`, the `MONGO_URI` database) | Gyms, plans and super admins live in the main database beside the first gym's data. |
 | `TENANT_DB_PREFIX` | leave unset (= `GymPilot_`) | New gyms get `GymPilot_<slug>` on the same cluster. |
 | `PLATFORM_JWT_SECRET` | a fresh random 64-char string | Signs super-admin sessions separately from gym sessions. |
-| `QR_TOKEN_SECRET` | a fresh random 64-char string | Signs members' check-in QR codes. |
+| `QR_TOKEN_SECRET` | a fresh random 64-char string | Signs the rotating check-in code a desk screen shows (KIOSK.md) and the web kiosk's staff unlocks. Changing it is harmless: screens fetch a new code within 20 seconds, and a kiosk asks for the staff password again. |
 | `PLATFORM_ADMIN_ORIGIN` | e.g. `https://gymspilotpro.com` (comma separated for more than one, e.g. with and without `www`). **Required in production** | Where the marketing site + platform panel (`GymPilot_marketing`) is served; used for CORS, password-reset links, demo-request emails and — for a self-serve sign-up — where Stripe sends the buyer back. Links use the first origin listed. In production nothing stands in for it: without it a super admin's "forgot password" answers 503, self-serve sign-up stays off, and emails to the platform admins carry no link to the panel. |
 | `PLATFORM_ROOT_DOMAIN` | e.g. `gympilot.app` | Every new gym is also registered as `<slug>.<this domain>`, and its owner's invite points there. **Self-serve sign-up needs it**: without it checkout sends a request for the panel instead of taking payment. |
 | `PLATFORM_SELF_SERVE_SIGNUP` | leave unset | Checkout takes payment and builds the gym itself whenever the prerequisites hold — `PLATFORM_ROOT_DOMAIN`, `PLATFORM_ADMIN_ORIGIN`, the platform's Stripe keys with charging on, its webhook signing secret, and `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` that the mail server actually accepts (it is asked; the owner's set-password link goes out by email) (§2; BILLING.md → *Self-serve sign-up*). Set `off` to send every new gym through the panel regardless. |
 | `SUBSCRIPTION_GRACE_DAYS` | `7` | Days a gym is served after its platform subscription lapses. |
-| `FINGERPRINT_ENCRYPTION_KEY` | if already set: **leave as it is**; if unset: the **current** `JWT_SECRET` value, copied | Encrypts fingerprint templates at rest, falling back to `JWT_SECRET` while unset. Existing templates were encrypted with whichever secret was in effect when they were enrolled; changing it makes them all unreadable (`/api/desktop/templates` then counts them as `unreadable`, and every enrolled person must be enrolled again). Copying today's `JWT_SECRET` in keeps them readable and decouples them from it. |
+| `FINGERPRINT_ENCRYPTION_KEY` | if already set: **leave as it is**; if unset: the **current** `JWT_SECRET` value, copied | Encrypts fingerprint and face templates at rest, falling back to `JWT_SECRET` while unset. Existing templates were encrypted with whichever secret was in effect when they were enrolled; changing it makes them all unreadable (`/api/desktop/templates` and `/api/desktop/face-templates` then count them as `unreadable`, and every enrolled person must be enrolled again). Copying today's `JWT_SECRET` in keeps them readable and decouples them from it. |
 | `JWT_SECRET` | **do not rotate** until the two keys above are set | Rotating it signs everyone out — and, while `SETTINGS_ENCRYPTION_KEY` or `FINGERPRINT_ENCRYPTION_KEY` is unset, also makes the data that key protects unreadable. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` | working credentials | The platform's own mail: owner invites, billing notices, super-admin sign-in codes and resets, and every gym that has set no SMTP of its own under Settings → Email. If the mail server rejects them (a `535`), none of that is sent — 2FA codes, password resets and email-confirmation links included — and self-serve sign-up stays off. |
 | `CRON_SECRET` | already set | The daily job now also rolls platform subscriptions, resumes freezes and closes visits nobody checked out of (FEATURES.md → *Daily job*). The daily backup (`/api/jobs/backups`, 02:00 UTC) uses the same secret. |
@@ -117,6 +117,14 @@ online or staff recorded consent under Users — and the punch `request_id`
 (KIOSK.md), without which a punch whose answer was lost and is scanned again
 more than a minute later is taken for the check-out. Desks can be updated
 after the API: an older build keeps working with this release.
+
+Check-in by phone replaces the member's own QR code and the typed member
+number, which stop working the moment the API is deployed
+(`410 QR_CHECKIN_REMOVED`, `400 METHOD_REMOVED`). Deploy the website (its
+`/checkin` page, the kiosk showing the desk code) with the API, and the desk
+and member app builds that show and scan the code as soon after as they can
+go out; until then members are checked in by fingerprint or by hand.
+Faces need a desk build with the camera and a webcam on the desk PC.
 
 ## 5. After the first deploy
 

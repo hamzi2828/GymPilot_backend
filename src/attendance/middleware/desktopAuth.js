@@ -13,7 +13,7 @@ const crypto = require('crypto');
 
 const DesktopToken = require('../models/desktopTokenModel');
 const User = require('../../models/user');
-const { tenantKey, currentTenantId } = require('../../platform/tenantContext');
+const { currentTenantId } = require('../../platform/tenantContext');
 
 // Both are read straight off the request by the endpoints too, so they live
 // here in one place.
@@ -109,8 +109,9 @@ function requireEnrollPermission(req, res, next) {
 //
 // The kiosk (the website's /kiosk page) signs in with a desk account just as
 // the Windows app does, but it stands on the PUBLIC side of the counter.
-// There a member may only check themselves in -- the QR code from their
-// account page, or their member number. Finding someone by name, and checking
+// There members check themselves in with their own phone, by scanning the
+// code the kiosk shows (POST /checkin-code, services/deskCode.js) -- nothing
+// they do touches the kiosk itself. Finding someone by name, and checking
 // them in by hand, are staff actions, so a kiosk token needs a short-lived
 // staff unlock for them: the desk account's password typed again (POST
 // /unlock), which returns a signed grant the kiosk sends back as
@@ -171,16 +172,14 @@ function verifyStaffUnlock(grant, tokenId, now = Date.now()) {
   }
 }
 
-// Guards a route on a kiosk token. `selfService(body)` names the requests a
-// member may make on their own there; everything else needs the unlock.
+// Guards a route on a kiosk token: there it needs the unlock, every time.
 // 423 rather than 401/403: the session is fine, and a kiosk treats those two
 // as "sign in again".
-function kioskStaffOnly(selfService) {
+function kioskStaffOnly() {
   return function kioskStaffGate(req, res, next) {
     if (!isKioskToken(req.desktopToken)) return next();
 
     const body = req.body || {};
-    if (selfService && selfService(body)) return next();
     if (verifyStaffUnlock(body.staff_unlock, req.desktopToken._id)) return next();
 
     return res.status(423).json({
@@ -208,33 +207,39 @@ function notOnKiosk(req, res, next) {
   });
 }
 
-// A punch a member makes for themselves: a QR code or a typed number. Read
-// the way the punch controller reads them -- a qr wins over a code, and
-// either one wins over a person_id.
-function isSelfServicePunch(body) {
-  return Boolean(body.qr || body.code);
+// ---------------------------------------------------------------------------
+// Check-in methods that are gone
+//
+// A member used to check in at a kiosk by showing the QR code from their
+// account page (`qr`) or typing their member number (`code`). Both could be
+// borrowed -- a screenshot of the QR stayed good for two days, and the
+// numbers run in sequence -- and both are replaced by the member scanning the
+// desk's own code with their phone.
+// A punch still carrying either is refused in words a desk can show, before
+// a kiosk is asked for its staff unlock: an old kiosk should hear "replaced",
+// not "ask at the front desk".
+// ---------------------------------------------------------------------------
+
+function refuseRemovedMethods(req, res, next) {
+  const body = req.body || {};
+  if (!body.qr && !body.code) return next();
+  return res.status(400).json({
+    success: false,
+    code: 'METHOD_REMOVED',
+    message: 'Member QR and member-number check-in have been replaced. Scan the code on the desk screen instead.'
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Typed member numbers
-//
-// Codes are sequential (GP-0001, GP-0002...), so anyone at a kiosk can type a
-// number that is not theirs, and every hit puts a name and a package on the
-// screen. Code punches are therefore capped per desk token: enough for a
-// queue at the door, far too few to walk the member list. Every one of them
-// is also a recorded visit, so a run of them shows in the attendance log.
+// A sliding-window limiter, for punches that are cheap to repeat: a member's
+// phone checking in with the desk's code is capped per account
+// (deskCodeController). A refused attempt is not counted, so being refused
+// never lengthens the wait. `clock` is injectable for the tests.
 //
 // Held in memory, so on a serverless deployment it is per-instance -- the
 // same trade the sign-in throttle makes (see desktopAppController).
 // ---------------------------------------------------------------------------
 
-const CODE_PUNCH_LIMITS = [
-  { max: 12, windowMs: 60 * 1000 }, // a queue at the door, not a script
-  { max: 60, windowMs: 10 * 60 * 1000 } // sustained: one every ten seconds
-];
-
-// A sliding log per key. A refused attempt is not counted, so being refused
-// never lengthens the wait. `clock` is injectable for the tests.
 function createPunchLimiter(limits, clock = Date.now) {
   const longest = Math.max(...limits.map((limit) => limit.windowMs));
   const hits = new Map();
@@ -266,40 +271,6 @@ function createPunchLimiter(limits, clock = Date.now) {
   return { take, sweep, size: () => hits.size };
 }
 
-const codePunches = createPunchLimiter(CODE_PUNCH_LIMITS);
-
-// Opportunistic sweep so a long-running instance does not keep a log for
-// every desk that ever typed a number.
-setInterval(() => codePunches.sweep(), CODE_PUNCH_LIMITS[1].windowMs).unref?.();
-
-function waitLabel(seconds) {
-  if (seconds < 60) return seconds + ' second' + (seconds === 1 ? '' : 's');
-  const minutes = Math.ceil(seconds / 60);
-  return minutes + ' minute' + (minutes === 1 ? '' : 's');
-}
-
-function limitCodePunches(req, res, next) {
-  const body = req.body || {};
-  // Only a typed number: a QR code is signed and short-lived, and a
-  // fingerprint or a staff pick names the person outright.
-  if (body.qr || !body.code) return next();
-
-  const key = tenantKey() + '|' + String(req.desktopToken && req.desktopToken._id);
-  const verdict = codePunches.take(key);
-  if (verdict.allowed) return next();
-
-  const seconds = Math.max(1, Math.ceil(verdict.retryAfterMs / 1000));
-  res.set('Retry-After', String(seconds));
-  return res.status(429).json({
-    success: false,
-    code: 'CODE_ENTRY_PAUSED',
-    message:
-      `Too many member numbers typed in a short time. Try again in ${waitLabel(seconds)}, ` +
-      'or scan the QR code from your account page.',
-    retry_after: seconds
-  });
-}
-
 module.exports = {
   desktopAuth,
   requireEnrollPermission,
@@ -309,8 +280,6 @@ module.exports = {
   verifyStaffUnlock,
   kioskStaffOnly,
   notOnKiosk,
-  isSelfServicePunch,
-  createPunchLimiter,
-  limitCodePunches,
-  CODE_PUNCH_LIMITS
+  refuseRemovedMethods,
+  createPunchLimiter
 };

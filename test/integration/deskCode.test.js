@@ -7,6 +7,7 @@
 // same answer again for a request sent twice. A code that is stale, forged,
 // another gym's, or from a screen that has since been signed out is refused
 // with its own code, and one account is paused after ten tries in a minute.
+// The member QR and the typed member number it replaces are refused in words.
 //
 // index.js is loaded the way deskLink.test.js loads it: dotenv replaced first,
 // the app captured at listen() and served on a port of this test's.
@@ -372,4 +373,44 @@ test('the desk punch says "ignored" for a repeat scan too, and cannot claim a de
   const claimed = await punch({ method: 'desk_code' });
   assert.equal(claimed.status, 400, JSON.stringify(claimed.body));
   assert.equal((await visitsOf(fay)).length, 1);
+});
+
+test('the old ways are gone: no member QR, no member number, and a kiosk punch is always the staff backup', async () => {
+  const old = await person();
+  const qr = await send('GET', '/api/attendance/me/qr', { headers: asPhone(old) });
+  assert.equal(qr.status, 410, JSON.stringify(qr.body));
+  assert.deepEqual(qr.body, {
+    success: false,
+    code: 'QR_CHECKIN_REMOVED',
+    message: 'Check-in now works by scanning the code at the front desk.'
+  });
+
+  // Refused as replaced -- at the kiosk too, before it is asked for an unlock.
+  const removed = {
+    success: false,
+    code: 'METHOD_REMOVED',
+    message: 'Member QR and member-number check-in have been replaced. Scan the code on the desk screen instead.'
+  };
+  for (const token of [deskToken, kioskToken]) {
+    for (const body of [{ qr: 'GPQ1.member.6a9e47dadf00918e9825a73e.9999999999.abcdefghijklmnopqrstuvwx' }, { code: 'GP-0001' }]) {
+      const res = await send('POST', '/api/desktop/punch', { headers: asDesk(token), body });
+      assert.equal(res.status, 400, JSON.stringify(res.body));
+      assert.deepEqual(res.body, removed);
+    }
+  }
+
+  // A kiosk checks somebody in only by hand, behind the staff unlock.
+  const pick = { person_type: 'member', person_id: String(old._id), method: 'manual' };
+  const locked = await send('POST', '/api/desktop/punch', { headers: asDesk(kioskToken), body: pick });
+  assert.equal(locked.status, 423, JSON.stringify(locked.body));
+  assert.equal(locked.body.code, 'STAFF_UNLOCK_REQUIRED');
+  assert.deepEqual(await visitsOf(old), []);
+
+  const stored = await h.inGym(gym, () => DesktopToken.findOne({ tokenHash: DesktopToken.hashToken(kioskToken) }).lean());
+  const { unlock } = await h.inGym(gym, () => h.src('attendance/middleware/desktopAuth').issueStaffUnlock(stored._id));
+  const picked = await send('POST', '/api/desktop/punch', { headers: asDesk(kioskToken), body: { ...pick, staff_unlock: unlock } });
+  assert.equal(picked.status, 200, JSON.stringify(picked.body));
+  assert.equal(picked.body.success, true);
+  const [visit] = await visitsOf(old);
+  assert.equal(visit.checkIn.method, 'manual');
 });

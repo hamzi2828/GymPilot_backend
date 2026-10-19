@@ -594,22 +594,10 @@ async function membershipsFor(users, now) {
   return membershipsFromOrders(users, paidOrders, unpaidOrders, now || new Date(), { currency, unproven });
 }
 
-// The directory's entries as they go out to the desk. `codes` -- every code
-// that answers to the person -- stays here, for findByCode.
-function shown({ person_type, id, name, code, meta }) {
-  return { person_type, id, name, code, meta };
-}
-
 // Everyone who could put a finger on the reader, for the enrolment picker and
 // the manual-lookup list. `q` filters server-side so a desk searching by
 // phone number does not have to pull the whole directory first.
-async function listPeople(options) {
-  const { members, staff } = await searchDirectory(options);
-  return { members: members.map(shown), staff: staff.map(shown) };
-}
-
-// listPeople's answer with every entry's `codes` still on it.
-async function searchDirectory({ q = '', limit = MAX_DIRECTORY } = {}) {
+async function listPeople({ q = '', limit = MAX_DIRECTORY } = {}) {
   const term = String(q || '').trim();
   const rx = term ? new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
 
@@ -666,8 +654,7 @@ async function searchDirectory({ q = '', limit = MAX_DIRECTORY } = {}) {
     id: String(user._id),
     name: fullName(user),
     code: user.memberCode || '',
-    meta: user.phone || user.email || '',
-    codes: [user.memberCode]
+    meta: user.phone || user.email || ''
   }));
 
   return { members, staff: staffEntries(trainers, staffUsers, accounts) };
@@ -679,7 +666,7 @@ async function searchDirectory({ q = '', limit = MAX_DIRECTORY } = {}) {
  * staff accounts some of those trainers are linked to. A trainer linked to
  * one of `accounts` is listed once, as that account (see "Trainers who are
  * also staff"), even when it was only the trainer profile the search matched:
- * its TR- code, say, goes on answering to them. Pure.
+ * a search for its TR- code, say, still finds them. Pure.
  */
 function staffEntries(trainers, staffUsers, accounts) {
   const accountIds = new Set(accounts.map((user) => String(user._id)));
@@ -704,8 +691,7 @@ function staffEntries(trainers, staffUsers, accounts) {
       id: String(trainer._id),
       name: trainer.name,
       code: trainer.staffCode || '',
-      meta: trainer.role || trainer.phone || trainer.email || '',
-      codes: [trainer.staffCode]
+      meta: trainer.role || trainer.phone || trainer.email || ''
     }))
     .concat(
       Array.from(staffById.values()).map((user) => {
@@ -716,8 +702,7 @@ function staffEntries(trainers, staffUsers, accounts) {
           name: fullName(user),
           // Their own code; the trainer profile's only until they have one.
           code: user.staffCode || aliases[0] || '',
-          meta: (user.employment && user.employment.jobTitle) || user.phone || user.email || '',
-          codes: [user.staffCode, ...aliases]
+          meta: (user.employment && user.employment.jobTitle) || user.phone || user.email || ''
         };
       })
     )
@@ -830,25 +815,8 @@ async function activePersonKeys(pairs) {
   return keys;
 }
 
-/**
- * The one person whose member or staff code matches exactly. Case does not
- * matter; a search that merely contains the code does not count. A trainer
- * who is also on the staff answers to both codes, as the staff account.
- */
-async function findByCode(code) {
-  const clean = String(code || '').trim();
-  if (!clean) return null;
-  const { members, staff } = await searchDirectory({ q: clean, limit: 25 });
-  const wanted = clean.toLowerCase();
-  const found = [...members, ...staff].find((person) =>
-    person.codes.some((candidate) => String(candidate || '').toLowerCase() === wanted)
-  );
-  return found ? shown(found) : null;
-}
-
 module.exports = {
   activePersonKeys,
-  findByCode,
   fullName,
   assignMemberCode,
   ensureMemberCode,

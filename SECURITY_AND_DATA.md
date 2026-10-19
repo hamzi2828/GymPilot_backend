@@ -145,8 +145,15 @@ summary of the body with credential-like fields hidden. **System → Audit log**
 
 ## Biometric consent
 
-A fingerprint template is biometric data. Nothing is stored until the person
-has agreed:
+Fingerprint and face templates are biometric data. Neither is an image:
+a fingerprint template is the reader's fused enrolment template, and a face
+is a handful of SFace feature vectors (128 numbers each) made on the desk PC
+— the server never receives a picture. Both are matched on the desk PC, so
+they leave the server decrypted in one place each (`/api/desktop/templates`,
+`/api/desktop/face-templates`), to a signed-in Windows desk, with every
+download in the attendance audit trail; the web kiosk is refused both.
+
+**Fingerprints.** Nothing is stored until the person has agreed:
 
 * the member ticks **I agree** under Security & privacy on their account
   page (`PUT /user/consents { biometric: true }`);
@@ -155,15 +162,39 @@ has agreed:
 * or the desk ticks the consent box in the attendance app's enrol form
   (sent as `consent: true` to `/api/desktop/enroll`).
 
-Without any of those, enrolment answers `409 CONSENT_REQUIRED`. Withdrawing
-consent deletes the stored templates. Templates are encrypted with a key
-derived per gym (`FINGERPRINT_ENCRYPTION_KEY`, salted with the gym id; the
-pre-platform gym keeps its original key).
+Without any of those, enrolment answers `409 CONSENT_REQUIRED`.
+
+**Faces.** Consent is asked at the desk every time a face is registered: the
+operator ticks the box with the person in front of them (`consent: true` to
+`/api/desktop/face-enroll`, else `400 CONSENT_REQUIRED`), and the moment and
+the operator are kept on the face (`consentAt`, `consentBy`). Fingerprint
+consent does not stand in for it.
+
+**Removal and retention.** A template is kept until one of these deletes it
+(deleted, not hidden):
+
+* the person deletes their own face (`DELETE /api/attendance/me/face`;
+  `GET /api/attendance/me/face` says whether one is on file);
+* the person withdraws biometric consent, or staff record it withdrawn —
+  every fingerprint and the face go;
+* staff remove one: the desk (`/api/desktop/face-remove`) or the admin panel
+  (`DELETE /api/attendance/fingerprints/…`, `DELETE /api/attendance/faces/:personType/:personId`);
+* the person's account or trainer record is deleted.
+
+Someone switched off (an inactive member, a trainer no longer on the staff)
+keeps what is on file, but no desk downloads it or matches them, until they
+are switched back on or it is removed.
+
+Templates are encrypted with keys derived per gym from
+`FINGERPRINT_ENCRYPTION_KEY`, salted with the gym id — `gympilot.fingerprint.v1`
+for fingers (the pre-platform gym keeps its original key) and
+`gympilot.face.v1` for faces, so one cannot open the other.
 
 ## A copy of their data
 
 `GET /user/export` — the member's account, memberships, bookings, visits,
-fingerprint metadata (not the templates) and enquiries as a JSON download;
+fingerprint and face metadata (not the templates) and enquiries as a JSON
+download;
 **Download my data** on the account page.
 
 ## Backups
@@ -199,7 +230,7 @@ collections (as `mongodump` without `--oplog`).
 
 **Secrets inside a backup stay sealed.** Documents are copied exactly as
 stored, so the Settings secrets (Stripe, SMTP, SMS/WhatsApp tokens, push
-key) and fingerprint templates are in the archive as ciphertext under this
+key) and fingerprint and face templates are in the archive as ciphertext under this
 deployment's `SETTINGS_ENCRYPTION_KEY` / `FINGERPRINT_ENCRYPTION_KEY`, salted
 with the gym's id; a Settings secret still in plaintext from before sealing
 existed is sealed on its way into the archive. A downloaded backup therefore
@@ -331,7 +362,7 @@ document's link as the document. Files stored before this keep their old
 names.
 
 **Files go with the account.** Deleting an account removes what was uploaded
-for it — its photo and its documents — along with its fingerprints, push
+for it — its photo and its documents — along with its fingerprints, face, push
 registrations, desk sign-ins and phone-app username
 (`userController.releaseAccount`); removing one document or replacing a
 photo deletes that file. Only files under the gym's own folder are ever

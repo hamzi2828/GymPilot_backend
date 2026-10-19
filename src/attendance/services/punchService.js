@@ -64,10 +64,9 @@ function punchContext(operator, device, method, requestId, offline, matchScore) 
     // shows in its header, recorded so each half of a visit says where.
     location: operator.attendanceLocation || '',
     // How the person was identified: a finger on the reader, a face at the
-    // desk's camera, the desk's screen code scanned with their own phone, a
-    // staff pick from the list -- or, until those are retired, a scanned QR
-    // code or a typed member number.
-    method: ['manual', 'fingerprint', 'face', 'desk_code', 'qr', 'code'].includes(method) ? method : 'fingerprint'
+    // desk's camera, the desk's screen code scanned with their own phone, or
+    // a staff pick from the list.
+    method: ['manual', 'fingerprint', 'face', 'desk_code'].includes(method) ? method : 'fingerprint'
   };
 }
 

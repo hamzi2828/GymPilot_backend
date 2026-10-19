@@ -23,8 +23,6 @@ const { currentPalette } = require('../services/deskTheme');
 const { recordPunch, readRequestId, readScannedAt, readMatchScore, currentVerdict } = require('../services/punchService');
 const { openVisitExpr, isOpenVisit, missedCheckOut } = require('../services/staleVisits');
 const T = require('../services/timeUtils');
-const { verifyQrToken } = require('../services/qrToken');
-const { findByCode } = require('../services/peopleDirectory');
 const { tenantKey } = require('../../platform/tenantContext');
 const { loginFilter } = require('../../services/username');
 const signInLock = require('../../services/signInLock');
@@ -524,37 +522,15 @@ module.exports = {
   // POST /api/desktop/punch
   //
   // person_type + person_id -> one recorded punch and a full receipt. The
-  // client has already decided WHO; this decides whether that was an in or an
-  // out, and what to say about it.
+  // client has already decided WHO -- a matched finger or face, or a staff
+  // pick -- and this decides whether that was an in or an out, and what to
+  // say about it. (A member QR or typed number never gets here:
+  // refuseRemovedMethods turns those away first.)
   punch: async (req, res) => {
     const body = req.body || {};
-    let personType = String(body.person_type || '').trim();
-    let personId = String(body.person_id || '').trim();
-    let method = String(body.method || 'fingerprint').trim();
-
-    // A scanned QR code or a typed member/staff number stands in for the
-    // person picker. Both come from the web kiosk; the fingerprint desk
-    // keeps sending person_type/person_id.
-    if (body.qr) {
-      const resolved = verifyQrToken(String(body.qr));
-      if (!resolved) {
-        return res.status(400).json({
-          success: false,
-          message: 'That QR code is not valid or has expired. Open the account page for a fresh one.'
-        });
-      }
-      personType = resolved.personType;
-      personId = resolved.personId;
-      method = 'qr';
-    } else if (body.code) {
-      const found = await findByCode(String(body.code));
-      if (!found) {
-        return res.status(404).json({ success: false, message: 'No member or staff member has that code.' });
-      }
-      personType = found.person_type;
-      personId = found.id;
-      method = 'code';
-    }
+    const personType = String(body.person_type || '').trim();
+    const personId = String(body.person_id || '').trim();
+    const method = String(body.method || 'fingerprint').trim();
 
     try {
       if (personType !== 'member' && personType !== 'staff') {

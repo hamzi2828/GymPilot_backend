@@ -238,7 +238,7 @@ with `DEFAULT_TENANT_SLUG` set.
   gym.
 * **Currency & timezone** — any ISO currency; the timezone is edited on
   Settings → General and stored on the gym's platform record.
-* **Fingerprint encryption key** — derived per gym (SECURITY_AND_DATA.md).
+* **Fingerprint and face encryption keys** — derived per gym (SECURITY_AND_DATA.md).
 
 ## Also see
 

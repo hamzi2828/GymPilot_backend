@@ -112,7 +112,7 @@ const FAQ = {
         {
           question: 'How do I check in?',
           answer:
-            '<p>Use the reader at the front desk, or give your name or member code to the person on the desk. Your visits are recorded and you can see them under <em>Recent visits</em> in your account.</p>',
+            '<p>Scan the code on the screen at the front desk with your phone: from the member app, or with the camera on your phone while you are signed in to this website. If you have registered a fingerprint or your face, the reader or the camera at the desk checks you in too, and the person on the desk can always check you in by name or member ID. Your visits are recorded and you can see them under <em>Recent visits</em> in your account.</p>',
           order: 1
         },
         {
@@ -175,12 +175,13 @@ const PRIVACY = {
   <li><strong>Membership and payment records</strong> — which package you bought, when it runs out, and what you paid. Card details are handled by our payment provider and are never stored on our systems.</li>
   <li><strong>Attendance</strong> — the times you check in and out.</li>
   <li><strong>Class bookings</strong> — the sessions you book, attend or miss.</li>
-  <li><strong>Fingerprint data</strong> — only if you choose to register a finger for check-in. See below.</li>
+  <li><strong>Fingerprint and face data</strong> — only if you choose to register a finger or your face for check-in. See below.</li>
 </ul>
 
-<h2>Fingerprint check-in</h2>
-<p>Registering a fingerprint is optional. You can check in by name or member code instead, and you can ask us to delete a registered fingerprint at any time.</p>
-<p>What is stored is a mathematical template, not an image of your finger, and it cannot be turned back into one. It is encrypted at rest and is only ever sent to a front-desk computer so that it can match a scan locally.</p>
+<h2>Fingerprint and face check-in</h2>
+<p>Registering a fingerprint or your face is optional, and is only done with your agreement. You can always check in with your phone at the front desk instead, or by giving your name or member ID to the person on the desk.</p>
+<p>What is stored is a mathematical template, not an image of your finger or a photo of your face, and it cannot be turned back into one. It is encrypted at rest and is only ever sent to a front-desk computer so that it can recognise you there.</p>
+<p>You can delete a registered face yourself from your account, withdraw your consent there at any time (which deletes both), or ask us to delete either. Both are deleted with your account.</p>
 
 <h2>Why we use it</h2>
 <ul>

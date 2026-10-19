@@ -199,7 +199,7 @@ test('who a trainer profile resolves to: the account while it is live staff, els
   });
 });
 
-test('a punch for the trainer profile is filed under the account and judged against the roster; either code checks the same person out', async () => {
+test('a punch for the trainer profile is filed under the account and judged against the roster; either id checks the same person out', async () => {
   await h.inGym(gym, async () => {
     const checkIn = await deskPunch({ person_type: 'staff', person_id: String(tomProfile._id), method: 'fingerprint' });
     assert.equal(checkIn.success, true, checkIn.message);
@@ -214,9 +214,9 @@ test('a punch for the trainer profile is filed under the account and judged agai
     assert.equal(row.status, 'late', 'late against the 10:00 roster -- not early against 14:00 PT availability');
     assert.equal(await Attendance.countDocuments({ personId: tomProfile._id }), 0);
 
-    // 45 minutes later, typing the trainer profile's code.
+    // 45 minutes later, picked at the desk as the account.
     await Attendance.collection.updateOne({ _id: row._id }, { $set: { checkInAt: h.minutesAgo(45) } });
-    const checkOut = await deskPunch({ code: 'TR-0011' });
+    const checkOut = await deskPunch({ person_type: 'staff', person_id: String(tom._id), method: 'manual' });
     assert.equal(checkOut.success, true, checkOut.message);
     assert.equal(checkOut.detail.action, 'check_out');
     const closed = await Attendance.findById(row._id).lean();

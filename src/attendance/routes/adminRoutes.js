@@ -29,8 +29,8 @@ const faces = require('../controller/faceController');
 // be turned into a way to read somebody else's.
 router.get('/me', auth, myController.me);
 
-// The QR code a member shows at the door -- theirs alone, freshly signed
-// each time it is asked for. See services/qrToken.js.
+// The member's own QR code is gone (410, see myAttendanceController.qr): they
+// scan the desk's code below instead.
 router.get('/me/qr', auth, myController.qr);
 
 // A member (or a member of staff) checking themselves in with their phone, by

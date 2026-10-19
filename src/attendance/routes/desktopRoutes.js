@@ -15,8 +15,7 @@ const {
   requireEnrollPermission,
   kioskStaffOnly,
   notOnKiosk,
-  isSelfServicePunch,
-  limitCodePunches
+  refuseRemovedMethods
 } = require('../middleware/desktopAuth');
 const { desktopLoginLimiter } = require('../../middleware/rateLimit');
 
@@ -56,11 +55,12 @@ router.post('/face-enroll', desktopAuth, notOnKiosk, requireEnrollPermission, fa
 router.post('/face-remove', desktopAuth, notOnKiosk, requireEnrollPermission, faces.faceRemove);
 
 // A web kiosk stands on the public side of the counter (see kioskStaffOnly):
-// there the people list, and a punch for someone picked from it, need the
-// desk password typed again. QR codes and typed member numbers stay open to
-// members -- the numbers capped per desk, since they are easy to guess.
+// there the people list, and every punch -- checking someone in by hand, the
+// staff's backup -- need the desk password typed again. Members check in
+// there with their phone, through the screen's code, never through /punch.
+// A punch carrying the retired member QR or member number is told so first.
 router.post('/unlock', desktopAuth, controller.unlock);
 router.post('/people', desktopAuth, kioskStaffOnly(), controller.people);
-router.post('/punch', desktopAuth, kioskStaffOnly(isSelfServicePunch), limitCodePunches, controller.punch);
+router.post('/punch', desktopAuth, refuseRemovedMethods, kioskStaffOnly(), controller.punch);
 
 module.exports = router;
