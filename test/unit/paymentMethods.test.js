@@ -7,13 +7,12 @@ const assert = require('node:assert/strict');
 const M = require('../../src/services/paymentMethods');
 
 test('every method has a label, and the list is the one the contract names', () => {
-  assert.deepEqual(M.PAYMENT_METHODS, ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet', 'online']);
+  assert.deepEqual(M.PAYMENT_METHODS, ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet']);
   for (const method of M.PAYMENT_METHODS) assert.ok(M.METHOD_LABELS[method], method);
   assert.equal(M.methodLabel('stripe'), 'Card (Stripe)');
   assert.equal(M.methodLabel('card'), 'Card');
   assert.equal(M.methodLabel('bank_transfer'), 'Bank transfer');
   assert.equal(M.methodLabel('wallet'), 'Other mobile wallet');
-  assert.equal(M.methodLabel('online'), 'Online payment');
   // Something older or foreign is shown as stored, not hidden.
   assert.equal(M.methodLabel('cheque'), 'cheque');
   assert.equal(M.methodLabel(undefined), '');
@@ -41,11 +40,4 @@ test('Stripe is not a desk method: it is only ever taken through checkout', () =
   const read = M.readDeskMethod('stripe');
   assert.equal(read.method, null);
   assert.match(read.problem, /online checkout/);
-});
-
-test('an online (payment link) payment is not a desk method either: the member pays it through the link', () => {
-  assert.ok(!M.DESK_METHODS.includes('online'));
-  const read = M.readDeskMethod('online');
-  assert.equal(read.method, null);
-  assert.match(read.problem, /payment link/);
 });

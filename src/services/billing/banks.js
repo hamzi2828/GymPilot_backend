@@ -12,7 +12,7 @@ const Bank = require('../../models/bank');
 async function activeBanks() {
   try {
     return await Bank.find({ isActive: true, isDeleted: { $ne: true } })
-      .select('name accountTitle accountNumber branch iban notes qrCodeUrl')
+      .select('_id name accountTitle accountNumber branch iban notes qrCodeUrl')
       .sort({ createdAt: 1 })
       .lean();
   } catch (error) {
@@ -24,7 +24,8 @@ async function activeBanks() {
 /** The public shape of an account, for the payment link page. */
 function bankView(bank) {
   return {
-    name: bank.name || '',
+    id: bank._id ? String(bank._id) : null,
+    bank_name: bank.name || '',
     account_title: bank.accountTitle || '',
     account_number: bank.accountNumber || '',
     iban: bank.iban || '',

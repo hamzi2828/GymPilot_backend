@@ -1336,7 +1336,10 @@ async function rejectTransfer(order, { by, reason, now = new Date() } = {}) {
     { new: true }
   );
   if (!updated) throw await reviewRefusal(order._id);
-  return updated;
+  // A receipt sent through a payment link: the order opens again, so the
+  // same link takes a new receipt (services/billing/proofs.js).
+  const reopened = await require('../../services/billing/proofs').reopenAfterRejection(updated, now);
+  return reopened || updated;
 }
 
 /* ------------------------------ lifecycle ------------------------------ */

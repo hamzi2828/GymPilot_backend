@@ -12,7 +12,11 @@
 //     and comes back to the page; the card is saved only with consent and
 //     the gym's automatic charges on; no gateway means bank details only;
 //   * staff make and send a link for an unpaid order;
-//   * the member's own orders carry pay_link_url on an open renewal only.
+//   * the member's own orders carry pay_link_url on an open renewal only;
+//   * a bank-transfer receipt uploaded on the link's page goes into the
+//     gym's existing transfer verification: approve -> paid and renewed;
+//     reject -> the member is told, and the same link takes a new receipt;
+//   * a bank-transfer-only gateway ('generic') offers only that.
 
 const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
@@ -57,10 +61,16 @@ const fakeGateway = {
       throw new Error('gateway timed out');
     }
     return { url: `https://sandbox.gateway.test/checkout/trk_${checkouts.length}`, tracker: `trk_${checkouts.length}` };
+  },
+  // Never reached here: no due-date charge runs in this file.
+  async chargeSavedMethod() {
+    throw new Error('not in these tests');
   }
 };
 
 const test = h.suite(async () => {
+  // Before any model loads (helpers/onlineMethod.js).
+  require('./helpers/onlineMethod')(h);
   T = h.src('attendance/services/timeUtils');
   User = h.src('models/user');
   Package = h.src('gymfolio/models/packageModel');
@@ -164,19 +174,25 @@ test('the page shows the one order its link opens, with the bank alternative, an
       gym_name: 'Iron Gym',
       member_first_name: 'Ayesha',
       package_name: 'Monthly Unlimited',
+      period: '1 month',
       amount: 5000,
       currency: 'PKR',
       due_date: dueDate,
       last_day: await h.inGym(gym, () => T.shiftDateKey(dueDate, 3)),
       status: 'due',
+      provider: 'safepay',
       online_label: 'Card, JazzCash, Easypaisa or any bank app',
       order_number: renewal.orderNumber,
+      can_upload_proof: true,
+      proof: { status: 'none', reason: '', submitted_at: null },
+      auto_pay_available: false,
       can_save_card: false,
       banks: undefined
     }
   );
+  const bank = await h.inGym(gym, () => Bank.findOne({}).lean());
   assert.deepEqual(res.body.data.banks, [
-    { name: 'Meezan Bank', account_title: 'Iron Gym', account_number: '01010101', iban: 'PK36MEZN0000000001', branch: '', notes: '', qr_code_url: '/uploads/qr.png' }
+    { id: String(bank._id), bank_name: 'Meezan Bank', account_title: 'Iron Gym', account_number: '01010101', iban: 'PK36MEZN0000000001', branch: '', notes: '', qr_code_url: '/uploads/qr.png' }
   ]);
   assert.doesNotMatch(res.text, /ayesha@pay-links\.test|03001234567|Khan/, 'no email, phone or surname');
 });
@@ -236,7 +252,9 @@ test('the card is saved only with consent and with the gym\'s automatic charges 
   assert.equal(res.body.save_card, false);
   await h.inGym(gym, () => Settings.updateOne({}, { $set: { 'billing.autoCharge.enabled': true } }));
   try {
-    assert.equal((await send('GET', `/api/pay/${token}`)).body.data.can_save_card, true);
+    const on = (await send('GET', `/api/pay/${token}`)).body.data;
+    assert.equal(on.can_save_card, true);
+    assert.equal(on.auto_pay_available, true);
     // On, but no consent ticked.
     res = await send('POST', `/api/pay/${token}/checkout`, { body: { saveCard: true } });
     assert.equal(res.body.save_card, false);
@@ -356,6 +374,23 @@ test('the member\'s own preferences are kept: a channel they switched off is not
   }
 });
 
+test('the admin order list filters by member, payment status and method, and counts every match', async () => {
+  const list = (query) => send('GET', `/api/gymfolio/package-orders?${query}`, { user: staff });
+  const hers = await list(`userId=${member._id}&limit=1`);
+  assert.equal(hers.status, 200, hers.text);
+  const all = await h.inGym(gym, () => PackageOrder.countDocuments({ userId: member._id }));
+  assert.ok(all >= 2);
+  assert.equal(hers.body.pagination.total, all, 'every match counted, past the page');
+  assert.equal(hers.body.data.length, 1);
+  const theirs = await list(`userId=${staff._id}`);
+  assert.equal(theirs.body.pagination.total, 0);
+  assert.equal((await list('userId=nope')).status, 400);
+  const online = await list(`userId=${member._id}&paymentMethod=online&paymentStatus=pending`);
+  assert.ok(online.body.data.every((o) => o.payment.method === 'online' && o.payment.status === 'pending' && String(o.userId._id || o.userId) === String(member._id)));
+  assert.ok(online.body.pagination.total >= 1);
+  assert.equal((await send('GET', '/api/gymfolio/package-orders', { user: member })).status, 403, 'still staff only');
+});
+
 test('staff cannot link a paid or closed order; members cannot make links; a bad id is not found', async () => {
   const paidOrder = await h.inGym(gym, () => PackageOrder.findById(term._id));
   const paid = await send('POST', `/api/gymfolio/package-orders/${paidOrder._id}/pay-link`, { user: staff, body: {} });
@@ -408,6 +443,181 @@ test('once paid the link reads paid -- even past its expiry -- and checkout says
   assert.equal(refused.body.code, 'LINK_CANCELLED');
 });
 
+/* --------------------- bank transfer + receipt, through the link --------------------- */
+
+const fs = require('fs');
+const path = require('path');
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);
+const PDF = Buffer.from('%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n', 'latin1');
+const stored = [];
+
+async function upload(token, { file = PNG, type = 'image/png', name = 'receipt.png', reference } = {}) {
+  const form = new FormData();
+  if (file) form.append('proof', new Blob([file], { type }), name);
+  if (reference) form.append('reference', reference);
+  const res = await fetch(`${base}/api/pay/${token}/proof`, { method: 'POST', body: form });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
+  return { status: res.status, body: json, text };
+}
+
+require('node:test').after(() => {
+  const root = path.resolve(__dirname, '..', '..');
+  for (const url of stored) fs.promises.unlink(path.join(root, url)).catch(() => {});
+});
+
+async function freshRenewal(first) {
+  return h.inGym(gym, async () => {
+    const who = await User.create({ firstName: first, lastName: 'Transfer', email: `${first.toLowerCase()}@pay-links.test`, role: 'user' });
+    const end = T.localInstant(T.shiftDateKey(T.dateKey(), 2), 12, 0);
+    const current = await PackageOrder.create({
+      orderNumber: `PAY-${first.toUpperCase()}`,
+      userId: who._id,
+      packageId: monthly._id,
+      packageDetails: { name: 'Monthly Unlimited', price: '5000', currency: 'PKR', period: 'month' },
+      customerInfo: { fullName: `${first} Transfer`, email: who.email },
+      payment: { method: 'cash', amount: 5000, currency: 'pkr', status: 'paid', paidAt: new Date() },
+      subscription: { startDate: new Date(end.getTime() - 30 * DAY), endDate: end, isActive: true },
+      status: 'active'
+    });
+    await job.runBillingJob();
+    return { who, current, order: await PackageOrder.findOne({ 'metadata.dueFor': String(current._id) }) };
+  });
+}
+
+test('a receipt uploaded on the link page goes into the gym\'s bank-transfer verification; approved, the renewal is paid', async () => {
+  const { who, current, order } = await freshRenewal('Bilal');
+  const token = await tokenOf(order);
+  h.calls.notifications.length = 0;
+
+  const sent = await upload(token, { reference: 'RAAST-7781' });
+  assert.equal(sent.status, 200, sent.text);
+  assert.equal(sent.body.data.proof.status, 'submitted');
+  assert.ok(!Number.isNaN(Date.parse(sent.body.data.proof.submitted_at)));
+
+  const queued = await h.inGym(gym, () => PackageOrder.findById(order._id).lean());
+  assert.deepEqual([queued.status, queued.payment.method, queued.payment.status], ['pending', 'bank_transfer', 'processing']);
+  assert.match(queued.payment.proof.url, /^\/uploads\/.+\.png$/);
+  stored.push(queued.payment.proof.url);
+  assert.equal(queued.payment.proof.reference, 'RAAST-7781');
+  assert.equal(queued.metadata.proofVia, 'pay_link');
+  // Staff see it where they see every transfer to confirm (the admin bell's query).
+  assert.ok(await h.inGym(gym, () => PackageOrder.exists({ _id: order._id, 'payment.method': 'bank_transfer', 'payment.status': 'processing', 'payment.proof.uploadedAt': { $ne: null } })));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(h.calls.notifications.some((n) => n.name === 'transferReceived' && String(n.args[0]._id) === String(order._id)), 'the member is told it arrived');
+
+  // While it is being checked: no second payment through the link.
+  const page = await send('GET', `/api/pay/${token}`);
+  assert.equal(page.body.data.status, 'due');
+  assert.equal(page.body.data.proof.status, 'submitted');
+  const card = await send('POST', `/api/pay/${token}/checkout`, { body: {} });
+  assert.equal(card.status, 409);
+  assert.match(card.body.message, /receipt is with the gym to confirm/);
+
+  const approved = await send('POST', `/api/gymfolio/package-orders/${order._id}/approve`, { user: staff, body: {} });
+  assert.equal(approved.status, 200, approved.text);
+  const paid = await h.inGym(gym, () => PackageOrder.findById(order._id).lean());
+  assert.deepEqual([paid.status, paid.payment.status], ['active', 'paid']);
+  assert.equal(new Date(paid.subscription.startDate).getTime(), current.subscription.endDate.getTime(), 'renewed from the end of the term');
+  const after = await send('GET', `/api/pay/${token}`);
+  assert.deepEqual([after.body.data.status, after.body.data.proof.status], ['paid', 'approved']);
+  const again = await upload(token);
+  assert.equal(again.status, 409);
+  assert.equal(again.body.code, 'ALREADY_PAID');
+  void who;
+});
+
+test('a rejected receipt: the member is told with the same link, which takes a new one', async () => {
+  const { order } = await freshRenewal('Sana');
+  const token = await tokenOf(order);
+  const first = await upload(token);
+  assert.equal(first.status, 200, first.text);
+  stored.push((await h.inGym(gym, () => PackageOrder.findById(order._id).lean())).payment.proof.url);
+
+  h.calls.notifications.length = 0;
+  const rejected = await send('POST', `/api/gymfolio/package-orders/${order._id}/reject`, { user: staff, body: { reason: 'The amount does not match' } });
+  assert.equal(rejected.status, 200, rejected.text);
+  const reopened = await h.inGym(gym, () => PackageOrder.findById(order._id).lean());
+  assert.deepEqual([reopened.status, reopened.payment.method, reopened.payment.status], ['pending', 'bank_transfer', 'failed'], 'open again, not closed');
+  const mine = await send('GET', '/api/gymfolio/package-orders/me', { user: await h.inGym(gym, () => User.findById(order.userId).lean()) });
+  assert.equal(mine.body.data.find((o) => o.orderNumber === order.orderNumber).pay_link_url, `${SITE}/pay/${token}`, 'Pay now stays in the member portal');
+  assert.equal(reopened.payment.proof.rejectionReason, 'The amount does not match');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const notice = h.calls.notifications.find((n) => n.name === 'transferRejected');
+  assert.ok(notice, 'the member is told');
+  assert.equal(await h.inGym(gym, () => links.payLinkUrlFor(notice.args[0])), `${SITE}/pay/${token}`, 'with the same link');
+
+  const page = await send('GET', `/api/pay/${token}`);
+  assert.equal(page.body.data.status, 'due');
+  assert.deepEqual([page.body.data.proof.status, page.body.data.proof.reason], ['rejected', 'The amount does not match']);
+  assert.equal(page.body.data.can_upload_proof, true);
+
+  const second = await upload(token, { file: PDF, type: 'application/pdf', name: 'receipt.pdf' });
+  assert.equal(second.status, 200, second.text);
+  assert.equal(second.body.data.proof.status, 'submitted');
+  const queued = await h.inGym(gym, () => PackageOrder.findById(order._id).lean());
+  stored.push(queued.payment.proof.url);
+  assert.match(queued.payment.proof.url, /\.pdf$/);
+  assert.equal(queued.payment.proof.rejectionReason, '');
+  assert.equal(queued.payment.status, 'processing');
+});
+
+test('the receipt upload keeps the receipt rules and the link rules', async () => {
+  const { order } = await freshRenewal('Omar');
+  const token = await tokenOf(order);
+  const html = await upload(token, { file: Buffer.from('<html></html>'), type: 'text/html', name: 'x.html' });
+  assert.equal(html.status, 400);
+  assert.equal(html.body.code, 'FILE_NOT_ALLOWED');
+  const fake = await upload(token, { file: Buffer.from('<script>1</script>'), type: 'application/pdf', name: 'x.pdf' });
+  assert.equal(fake.status, 400, 'a "PDF" that is not one');
+  const nothing = await upload(token, { file: null });
+  assert.equal(nothing.status, 400);
+  assert.equal(nothing.body.code, 'PROOF_REQUIRED');
+  assert.equal((await upload('GPP1.nonsense')).body.code, 'LINK_INVALID');
+  const old = await h.inGym(gym, () => links.issuePayLink({ _id: order._id, metadata: {} }, new Date(Date.now() - 30 * DAY)).token);
+  assert.equal((await upload(old)).status, 410);
+
+  // No bank account to transfer to: nothing to upload a receipt for.
+  await h.inGym(gym, () => Bank.updateMany({}, { $set: { isActive: false } }));
+  try {
+    const none = await upload(token);
+    assert.equal(none.status, 409);
+    assert.equal(none.body.code, 'BANK_TRANSFER_UNAVAILABLE');
+    assert.equal((await send('GET', `/api/pay/${token}`)).body.data.can_upload_proof, false);
+  } finally {
+    await h.inGym(gym, () => Bank.updateMany({}, { $set: { isActive: true } }));
+  }
+  const unchanged = await h.inGym(gym, () => PackageOrder.findById(order._id).lean());
+  assert.deepEqual([unchanged.payment.method, unchanged.payment.status], ['online', 'pending'], 'nothing refused was recorded');
+});
+
+test('a bank-transfer-only gateway (generic) offers the transfer and the upload, and no online checkout', async () => {
+  const { order } = await freshRenewal('Zara');
+  const token = await tokenOf(order);
+  provider.setProviderForTests({ id: 'generic', label: 'Generic', capabilities: { checkout: false, paymentLinks: true, receiptUpload: true, savedCards: false, autoCharge: false } });
+  try {
+    const page = await send('GET', `/api/pay/${token}`);
+    assert.equal(page.body.data.provider, 'generic');
+    assert.equal(page.body.data.online_label, null);
+    assert.equal(page.body.data.can_upload_proof, true);
+    assert.equal(page.body.data.can_save_card, false);
+    const card = await send('POST', `/api/pay/${token}/checkout`, { body: {} });
+    assert.equal(card.status, 409);
+    assert.equal(card.body.code, 'ONLINE_PAYMENT_UNAVAILABLE');
+    const sent = await upload(token);
+    assert.equal(sent.status, 200, sent.text);
+    stored.push((await h.inGym(gym, () => PackageOrder.findById(order._id).lean())).payment.proof.url);
+  } finally {
+    provider.setProviderForTests(fakeGateway);
+  }
+});
+
+// Last: it uses up the address's checkout allowance for the rest of the file.
 test('opening checkouts is rate-limited per address', async () => {
   const token = await tokenOf(renewal);
   let limited = null;
@@ -417,4 +627,5 @@ test('opening checkouts is rate-limited per address', async () => {
   }
   assert.ok(limited, 'a 429 within 25 attempts');
   assert.equal(limited.body.code, 'RATE_LIMITED');
+  assert.match(limited.body.message, /Too many payment attempts/);
 });

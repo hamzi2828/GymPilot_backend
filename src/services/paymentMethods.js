@@ -14,15 +14,12 @@
 //   jazzcash, easypaisa, wallet
 //                  mobile wallets, common where gyms are paid by phone;
 //                  `wallet` is any other one
-//   online         a renewal the member is asked to pay through the gym's
-//                  payment link (services/billing/): whichever gateway the
-//                  gym has chosen takes the money. Never recorded by hand.
 //
 // A method this list does not have is refused (422), never quietly filed as
 // cash: the desk's takings by method would otherwise be wrong without anyone
 // being told.
 
-const PAYMENT_METHODS = ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet', 'online'];
+const PAYMENT_METHODS = ['stripe', 'card', 'bank_transfer', 'cash', 'jazzcash', 'easypaisa', 'wallet'];
 
 const METHOD_LABELS = {
   stripe: 'Card (Stripe)',
@@ -31,16 +28,13 @@ const METHOD_LABELS = {
   cash: 'Cash',
   jazzcash: 'JazzCash',
   easypaisa: 'Easypaisa',
-  wallet: 'Other mobile wallet',
-  online: 'Online payment'
+  wallet: 'Other mobile wallet'
 };
 
 // What staff may record by hand. A Stripe payment is only ever made through
 // Stripe: recorded at the desk, a later refund would go looking for a card
-// charge that does not exist. An online (payment link) payment is made by
-// the member through the gym's gateway, never typed in at the desk.
-const ONLINE_ONLY = ['stripe', 'online'];
-const DESK_METHODS = PAYMENT_METHODS.filter((method) => !ONLINE_ONLY.includes(method));
+// charge that does not exist.
+const DESK_METHODS = PAYMENT_METHODS.filter((method) => method !== 'stripe');
 
 function isPaymentMethod(value) {
   return PAYMENT_METHODS.includes(value);
@@ -65,9 +59,6 @@ function readDeskMethod(value, { fallback = 'cash', allowed = DESK_METHODS } = {
   if (allowed.includes(value)) return { method: value, problem: null };
   if (value === 'stripe') {
     return { method: null, problem: 'Card (Stripe) payments are taken through online checkout. For a card taken on the desk terminal, choose Card.' };
-  }
-  if (value === 'online') {
-    return { method: null, problem: 'Online payments are made by the member through their payment link. For money taken at the desk, choose how it was paid.' };
   }
   const offered = allowed.map((method) => `${method} (${METHOD_LABELS[method]})`).join(', ');
   return { method: null, problem: `"${value}" is not a payment method this gym records. Use one of: ${offered}.` };

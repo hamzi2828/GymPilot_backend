@@ -123,3 +123,18 @@ test('the member sees "Pay now" only on an open renewal, while its link works', 
     assert.deepEqual(b, { _id: 'x', status: 'active', pay_link_url: null });
   });
 });
+
+test('the link is on the gym\'s primary domain, whichever of its hosts the request came in on', async () => {
+  const demo = {
+    ...karachi,
+    domains: [
+      { host: 'iron.gymspilotpro.com', isPrimary: false },
+      { host: 'demo.gymspilotpro.com', isPrimary: true }
+    ]
+  };
+  // A request that arrived on the non-primary host (resolveTenant's origin).
+  const store = { gym: demo, connection: {}, host: 'iron.gymspilotpro.com', origin: 'https://iron.gymspilotpro.com', source: 'origin' };
+  const { url, token } = await runWithTenant(store, () => links.issuePayLink(order()));
+  assert.equal(url, `https://demo.gymspilotpro.com/pay/${token}`);
+  assert.equal(await runWithTenant(store, () => links.payUrl(token)), url);
+});

@@ -6,6 +6,7 @@
 //
 //   GET    /api/pay/:token                    public: the payment page's data
 //   POST   /api/pay/:token/checkout           public: open the online checkout
+//   POST   /api/pay/:token/proof              public: a bank-transfer receipt (photo or PDF)
 //   GET    /api/billing/me/saved-methods      member: their saved cards
 //   DELETE /api/billing/me/saved-methods/:id  member: remove one (auto-pay off)
 //
@@ -16,6 +17,7 @@ const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const { clientKey } = require('../middleware/rateLimit');
 const auth = require('../middleware/auth');
+const { proofUploadSingle } = require('../helper/upload');
 const payLinkController = require('../controller/payLinkController');
 
 const router = express.Router();
@@ -26,6 +28,7 @@ function limiter(max, message) {
   return rateLimit({
     windowMs: 15 * MINUTE,
     max,
+    message,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: clientKey,
@@ -42,6 +45,11 @@ const payCheckoutLimiter = limiter(20, 'Too many payment attempts. Please wait a
 
 router.get('/api/pay/:token', payPageLimiter, payLinkController.show);
 router.post('/api/pay/:token/checkout', payCheckoutLimiter, payLinkController.checkout);
+// The same file rules and allowance as the member's own receipt upload
+// (helper/upload.js: a photo or a real PDF, at the image size limit;
+// publicWriteLimiter: 20 in 15 minutes).
+const payProofLimiter = limiter(20, 'Too many receipt uploads. Please wait a few minutes and try again.');
+router.post('/api/pay/:token/proof', payProofLimiter, proofUploadSingle('proof'), payLinkController.proof);
 
 // The member's own saved cards. /api/billing is also where the gym's own
 // GymsPilotPro subscription lives (platform/routes/billingRoutes.js); none of
@@ -52,3 +60,4 @@ router.delete('/api/billing/me/saved-methods/:id', auth, payLinkController.remov
 module.exports = router;
 module.exports.payPageLimiter = payPageLimiter;
 module.exports.payCheckoutLimiter = payCheckoutLimiter;
+module.exports.payProofLimiter = payProofLimiter;

@@ -403,7 +403,11 @@ async function transferReceived(order, member) {
 
 async function transferRejected(order, member) {
   const m = await enrich(member);
-  const b = await brand();
+  const brandValue = await brand();
+  // A receipt sent through a payment link is answered with the same link, to
+  // send another (services/billing/proofs.js); anything else with the packages.
+  const { payLinkUrlFor } = require('./billing/payLinks');
+  const b = { ...brandValue, renewUrl: payLinkUrlFor(order) || brandValue.renewUrl };
   const reason = (order.payment && order.payment.proof && order.payment.proof.rejectionReason) || '';
   const vars = { ...orderVars(order, m, b), reason };
   const built = await emailFor('transfer_rejected', vars, () =>

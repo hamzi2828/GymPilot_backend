@@ -18,7 +18,7 @@
 
 const crypto = require('crypto');
 const T = require('../../attendance/services/timeUtils');
-const { currentTenantId, frontendOrigin } = require('../../platform/tenantContext');
+const { currentTenantId, currentTenant, siteUrlFor } = require('../../platform/tenantContext');
 const { metadataOf, linkLastDay, isDueRenewal, isOpen } = require('./dueRenewals');
 
 const VERSION = 'GPP1';
@@ -55,9 +55,15 @@ function issuePayLink(order, now = new Date()) {
   return { token, url: payUrl(token), expiresAt: new Date(Number(exp) * 1000) };
 }
 
-/** The gym site's page for a token. */
+/**
+ * The gym site's page for a token, on the gym's PRIMARY domain from its
+ * platform record (tenantContext.siteUrlFor, as the platform's own emailed
+ * links are built) -- never Settings.siteUrl, and never whichever of its
+ * hosts a request happened to arrive on, so a link is the same however it
+ * was made.
+ */
 function payUrl(token) {
-  return `${frontendOrigin()}${PAY_PATH}/${token}`;
+  return `${siteUrlFor(currentTenant())}${PAY_PATH}/${token}`;
 }
 
 /**
@@ -96,7 +102,9 @@ function verifyPayToken(input, now = Date.now()) {
  * (payment 'failed', status 'pending'), so the link stays.
  */
 function payLinkUrlFor(order, now = new Date()) {
-  if (!order || !isDueRenewal(order) || !isOpen(order)) return null;
+  if (!order || !isOpen(order)) return null;
+  // A renewal sent by link, or an order whose transfer receipt came through one.
+  if (!isDueRenewal(order) && metadataOf(order, 'proofVia') !== 'pay_link') return null;
   const link = issuePayLink(order, now);
   return link.expiresAt.getTime() > now.getTime() ? link.url : null;
 }

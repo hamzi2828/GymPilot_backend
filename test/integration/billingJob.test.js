@@ -69,6 +69,8 @@ function gateway(id, { autoCharge = true, checkout = true } = {}) {
 }
 
 const test = h.suite(async () => {
+  // Before any model loads (helpers/onlineMethod.js).
+  require('./helpers/onlineMethod')(h);
   T = h.src('attendance/services/timeUtils');
   User = h.src('models/user');
   Package = h.src('gymfolio/models/packageModel');

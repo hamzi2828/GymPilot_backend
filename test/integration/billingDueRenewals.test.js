@@ -36,6 +36,8 @@ let provider;
 let monthly;
 
 const test = h.suite(async () => {
+  // Before any model loads (helpers/onlineMethod.js).
+  require('./helpers/onlineMethod')(h);
   T = h.src('attendance/services/timeUtils');
   User = h.src('models/user');
   Package = h.src('gymfolio/models/packageModel');
@@ -323,10 +325,6 @@ test('the desk reads a lapsed term with an unpaid online renewal as expired, as 
 
 test('the order model takes the online method and the renewal metadata as strings', async () => {
   await h.inGym(gym, async () => {
-    const { PAYMENT_METHODS, DESK_METHODS, methodLabel } = h.src('services/paymentMethods');
-    assert.ok(PAYMENT_METHODS.includes('online'));
-    assert.ok(!DESK_METHODS.includes('online'), 'never recorded by hand at the desk');
-    assert.equal(methodLabel('online'), 'Online payment');
     const order = new PackageOrder({
       orderNumber: 'DUE-SHAPE',
       packageId: monthly._id,
