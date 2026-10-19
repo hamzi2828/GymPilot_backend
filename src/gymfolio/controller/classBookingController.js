@@ -30,6 +30,19 @@ function fail(res, code, message, extra = {}) {
   return res.status(code).json({ success: false, message, ...extra });
 }
 
+// The codes on a 402 that is about the member's own membership -- lapsed,
+// or a pack with nothing left -- and not about the gym's subscription. The
+// apps show the message beside the booking, and only the gym's own codes
+// (TENANT_SUSPENDED, SUBSCRIPTION_INACTIVE, MEMBER_APP_NOT_INCLUDED) as
+// "the gym is closed".
+const MEMBERSHIP_REQUIRED = 'MEMBERSHIP_REQUIRED';
+const NO_SESSIONS_LEFT = 'NO_SESSIONS_LEFT';
+
+/** Which of the two a membership refused at the gate is: a spent pack, or not. */
+function refusalCode(membership) {
+  return membership && membership.sessionsLeft === 0 ? NO_SESSIONS_LEFT : MEMBERSHIP_REQUIRED;
+}
+
 /**
  * Whether a lapsed membership blocks a booking. Only when the gym has
  * switched requireActiveMembership on; otherwise the booking records what
@@ -211,6 +224,18 @@ async function givePlaceUp(booking, rules, outcome, { actorId = null, reason = '
   return { cancelled, promoted };
 }
 
+/**
+ * What a member is told when their booking is cancelled. "The credit stays
+ * used" only when a credit was taken for the place and kept (a late
+ * cancel); a place on the waiting list, or on a plan that takes no credits,
+ * had none to keep.
+ */
+function cancelMessage(booking, rules) {
+  if (!booking.creditUsed) return 'Booking cancelled.';
+  if (booking.lateCancel) return `Cancelled. This was inside the ${rules.cancelHours}-hour window, so the session credit stays used.`;
+  return 'Booking cancelled. The session credit is back on the pack.';
+}
+
 function tellPromoted(promoted) {
   afterResponse(
     User.findById(promoted.userId)
@@ -339,6 +364,8 @@ module.exports = {
   // -------------------------------------------------------------------------
   async create(req, res) {
     let credit = { creditUsed: false, orderId: null };
+    // The member's membership as read for this booking, for the refusal below.
+    let membership = null;
     try {
       const actorId = req.user && (req.user.id || req.user._id);
       if (!actorId) return fail(res, 401, 'Please sign in to book a class');
@@ -405,9 +432,9 @@ module.exports = {
         );
       }
 
-      const membership = membershipForSession(await membershipFor(member), date);
+      membership = membershipForSession(await membershipFor(member), date);
       const blocked = membershipGate(membership, rules);
-      if (blocked) return fail(res, 402, blocked);
+      if (blocked) return fail(res, 402, blocked, { code: refusalCode(membership) });
 
       if (!req.isStaffBooking) {
         const paused = await noShowBlock(member._id, rules);
@@ -495,7 +522,11 @@ module.exports = {
       if (credit.creditUsed && credit.orderId) {
         PackageOrder.findById(credit.orderId).then((order) => order && refundSession(order)).catch(() => {});
       }
-      if (error && error.name === 'MembershipError') return fail(res, 402, error.message);
+      // The member's own membership or pack, never the gym: a code says
+      // which, so an app does not read a 402 as "the gym is closed".
+      if (error && error.name === 'MembershipError') {
+        return fail(res, 402, error.message, { code: error.code === NO_SESSIONS_LEFT ? NO_SESSIONS_LEFT : refusalCode(membership) });
+      }
       // The partial unique index is what enforces "one live booking per member
       // per slot", so a duplicate arrives here as a write error rather than as
       // a race the handler had to guess about.
@@ -619,9 +650,7 @@ module.exports = {
 
       return res.json({
         success: true,
-        message: booking.lateCancel
-          ? `Cancelled. This was inside the ${rules.cancelHours}-hour window, so the session credit stays used.`
-          : `Booking cancelled.${booking.creditUsed ? ' The session credit is back on the pack.' : ''}`,
+        message: cancelMessage(booking, rules),
         promoted: promoted
           ? { id: String(promoted._id), member_name: promoted.memberName }
           : null,

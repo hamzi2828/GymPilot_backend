@@ -490,3 +490,95 @@ test('after the class has started a member cannot cancel; the desk can, and nobo
     assert.equal(gaveUp.body.promoted, null);
   });
 });
+
+// ---- Refusals about the member's own membership ------------------------------
+//
+// A 402 from booking is about the member -- a lapsed membership, a pack with
+// nothing left -- and says so with a code (MEMBERSHIP_REQUIRED or
+// NO_SESSIONS_LEFT), so the apps show the message beside the class instead
+// of reading any 402 as "the gym is closed".
+
+test('booking with no membership at a gym that requires one: 402 MEMBERSHIP_REQUIRED, with the same message', async () => {
+  const strict = await h.createGym('booking-strict-gym', { timezone: h.middayZone(), currency: 'GBP', settings: { booking: { requireActiveMembership: true } } });
+  await h.inGym(strict, async () => {
+    await h.ensureIndexes(ClassBooking, PackageOrder, User);
+    const date = T.shiftDateKey(T.dateKey(), 1);
+    const gymClass = await GymClass.create({ name: 'Strict', description: 'Members only', capacity: 5, schedule: [{ day: T.weekdayNameForKey(date), startTime: '18:00', endTime: '19:00' }] });
+
+    const nobody = await User.create({ firstName: 'No', lastName: 'Plan', email: 'noplan@booking.test' });
+    const res = await book({ user: nobody }, gymClass, date);
+    assert.equal(res.statusCode, 402, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'MEMBERSHIP_REQUIRED');
+    assert.equal(res.body.message, 'There is no membership on this account — please speak to the front desk.');
+
+    // A pack with nothing left reads as that, not as a lapsed membership.
+    const spent = await member(9150);
+    await PackageOrder.updateOne({ _id: spent.order._id }, { $set: { 'sessions.used': 10, 'sessions.exhaustedAt': new Date(), status: 'expired', 'subscription.isActive': false } });
+    const empty = await book(spent, gymClass, date);
+    assert.equal(empty.statusCode, 402, JSON.stringify(empty.body));
+    assert.equal(empty.body.code, 'NO_SESSIONS_LEFT');
+    assert.equal(await ClassBooking.countDocuments({ classId: gymClass._id }), 0);
+  });
+});
+
+test('booking on a pack with no sessions left: 402 NO_SESSIONS_LEFT, and nothing is booked', async () => {
+  await h.inGym(gym, async () => {
+    const date = T.shiftDateKey(tomorrow, 14);
+    // The last credit taken a moment ago: still active, nothing left.
+    const justUsedUp = await member(9151);
+    await PackageOrder.updateOne({ _id: justUsedUp.order._id }, { $set: { 'sessions.used': 10 } });
+    const res = await book(justUsedUp, classes.hiit, date);
+    assert.equal(res.statusCode, 402, JSON.stringify(res.body));
+    assert.equal(res.body.code, 'NO_SESSIONS_LEFT');
+    assert.equal(res.body.message, 'No sessions left on this pack');
+
+    // Spent and closed by the last booking: the same answer, not "expired".
+    const closed = await member(9152);
+    await PackageOrder.updateOne({ _id: closed.order._id }, { $set: { 'sessions.used': 10, 'sessions.exhaustedAt': new Date(), status: 'expired', 'subscription.isActive': false } });
+    const again = await book(closed, classes.hiit, date);
+    assert.equal(again.statusCode, 402, JSON.stringify(again.body));
+    assert.equal(again.body.code, 'NO_SESSIONS_LEFT');
+
+    assert.equal(await ClassBooking.countDocuments({ classId: classes.hiit._id, sessionDate: date }), 0);
+    assert.equal(await creditsUsed(justUsedUp), 10);
+  });
+});
+
+// A late cancel keeps the credit -- but only a place booked on a credit had
+// one to keep. A place on the waiting list, or on a plan that takes none,
+// is simply cancelled.
+test('a late cancel says the credit stays used only when a credit was taken and kept', async () => {
+  await h.inGym(gym, async () => {
+    const today = T.dateKey();
+    // An hour or two from now (the gym's clock reads midday): inside the
+    // two-hour window, not started.
+    const soon = (name) => GymClass.create({ name, description: 'Soon', capacity: 1, schedule: [{ day: T.weekdayNameForKey(today), startTime: '14:00', endTime: '15:00' }] });
+    const row = (gymClass, m, extra) => ({ classId: gymClass._id, className: gymClass.name, userId: m.user._id, memberName: 'Late Test', sessionDate: today, sessionStart: '14:00', sessionEnd: '15:00', ...extra });
+
+    // On a credit: kept, and said so.
+    const credited = await member(9153);
+    await PackageOrder.updateOne({ _id: credited.order._id }, { $set: { 'sessions.used': 1 } });
+    const onCredit = await ClassBooking.create(row(await soon('Late credit'), credited, { status: 'booked', seat: 1, creditUsed: true, orderId: credited.order._id }));
+    const kept = await cancel(credited, onCredit._id);
+    assert.equal(kept.statusCode, 200, JSON.stringify(kept.body));
+    assert.equal(kept.body.data.late_cancel, true);
+    assert.equal(kept.body.message, 'Cancelled. This was inside the 2-hour window, so the session credit stays used.');
+    assert.equal(await creditsUsed(credited), 1);
+
+    // On the waiting list: there was no credit.
+    const waiting = await member(9154);
+    const queued = await ClassBooking.create(row(await soon('Late wait'), waiting, { status: 'waitlisted', waitlistPosition: 1 }));
+    const fromList = await cancel(waiting, queued._id);
+    assert.equal(fromList.statusCode, 200, JSON.stringify(fromList.body));
+    assert.equal(fromList.body.message, 'Booking cancelled.');
+    assert.equal(await creditsUsed(waiting), 0);
+
+    // A place on a plan that takes no credits.
+    const monthly = await member(9155);
+    const noCredit = await ClassBooking.create(row(await soon('Late plain'), monthly, { status: 'booked', seat: 1, creditUsed: false }));
+    const plain = await cancel(monthly, noCredit._id);
+    assert.equal(plain.statusCode, 200, JSON.stringify(plain.body));
+    assert.equal(plain.body.message, 'Booking cancelled.');
+    assert.ok(!/credit/i.test(plain.body.message));
+  });
+});

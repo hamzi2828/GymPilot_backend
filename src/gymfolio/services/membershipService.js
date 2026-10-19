@@ -1887,7 +1887,7 @@ async function consumeSession(order, { by = null, note = '' } = {}) {
   if (!order.sessions || !order.sessions.total) return null;
   assertActive(order);
   const total = Number(order.sessions.total) || 0;
-  if ((order.sessions.used || 0) >= total) throw new MembershipError('No sessions left on this pack', 400);
+  if ((order.sessions.used || 0) >= total) throw new MembershipError('No sessions left on this pack', 400, 'NO_SESSIONS_LEFT');
 
   const now = new Date();
   const updated = await PackageOrder.findOneAndUpdate(
@@ -1907,7 +1907,7 @@ async function consumeSession(order, { by = null, note = '' } = {}) {
     const fresh = await PackageOrder.findById(order._id);
     if (!fresh || !fresh.sessions || !fresh.sessions.total) return null;
     assertActive(fresh);
-    throw new MembershipError('No sessions left on this pack', 400);
+    throw new MembershipError('No sessions left on this pack', 400, 'NO_SESSIONS_LEFT');
   }
 
   if ((updated.sessions.used || 0) >= (updated.sessions.total || 0)) {
