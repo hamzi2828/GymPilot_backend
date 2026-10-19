@@ -105,7 +105,14 @@ function payLinkUrlFor(order, now = new Date()) {
   if (!order || !isOpen(order)) return null;
   // A renewal sent by link, or an order whose transfer receipt came through one.
   if (!isDueRenewal(order) && metadataOf(order, 'proofVia') !== 'pay_link') return null;
-  const link = issuePayLink(order, now);
+  let link;
+  try {
+    link = issuePayLink(order, now);
+  } catch (error) {
+    // No signing secret: no link, rather than no order list.
+    console.error('[billing] payment link not made:', error.message);
+    return null;
+  }
   return link.expiresAt.getTime() > now.getTime() ? link.url : null;
 }
 

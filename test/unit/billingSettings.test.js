@@ -92,4 +92,6 @@ test('the gateway door: no registry is no gateway; a test can swap one in; capab
   assert.equal(provider.onlineLabel({ id: 'payfast', label: 'PayFast' }), 'PayFast');
   assert.equal(provider.onlineLabel({ id: 'safepay', memberLabel: 'Pay online' }), 'Pay online');
   assert.equal(provider.onlineLabel(null), null);
+  // The registry's own wording for the gateway wins (services/payments checkoutLabel).
+  assert.equal(provider.onlineLabel({ id: 'payfast', label: 'PayFast', checkoutLabel: 'Card or bank account' }), 'Card or bank account');
 });

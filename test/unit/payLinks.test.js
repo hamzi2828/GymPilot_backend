@@ -100,6 +100,13 @@ test('without a signing secret nothing is issued and nothing verifies', async ()
     await inGym(karachi, () => {
       assert.throws(() => links.issuePayLink(order()), /QR_TOKEN_SECRET/);
       assert.deepEqual(links.verifyPayToken(token), { ok: false, reason: 'invalid' });
+      const error = console.error;
+      console.error = () => {};
+      try {
+        assert.equal(links.payLinkUrlFor(order(), new Date('2026-10-20T07:00:00Z')), null, 'no link, rather than a failed order list');
+      } finally {
+        console.error = error;
+      }
     });
   } finally {
     if (saved.qr !== undefined) process.env.QR_TOKEN_SECRET = saved.qr;

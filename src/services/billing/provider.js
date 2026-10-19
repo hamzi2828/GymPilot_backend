@@ -85,7 +85,7 @@ function canSaveCards(provider) {
 /** What the member is told they can pay with online. */
 function onlineLabel(provider) {
   if (!provider) return null;
-  return provider.memberLabel || provider.onlineLabel || MEMBER_LABELS[provider.id] || provider.label || 'Pay online';
+  return provider.memberLabel || provider.checkoutLabel || provider.onlineLabel || MEMBER_LABELS[provider.id] || provider.label || 'Pay online';
 }
 
 module.exports = {

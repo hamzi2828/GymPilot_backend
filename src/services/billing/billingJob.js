@@ -120,13 +120,13 @@ async function cardFor(order, provider) {
  * receipt); one that has not is recorded here, once, the same way the card
  * checkout records it -- activateOnce sends the receipt.
  */
-async function settleCharge(order, tracker) {
+async function settleCharge(order, reference) {
   const fresh = await PackageOrder.findById(order._id);
   if (!fresh || fresh.payment.status === 'paid') return { activated: false, order: fresh };
   const payments = require('../gymfolioPaymentService');
   return payments.activateOnce(fresh, async (o) => {
     o.payment.lastPaymentError = '';
-    return { transactionId: tracker || undefined };
+    return { transactionId: reference || undefined };
   });
 }
 
@@ -173,15 +173,17 @@ async function chargeOnDueDate(order, ctx) {
     return { outcome: 'pending', reason: error.message };
   }
   const status = result && result.status;
+  // The gateway's id for the charge: `reference` (services/payments), or a Safepay tracker.
+  const reference = (result && (result.reference || result.tracker)) || null;
   if (status === 'paid') {
-    await settleCharge(order, result.tracker);
-    return { outcome: 'paid', tracker: result.tracker || null, card: card.method.id };
+    await settleCharge(order, reference);
+    return { outcome: 'paid', reference, card: card.method.id };
   }
   if (status === 'failed') {
     await markDeclined(order, DECLINED, result.reason);
     return { outcome: 'declined', reason: `${DECLINED}.`, detail: result.reason || '', card: card.method.id };
   }
-  return { outcome: 'pending', tracker: (result && result.tracker) || null, reason: (result && result.reason) || '' };
+  return { outcome: 'pending', reference, reason: (result && result.reason) || '' };
 }
 
 /** What today calls for on one open renewal order. */
