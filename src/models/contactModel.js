@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { emailValidator } = require('../helper/emailShape');
 
 const contactSchema = new mongoose.Schema({
   fullName: {
@@ -13,10 +14,7 @@ const contactSchema = new mongoose.Schema({
     required: [true, 'Email address is required'],
     trim: true,
     lowercase: true,
-    match: [
-      /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,})+$/,
-      'Please provide a valid email address'
-    ]
+    validate: emailValidator('Please provide a valid email address')
   },
   phoneNumber: {
     type: String,

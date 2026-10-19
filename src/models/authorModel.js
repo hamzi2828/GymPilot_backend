@@ -1,6 +1,7 @@
 // src/models/authorModel.js
 const mongoose = require('mongoose');
 const { tenantModel } = require('../platform/modelRegistry');
+const { emailValidator } = require('../helper/emailShape');
 
 const authorSchema = new mongoose.Schema(
   {
@@ -17,7 +18,7 @@ const authorSchema = new mongoose.Schema(
       unique: true, 
       lowercase: true, 
       trim: true,
-      match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
+      validate: emailValidator('Please enter a valid email')
     },
     bio: { 
       type: String, 
