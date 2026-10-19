@@ -752,18 +752,32 @@ async function memberStanding(person, at = new Date()) {
       // and there is money to put a currency on.
       currency: membership.currency || (balanceDue > 0 ? await defaultCurrency() : '')
     },
-    daysLeft: daysLeftOf(membership)
+    daysLeft: daysLeftOf(membership),
+    // Under an order still awaiting payment: what the paid orders alone say
+    // (peopleDirectory's `paidTerm`). Asked by entryRefusal, not stored.
+    paidTerm: membership.paidTerm || null
   };
 }
 
 // Why this member is refused under the gym's rules, or null to let them in.
 // `reason` is the machine key; `text` is what the desk reads out.
+//
+// An order still waiting for its money -- a bank transfer staff have not
+// confirmed, a desk sale recorded unpaid -- leads the verdict ("Awaiting
+// payment confirmation"), but it is not money the gym has. So with `unpaid`
+// on it counts as unpaid, and `expired` and `noPackage` are judged on the
+// PAID orders beneath it (`paidTerm`): ordering a renewal and not paying for
+// it is no way past either. A paid membership that simply starts on a later
+// date ("Starts on …", `startsOn`) is none of these.
 function entryRefusal(standing, rules) {
   if (!standing || !rules) return null;
   const status = standing.verdict.status;
+  const awaiting = status === 'membership_pending' && !standing.membership.startsOn;
+  const paid = awaiting ? standing.paidTerm || { status: 'none', daysLeft: null } : null;
 
-  if (rules.noPackage && status === 'membership_none') {
-    return { reason: 'no_package', text: 'No active membership' };
+  if (rules.noPackage) {
+    if (status === 'membership_none') return { reason: 'no_package', text: 'No active membership' };
+    if (paid && paid.status === 'none') return { reason: 'no_package', text: 'No paid membership — payment not confirmed' };
   }
   if (rules.expired) {
     if (status === 'membership_expired') return { reason: 'expired', text: 'Membership expired' };
@@ -771,11 +785,18 @@ function entryRefusal(standing, rules) {
     if (status === 'membership_cancelled' && !(standing.daysLeft > 0)) {
       return { reason: 'expired', text: 'Membership cancelled and ended' };
     }
+    if (paid && paid.status === 'expired') {
+      return { reason: 'expired', text: 'Membership expired — renewal not paid yet' };
+    }
   }
   if (rules.unpaid) {
     if (status === 'membership_past_due') return { reason: 'unpaid', text: 'Card payment failed' };
     if (standing.membership.balanceDue > 0) {
       return { reason: 'unpaid', text: `Balance due ${moneyLabel(standing.membership.balanceDue, standing.membership.currency)}` };
+    }
+    // Unless a paid term still covers today: cancelled, with days left on it.
+    if (paid && !(paid.status === 'cancelled' && paid.daysLeft > 0)) {
+      return { reason: 'unpaid', text: 'Payment not confirmed' };
     }
   }
   return null;

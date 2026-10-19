@@ -155,6 +155,91 @@ test('one rule at a time: refusing expired members still lets an unpaid one in w
   });
 });
 
+// A bank-transfer order the member has sent but staff have not confirmed.
+async function awaitingPayment(user, { createdAgoDays = 0 } = {}) {
+  seq += 1;
+  const now = new Date();
+  const order = await PackageOrder.create({
+    orderNumber: `ENT-${seq}`,
+    userId: user._id,
+    packageId: new h.state.mongoose.Types.ObjectId(),
+    packageDetails: { name: 'Monthly', price: '6000', currency: 'PKR', period: 'month' },
+    customerInfo: { fullName: `${user.firstName} ${user.lastName}`, email: user.email },
+    payment: { method: 'bank_transfer', amount: 6000, currency: 'PKR', status: 'pending' },
+    subscription: { startDate: now, endDate: new Date(now.getTime() + 30 * 86400000), isActive: false },
+    status: 'pending'
+  });
+  if (createdAgoDays) {
+    await PackageOrder.collection.updateOne({ _id: order._id }, { $set: { createdAt: new Date(now.getTime() - createdAgoDays * 86400000) } });
+  }
+  return order;
+}
+
+test('an order still awaiting payment is no way past the rules: unpaid counts it as unpaid, expired is judged on the paid term', async () => {
+  await h.inGym(gym, async () => {
+    // Expired, with a renewal sent by bank transfer and not yet confirmed.
+    const renewing = await memberWith({ endIn: -10 });
+    await awaitingPayment(renewing);
+    // Never paid anything; only the transfer.
+    const newcomer = await memberWith({ noOrder: true });
+    await awaitingPayment(newcomer);
+
+    // Rules off: let in with the warning, as before.
+    const warned = await deskPunch(renewing, { request_id: `pending-off-${renewing._id}` });
+    assert.equal(warned.body.success, true, warned.body.message);
+    assert.equal(warned.body.detail.status, 'membership_pending');
+    await Attendance.deleteMany({ personId: renewing._id });
+
+    const cases = [
+      [{ expired: true }, renewing, 'expired', /^Entry refused — Membership expired — renewal not paid yet\.$/],
+      [{ unpaid: true }, renewing, 'unpaid', /^Entry refused — Payment not confirmed\.$/],
+      [{ unpaid: true }, newcomer, 'unpaid', /^Entry refused — Payment not confirmed\.$/],
+      [{ noPackage: true }, newcomer, 'no_package', /^Entry refused — No paid membership — payment not confirmed\.$/]
+    ];
+    try {
+      for (const [rules, person, reason, message] of cases) {
+        await putSettings({ refuseEntry: { expired: false, unpaid: false, noPackage: false, ...rules } });
+        const res = await deskPunch(person, { request_id: `pending-${reason}-${person._id}` });
+        assert.equal(res.body.refused, true, `${JSON.stringify(rules)}: ${JSON.stringify(res.body)}`);
+        assert.equal(res.body.reason, reason);
+        assert.match(res.body.message, message);
+        assert.equal(res.body.detail.status, 'membership_pending', 'the verdict itself is unchanged');
+        assert.equal((await visits(person)).length, 0);
+      }
+      await putSettings({ refuseEntry: { expired: true, unpaid: false, noPackage: false } });
+      assert.equal((await deskPunch(newcomer)).body.success, true, 'nothing expired: expired alone lets them in');
+    } finally {
+      await putSettings({ refuseEntry: { expired: false, unpaid: false, noPackage: false } });
+    }
+  });
+});
+
+test('a paid membership that starts on a later date is let in under every rule', async () => {
+  await h.inGym(gym, async () => {
+    await putSettings({ refuseEntry: { expired: true, unpaid: true, noPackage: true } });
+    try {
+      const early = await memberWith({ noOrder: true });
+      const now = new Date();
+      await PackageOrder.create({
+        orderNumber: `ENT-LATER-${early._id}`,
+        userId: early._id,
+        packageId: new h.state.mongoose.Types.ObjectId(),
+        packageDetails: { name: 'Monthly', price: '6000', currency: 'PKR', period: 'month' },
+        customerInfo: { fullName: 'Ent Later', email: early.email },
+        payment: { method: 'cash', amount: 6000, currency: 'PKR', status: 'paid', paidAt: now },
+        subscription: { startDate: new Date(now.getTime() + 3 * 86400000), endDate: new Date(now.getTime() + 33 * 86400000), isActive: false },
+        status: 'active'
+      });
+      const res = await deskPunch(early);
+      assert.equal(res.body.success, true, JSON.stringify(res.body));
+      assert.equal(res.body.detail.status, 'membership_pending');
+      assert.match(res.body.detail.status_label, /^Starts on /);
+    } finally {
+      await putSettings({ refuseEntry: { expired: false, unpaid: false, noPackage: false } });
+    }
+  });
+});
+
 test('someone already inside can always scan out, whatever the rules say', async () => {
   await h.inGym(gym, async () => {
     const lapsed = await memberWith({ endIn: -3 });

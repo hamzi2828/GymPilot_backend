@@ -115,6 +115,19 @@ The Windows app sends one with every punch and, when a punch got no answer
 (or a 5xx), re-sends the same id if that person is scanned or picked again
 within two minutes.
 
+## Entry rules
+
+A gym may turn members away instead of warning (`attendance.refuseEntry`
+{ expired, unpaid, noPackage }, all off by default): the desk, the kiosk and
+the phone's desk-code check-in all answer `refused: true, code:
+"ENTRY_REFUSED", reason` and record nothing. An order still awaiting payment
+(a bank transfer not yet confirmed, a desk sale recorded unpaid) leads the
+verdict — "Awaiting payment confirmation" — but is not money the gym has: with
+`unpaid` on it is refused as unpaid ("Payment not confirmed"), and `expired`
+and `noPackage` are judged on the paid orders beneath it, so a renewal nobody
+has paid for hides neither an expired term nor a package never paid for. A paid
+membership that only starts on a later date ("Starts on …") is let in.
+
 ## A punch sent late — `scanned_at`
 
 With no connection the Windows desk keeps matching, saves each punch with its

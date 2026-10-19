@@ -483,10 +483,19 @@ function verdictFromOrders(paidOrders, unpaid, now) {
   }
 
   // Nothing live. If the most recent thing that happened is an order awaiting
-  // payment confirmation, that is what the desk needs to hear.
+  // payment confirmation, that is what the desk needs to hear -- with what
+  // the PAID orders alone say beneath it (`paidTerm`: none, expired,
+  // cancelled or suspended), so the gym's entry rules are judged on money
+  // that has arrived: a renewal nobody has paid for must not hide that the
+  // term before it ran out, or that nothing was ever paid
+  // (punchService.entryRefusal).
   const latestPaid = recent[0] || null;
   if (unpaid && (!latestPaid || new Date(unpaid.createdAt) >= new Date(latestPaid.createdAt))) {
-    return describeOrder(unpaid, 'pending', now);
+    const paid = verdictFromOrders(paidOrders, null, now);
+    return {
+      ...describeOrder(unpaid, 'pending', now),
+      paidTerm: { status: paid.status, daysLeft: paid.daysLeft ?? null, endDate: paid.endDate || null }
+    };
   }
 
   if (!latestPaid) {
