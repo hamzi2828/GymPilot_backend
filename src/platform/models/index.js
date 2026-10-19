@@ -16,6 +16,7 @@ const MemberDirectory = require('./memberDirectoryModel');
 const PlatformStripeEvent = require('./platformStripeEventModel');
 const PlatformPayment = require('./platformPaymentModel');
 const PlatformSafepayCheckout = require('./platformSafepayCheckoutModel');
+const PlatformPaymentRequest = require('./platformPaymentRequestModel');
 
 let warmed = false;
 
@@ -33,6 +34,7 @@ function warmPlatformModels() {
   void PlatformStripeEvent.schema;
   void PlatformPayment.schema;
   void PlatformSafepayCheckout.schema;
+  void PlatformPaymentRequest.schema;
   warmed = true;
 }
 
@@ -48,5 +50,6 @@ module.exports = {
   PlatformStripeEvent,
   PlatformPayment,
   PlatformSafepayCheckout,
+  PlatformPaymentRequest,
   warmPlatformModels
 };

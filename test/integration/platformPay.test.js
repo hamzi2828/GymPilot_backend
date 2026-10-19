@@ -89,6 +89,9 @@ require('node:test').after(async () => {
     const file = localUploadPath(url);
     if (file) await fs.promises.unlink(file).catch(() => {});
   }
+  // The receipts the gyms uploaded, their folders and all.
+  const { UPLOADS_DIR } = require('../../src/helper/upload');
+  for (const slug of ['pay-gym', 'card-gym']) await fs.promises.rm(path.join(UPLOADS_DIR, slug), { recursive: true, force: true }).catch(() => {});
   if (server) await new Promise((resolve) => server.close(resolve));
   if (fake) await fake.stop();
 });
@@ -583,4 +586,238 @@ test('Pay now answers which way to pay when it is not Safepay; the gym Stripe bi
 
   // Signed in or nothing.
   assert.equal((await send('POST', '/api/billing/pay', { body: {}, headers: { 'x-tenant-slug': gym.slug } })).status, 401);
+});
+
+/* --------------------- bank transfer + receipt, verified --------------------- */
+
+const PDF = Buffer.from('%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n');
+
+function receiptForm(buffer = PNG, name = 'receipt.png', type = 'image/png', fields = {}) {
+  const form = fileForm('receipt', buffer, name, type);
+  for (const [key, value] of Object.entries(fields)) form.append(key, value);
+  return form;
+}
+
+const upload = (form, options = {}) => billing('POST', '/receipt', { form, ...options });
+const payBlock = async (options = {}) => {
+  const res = await billing('GET', '/subscription', options);
+  assert.equal(res.status, 200, res.text);
+  return res.body.data.pay;
+};
+
+/** Platform email on (SMTP_* set; sends are recorded by the harness, never made) for `fn`. */
+async function withPlatformEmail(fn) {
+  Object.assign(process.env, { SMTP_HOST: 'smtp.platform.test', SMTP_USER: 'billing@gymspilotpro.test', SMTP_PASS: 'not-a-real-password' });
+  try {
+    return await fn();
+  } finally {
+    for (const key of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS']) delete process.env[key];
+  }
+}
+
+test("the gym's Billing tab is told how it pays: the way chosen, what is due and when, and GymsPilotPro's accounts for a transfer", async () => {
+  const sub = (await gymNow()).subscription;
+  const due = sub.currentPeriodEnd.toISOString().slice(0, 10);
+
+  let pay = await payBlock();
+  assert.deepEqual(pay, { provider: 'safepay', label: 'Card, JazzCash, Easypaisa or any bank app', amount_due: 8000, currency: 'PKR', due_date: due, bank_accounts: [], pending_request: null });
+
+  const account = (await panel('GET', '/settings')).body.data.bankAccounts[0];
+  const qr = await panel('POST', `/settings/bank-accounts/${account.id}/qr`, { form: fileForm('qrCode', PNG, 'qr.png', 'image/png') });
+  stored.push(qr.body.data.bankAccounts[0].qrCodeUrl);
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'generic' } } });
+  pay = await payBlock();
+  assert.equal(pay.provider, 'generic');
+  assert.equal(pay.label, 'Bank transfer — upload your receipt');
+  assert.deepEqual(pay.bank_accounts, [
+    { bank_name: 'Meezan Bank', account_title: 'GymsPilotPro (Pvt) Ltd', account_number: '0101-0123456', iban: 'PK36MEZN0001010123456702', qr_code_url: qr.body.data.bankAccounts[0].qrCodeUrl }
+  ]);
+  // An account switched off is not offered.
+  const hidden = await panel('POST', '/settings/bank-accounts', { body: { bankName: 'Hidden Bank', accountTitle: 'GymsPilotPro', accountNumber: '999', active: false } });
+  assert.equal((await payBlock()).bank_accounts.length, 1);
+  await panel('DELETE', `/settings/bank-accounts/${hidden.body.data.bankAccount.id}`);
+
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'none' } } });
+  pay = await payBlock();
+  assert.deepEqual([pay.provider, pay.label, pay.bank_accounts], ['none', '', []]);
+  // The gym Stripe bills is told Stripe, whatever was chosen.
+  assert.equal((await payBlock({ user: stripeAdmin, forGym: stripeGym })).provider, 'stripe');
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'generic' } } });
+});
+
+test('a receipt must be a real photo or PDF of at most 4 MB, from a gym that pays by hand', async () => {
+  const none = await upload(new FormData());
+  assert.equal(none.status, 400, none.text);
+  assert.equal(none.body.code, 'RECEIPT_REQUIRED');
+  const gif = await upload(receiptForm(Buffer.from('GIF89a....'), 'r.gif', 'image/gif'));
+  assert.equal(gif.status, 400, gif.text);
+  assert.equal(gif.body.code, 'FILE_NOT_ALLOWED');
+  const fakePdf = await upload(receiptForm(Buffer.from('not a pdf at all'), 'r.pdf', 'application/pdf'));
+  assert.equal(fakePdf.status, 400, fakePdf.text);
+  assert.match(fakePdf.body.message, /does not look like a real photo or PDF/);
+  const big = await upload(receiptForm(Buffer.concat([PNG, Buffer.alloc(4 * 1024 * 1024)]), 'big.png', 'image/png'));
+  assert.equal(big.status, 413, big.text);
+  assert.equal(big.body.code, 'FILE_TOO_LARGE');
+  const card = await upload(receiptForm(), { user: stripeAdmin, forGym: stripeGym });
+  assert.equal(card.status, 409, card.text);
+  assert.equal(card.body.code, 'STRIPE_BILLED');
+  assert.equal((await send('POST', '/api/billing/receipt', { form: receiptForm(), headers: { 'x-tenant-slug': gym.slug } })).status, 401);
+  // Nothing of any of that was kept.
+  const PlatformPaymentRequest = h.src('platform/models/platformPaymentRequestModel');
+  assert.equal(await PlatformPaymentRequest.countDocuments({}), 0);
+  const { UPLOADS_DIR } = require('../../src/helper/upload');
+  const left = await fs.promises.readdir(path.join(UPLOADS_DIR, 'pay-gym')).catch(() => []);
+  assert.deepEqual(left, []);
+});
+
+test('receipt → pending → approved: the payment is recorded and the subscription extended once, however often it is approved', async () => {
+  const before = await gymNow();
+  const sent = await upload(receiptForm(PNG, 'first.png', 'image/png', { reference: 'IBFT-1001', note: 'Paid from the Meezan app' }));
+  assert.equal(sent.status, 201, sent.text);
+  assert.equal(sent.body.success, true);
+  assert.deepEqual({ ...sent.body.data.pending_request, submitted_at: undefined }, { status: 'pending', reason: '', submitted_at: undefined, amount: 8000 });
+
+  // A second upload replaces the pending one (and its file).
+  const PlatformPaymentRequest = h.src('platform/models/platformPaymentRequestModel');
+  const firstUrl = (await PlatformPaymentRequest.findOne({ gymId: gym._id }).lean()).receiptUrl;
+  assert.equal((await fetch(base + firstUrl)).status, 200);
+  const replaced = await upload(receiptForm(PDF, 'statement.pdf', 'application/pdf', { reference: 'IBFT-1002' }));
+  assert.equal(replaced.status, 201, replaced.text);
+  assert.equal(await PlatformPaymentRequest.countDocuments({ gymId: gym._id }), 1);
+  const row = await PlatformPaymentRequest.findOne({ gymId: gym._id }).lean();
+  assert.match(row.receiptUrl, /^\/uploads\/pay-gym\/.+\.pdf$/);
+  assert.equal((await fetch(base + firstUrl)).status, 404, 'the replaced receipt is gone');
+  assert.equal((await payBlock()).pending_request.status, 'pending');
+
+  // The super admin's queue, and the sidebar badge.
+  const listed = await panel('GET', '/payment-requests?status=pending');
+  assert.equal(listed.status, 200, listed.text);
+  assert.equal(listed.body.total, 1);
+  const request = listed.body.data[0];
+  assert.deepEqual(Object.keys(request).sort(), ['amount', 'billingCycle', 'currency', 'gymId', 'gymName', 'gymSlug', 'id', 'note', 'paymentId', 'reason', 'receiptUrl', 'reference', 'reviewedAt', 'reviewedBy', 'status', 'submittedAt', 'submittedBy'].sort());
+  assert.deepEqual([request.gymSlug, request.gymName, request.amount, request.currency, request.reference, request.status], ['pay-gym', 'Gym pay-gym', 8000, 'PKR', 'IBFT-1002', 'pending']);
+  assert.deepEqual(request.submittedBy, { id: String(admin._id), email: admin.email, name: 'Ayesha Khan' });
+  const overview = await panel('GET', '/overview');
+  assert.equal(overview.status, 200, overview.text);
+  assert.equal(overview.body.pending_count, 1);
+  assert.equal(overview.body.data.pending_count, 1);
+
+  const approved = await panel('POST', `/payment-requests/${request.id}/approve`, { body: {} });
+  assert.equal(approved.status, 200, approved.text);
+  assert.equal(approved.body.emailed, false, 'no platform email here');
+  assert.equal(approved.body.duplicate, false);
+  const { addCycle } = h.src('platform/services/manualPayments');
+  const expected = addCycle(before.subscription.currentPeriodEnd, 'monthly');
+  assert.equal(approved.body.data.request.status, 'approved');
+  assert.equal(approved.body.data.request.reviewedBy.email, superAdmin.email);
+  assert.deepEqual([approved.body.data.payment.method, approved.body.data.payment.reference, approved.body.data.payment.amount], ['bank_transfer', 'IBFT-1002', 8000]);
+  assert.equal(approved.body.data.subscription.currentPeriodEnd, expected.toISOString());
+  assert.equal(approved.body.data.subscription.status, 'active');
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, expected);
+
+  const twice = await panel('POST', `/payment-requests/${request.id}/approve`, { body: {} });
+  assert.equal(twice.status, 200, twice.text);
+  assert.equal(twice.body.duplicate, true);
+  assert.equal(twice.body.data.payment.id, approved.body.data.payment.id);
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, expected, 'extended once');
+  const PlatformPayment = h.src('platform/models/platformPaymentModel');
+  assert.equal(await PlatformPayment.countDocuments({ gymId: gym._id, method: 'bank_transfer' }), 1);
+  assert.equal((await panel('GET', '/overview')).body.pending_count, 0);
+  assert.equal((await payBlock()).pending_request, null, 'approved: nothing waiting');
+  assert.ok(await PlatformAuditLog.exists({ action: 'gym_payment_request_approved', gymSlug: 'pay-gym' }));
+  assert.ok(await PlatformAuditLog.exists({ action: 'gym_receipt_submitted', gymSlug: 'pay-gym' }));
+  assert.equal((await panel('POST', '/payment-requests/64b000000000000000000000/approve', { body: {} })).status, 404);
+});
+
+test('receipt → rejected with a reason → the gym sees why and uploads again', async () => {
+  const before = await gymNow();
+  await upload(receiptForm(PNG, 'blurry.png', 'image/png', { reference: 'IBFT-2001' }));
+  const { data } = (await panel('GET', '/payment-requests?status=pending')).body;
+  const id = data[0].id;
+
+  const noReason = await panel('POST', `/payment-requests/${id}/reject`, { body: {} });
+  assert.equal(noReason.status, 400, noReason.text);
+  assert.equal(noReason.body.code, 'REASON_REQUIRED');
+  assert.equal((await panel('POST', `/payment-requests/${id}/reject`, { body: { reason: '   ' } })).status, 400);
+
+  const rejected = await panel('POST', `/payment-requests/${id}/reject`, { body: { reason: 'The amount on the receipt is Rs 800, not Rs 8,000.' } });
+  assert.equal(rejected.status, 200, rejected.text);
+  assert.equal(rejected.body.emailed, false);
+  assert.deepEqual([rejected.body.data.request.status, rejected.body.data.request.reason], ['rejected', 'The amount on the receipt is Rs 800, not Rs 8,000.']);
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, before.subscription.currentPeriodEnd, 'nothing paid');
+
+  const pay = await payBlock();
+  assert.deepEqual([pay.pending_request.status, pay.pending_request.reason, pay.pending_request.amount], ['rejected', 'The amount on the receipt is Rs 800, not Rs 8,000.', 8000]);
+  const approve = await panel('POST', `/payment-requests/${id}/approve`, { body: {} });
+  assert.equal(approve.status, 409, approve.text);
+  assert.equal(approve.body.code, 'ALREADY_REJECTED');
+
+  const again = await upload(receiptForm(PNG, 'clear.png', 'image/png', { reference: 'IBFT-2002' }));
+  assert.equal(again.status, 201, again.text);
+  assert.equal((await payBlock()).pending_request.status, 'pending');
+  assert.equal((await panel('GET', '/payment-requests?status=rejected')).body.total, 1, 'the rejected one is kept');
+  const second = (await panel('GET', '/payment-requests?status=pending')).body.data[0];
+  assert.notEqual(second.id, id);
+  // An approved one cannot be rejected afterwards.
+  assert.equal((await panel('POST', `/payment-requests/${second.id}/approve`, { body: {} })).status, 200);
+  const late = await panel('POST', `/payment-requests/${second.id}/reject`, { body: { reason: 'Changed my mind' } });
+  assert.equal(late.status, 409, late.text);
+  assert.equal(late.body.code, 'ALREADY_APPROVED');
+});
+
+test('with platform email the owner is told on approve and on reject; the same transfer approved twice is refused', async () => {
+  await withPlatformEmail(async () => {
+    const sentBefore = h.calls.emails.length;
+    await upload(receiptForm(PNG, 'r.png', 'image/png', { reference: 'IBFT-3001' }));
+    let id = (await panel('GET', '/payment-requests?status=pending')).body.data[0].id;
+    const approved = await panel('POST', `/payment-requests/${id}/approve`, { body: {} });
+    assert.equal(approved.status, 200, approved.text);
+    assert.equal(approved.body.emailed, true);
+    const thanks = h.calls.emails[sentBefore];
+    assert.equal(thanks.to, 'ayesha@pay-gym.test');
+    assert.match(thanks.subject, /payment received/);
+    assert.match(thanks.html, /PKR 8,000/);
+    assert.match(thanks.html, /http:\/\/pay-gym\.test\/admin\/settings\?tab=billing/);
+
+    await upload(receiptForm(PNG, 'r2.png', 'image/png', { reference: 'IBFT-3002' }));
+    id = (await panel('GET', '/payment-requests?status=pending')).body.data[0].id;
+    const rejected = await panel('POST', `/payment-requests/${id}/reject`, { body: { reason: 'No transfer with that reference reached us.' } });
+    assert.equal(rejected.body.emailed, true);
+    const sorry = h.calls.emails[h.calls.emails.length - 1];
+    assert.match(sorry.subject, /could not confirm your payment/);
+    assert.match(sorry.html, /No transfer with that reference reached us\./);
+
+    // The same transfer's reference a second time: the payment is not recorded twice.
+    await upload(receiptForm(PNG, 'r3.png', 'image/png', { reference: 'IBFT-3001' }));
+    id = (await panel('GET', '/payment-requests?status=pending')).body.data[0].id;
+    const same = await panel('POST', `/payment-requests/${id}/approve`, { body: {} });
+    assert.equal(same.status, 409, same.text);
+    assert.equal(same.body.code, 'DUPLICATE_REFERENCE');
+    await panel('POST', `/payment-requests/${id}/reject`, { body: { reason: 'Already recorded' } });
+  });
+});
+
+test("receipts are taken while GymsPilotPro lists an account to pay into, whatever the way, and never without one", async () => {
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'safepay' } } });
+  const fallback = await upload(receiptForm(PNG, 'fallback.png', 'image/png', { reference: 'IBFT-4001' }));
+  assert.equal(fallback.status, 201, fallback.text);
+  const id = (await panel('GET', '/payment-requests?status=pending')).body.data[0].id;
+
+  // Two clicks on Approve at once: one payment, one extension.
+  const before = await gymNow();
+  const PlatformPayment = h.src('platform/models/platformPaymentModel');
+  const count = await PlatformPayment.countDocuments({ gymId: gym._id });
+  const both = await Promise.all([panel('POST', `/payment-requests/${id}/approve`, { body: {} }), panel('POST', `/payment-requests/${id}/approve`, { body: {} })]);
+  assert.deepEqual(both.map((r) => r.status), [200, 200], both.map((r) => r.text).join(' | '));
+  assert.equal(await PlatformPayment.countDocuments({ gymId: gym._id }), count + 1);
+  const { addCycle } = h.src('platform/services/manualPayments');
+  assert.deepEqual((await gymNow()).subscription.currentPeriodEnd, addCycle(before.subscription.currentPeriodEnd, 'monthly'));
+
+  const account = (await panel('GET', '/settings')).body.data.bankAccounts[0];
+  await panel('PUT', `/settings/bank-accounts/${account.id}`, { body: { active: false } });
+  const off = await upload(receiptForm());
+  assert.equal(off.status, 409, off.text);
+  assert.equal(off.body.code, 'BANK_TRANSFER_OFF');
+  await panel('PUT', `/settings/bank-accounts/${account.id}`, { body: { active: true } });
+  await panel('PUT', '/settings', { body: { onlinePayments: { provider: 'generic' } } });
 });

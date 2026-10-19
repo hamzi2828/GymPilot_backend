@@ -27,6 +27,7 @@ const { syncStripeSubscription, changesPrice, SubscriptionSyncError } = require(
 // Called through the modules, not destructured, so a test can stand in for them.
 const platformBilling = require('../services/platformBilling');
 const manualPayments = require('../services/manualPayments');
+const paymentRequests = require('../services/paymentRequests');
 
 const User = require('../../models/user');
 const { ADMIN_SLUG } = require('../../services/roleService');
@@ -167,7 +168,7 @@ module.exports = {
         plan: g.plan && g.plan.name ? g.plan.name : null,
         currentPeriodEnd: g.subscription && g.subscription.currentPeriodEnd
       });
-      const [renewing, pastDue, suspendedGyms, newRequests, firstPlan] = await Promise.all([
+      const [renewing, pastDue, suspendedGyms, newRequests, firstPlan, pendingPayments] = await Promise.all([
         Gym.find({ status: 'active', 'subscription.status': { $in: ['trialing', 'active'] }, 'subscription.currentPeriodEnd': { $ne: null, $gte: now, $lte: in30 } })
           .sort({ 'subscription.currentPeriodEnd': 1 })
           .limit(10)
@@ -177,7 +178,9 @@ module.exports = {
         Gym.find({ status: 'suspended' }).sort({ updatedAt: -1 }).limit(10).populate('plan', 'name').lean(),
         DemoRequest.countDocuments({ status: 'new' }),
         // What the platform sells in, so an empty MRR reads "Rs 0", not "$0".
-        PlatformPlan.findOne({ isActive: true }).sort({ order: 1, createdAt: 1 }).select('price.currency').lean()
+        PlatformPlan.findOne({ isActive: true }).sort({ order: 1, createdAt: 1 }).select('price.currency').lean(),
+        // Bank-transfer receipts waiting for the super admin: the sidebar badge.
+        paymentRequests.countPending()
       ]);
 
       return res.json({
@@ -189,8 +192,11 @@ module.exports = {
           mrr: mrrRows.map((row) => ({ currency: row._id, amount: Math.round(row.mrr * 100) / 100, gyms: row.gyms })),
           currency: (firstPlan && firstPlan.price && firstPlan.price.currency) || 'PKR',
           attention: { renewing: renewing.map(brief), past_due: pastDue.map(brief), suspended: suspendedGyms.map(brief) },
-          demo_requests_new: newRequests
-        }
+          demo_requests_new: newRequests,
+          pending_count: pendingPayments
+        },
+        // Also at the top, where the panel's sidebar badge reads it.
+        pending_count: pendingPayments
       });
     } catch (error) {
       return fail(res, error);

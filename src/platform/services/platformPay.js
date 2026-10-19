@@ -107,4 +107,33 @@ async function payTerms(gym, { billingCycle, planSlug } = {}) {
   };
 }
 
-module.exports = { PlatformPayError, providerIdFor, payTerms };
+/**
+ * The `pay` block of GET /api/billing/subscription: how this gym pays, what
+ * is due and when, GymsPilotPro's bank accounts (bank transfer only) and
+ * where its last receipt stands.
+ *
+ *   { provider: 'none'|'stripe'|'safepay'|'generic', label, amount_due, currency,
+ *     due_date: 'YYYY-MM-DD'|null, bank_accounts: [{ bank_name, account_title,
+ *     account_number, iban, qr_code_url }], pending_request: { status, reason,
+ *     submitted_at, amount } | null }
+ */
+async function payBlock(gym, settings) {
+  const s = settings === undefined ? await PlatformSettings.getSettings() : settings;
+  const provider = await providerIdFor(gym, s);
+  const module_ = gateways.getProvider(provider);
+  const sub = (gym && gym.subscription) || {};
+  // Required here: both pull in the payment request model and emails.
+  const { activeAccounts, gymFacingAccount } = require('./platformBankAccounts');
+  const { pendingRequestFor } = require('./paymentRequests');
+  return {
+    provider,
+    label: module_ ? module_.checkoutLabel : '',
+    amount_due: Number(sub.amount) || 0,
+    currency: String(sub.currency || 'PKR').toUpperCase(),
+    due_date: sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd).toISOString().slice(0, 10) : null,
+    bank_accounts: provider === 'generic' ? activeAccounts(s).map(gymFacingAccount) : [],
+    pending_request: await pendingRequestFor(gym._id)
+  };
+}
+
+module.exports = { PlatformPayError, providerIdFor, payTerms, payBlock };

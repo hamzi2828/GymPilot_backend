@@ -11,6 +11,9 @@
 //                                        currentPeriodEnd, daysLeft, amount, currency,
 //                                        addons, stripeConfigured, hasStripeSubscription,
 //                                        contactEmail, usage } }
+//                                   + pay: { provider, label, amount_due, currency, due_date,
+//                                   bank_accounts, pending_request } -- how the gym pays GymsPilotPro
+//                                   (platformPay.payBlock); null when it could not be worked out
 //                                   usage: [{ key, label, used, limit }] -- one per plan
 //                                   limit (planLimits.LIMIT_KINDS); limit null = unlimited.
 //                                   null when it could not be counted, or when the
@@ -23,6 +26,9 @@
 //                                   409 { code: 'CHECKOUT_COMPLETED' } when the page opened last was
 //                                   paid a moment ago and the webhook has not recorded it yet
 //   POST /api/billing/portal        -> { success, data: { url } }
+//   POST /api/billing/receipt       multipart `receipt` (JPG/PNG/WebP/PDF, 4 MB) + reference?, note?,
+//                                   billingCycle? -> { success, data: { pending_request } }: a bank
+//                                   transfer receipt for the super admin to approve
 //   POST /api/billing/pay           { billingCycle?, planSlug? } -> { success, data: { url } }: Safepay's
 //                                   page, with GymsPilotPro's own keys, when that is how gyms pay;
 //                                   409 STRIPE_CHECKOUT / BANK_TRANSFER_ONLY / ONLINE_PAYMENT_OFF otherwise
@@ -50,11 +56,13 @@ const subscriptionSync = require('../services/subscriptionSync');
 const { invalidateTenantCache } = require('../middleware/resolveTenant');
 const { frontendOrigin } = require('../tenantContext');
 const { LIMIT_KINDS } = require('../planLimits');
+const User = require('../../models/user');
 
 const PlatformSettings = require('../models/platformSettingsModel');
 // Paying GymsPilotPro another way than Stripe: which way, and for what.
 const platformPay = require('../services/platformPay');
 const platformSafepay = require('../services/platformSafepay');
+const paymentRequests = require('../services/paymentRequests');
 const { SafepayError } = require('../../services/safepay');
 
 const { PlatformBillingError, PlatformStripeNotConfiguredError } = platformBilling;
@@ -197,6 +205,11 @@ module.exports = {
       // Billing tab or the admin shell its billing banner. The banner asks on
       // every admin page load and needs only the status, so it skips the
       // counts with ?usage=0.
+      // How the gym pays GymsPilotPro, the same way: extra, never the tab.
+      const pay = await platformPay.payBlock(gym).catch((error) => {
+        console.error('[billing] pay block failed:', error.message);
+        return null;
+      });
       const usage =
         req.query.usage === '0'
           ? null
@@ -230,6 +243,7 @@ module.exports = {
           stripeConfigured: stripe.available,
           hasStripeSubscription: !!sub.stripeSubscriptionId,
           contactEmail: process.env.PLATFORM_CONTACT_EMAIL || '',
+          pay,
           usage
         }
       });
@@ -339,6 +353,36 @@ module.exports = {
       const { url } = await platformSafepay.openCheckout({ gym, terms, settings, actor: req.user });
       return res.json({ success: true, data: { url } });
     } catch (error) {
+      return fail(res, error);
+    }
+  },
+
+  // POST /api/billing/receipt   multipart: receipt (file), reference?, note?, billingCycle?
+  //
+  // "We have paid by bank transfer": the receipt for GymsPilotPro to check
+  // (services/paymentRequests.js). Taken while GymsPilotPro lists a bank
+  // account to pay into; replaces a receipt still waiting. 409 STRIPE_BILLED
+  // for a gym Stripe bills, BANK_TRANSFER_OFF with no account to pay into,
+  // REVIEW_IN_PROGRESS while the last one is being approved.
+  receipt: async (req, res) => {
+    try {
+      const gym = await freshGym(req);
+      // Who sent it, by name, for the super admin's list.
+      const account = req.user && req.user.id ? await User.findById(req.user.id).select('firstName lastName email').lean().catch(() => null) : null;
+      const user = { ...(account || {}), ...(req.user || {}), id: req.user && req.user.id };
+      const row = await paymentRequests.submitReceipt({ gym, file: req.file, body: req.body || {}, user });
+      PlatformAuditLog.record({
+        actorId: null,
+        actorEmail: (req.user && req.user.email) || 'gym admin',
+        action: 'gym_receipt_submitted',
+        gymId: gym._id,
+        gymSlug: gym.slug,
+        meta: { requestId: String(row._id), amount: row.amount, currency: row.currency, reference: row.reference }
+      });
+      return res.status(201).json({ success: true, message: 'Receipt sent. GymsPilotPro will confirm it.', data: { pending_request: paymentRequests.gymView(row) } });
+    } catch (error) {
+      // Refused or failed: the file is not kept (submitReceipt removes what it stored).
+      if (req.file && req.file.path) require('fs').promises.unlink(req.file.path).catch(() => {});
       return fail(res, error);
     }
   },

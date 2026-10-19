@@ -21,6 +21,7 @@ const addonsController = require('../controllers/addonsController');
 const platformSettingsController = require('../controllers/platformSettingsController');
 const demoRequestsController = require('../controllers/demoRequestsController');
 const signupController = require('../controllers/signupController');
+const paymentRequestsController = require('../controllers/paymentRequestsController');
 
 router.use((req, res, next) => {
   warmPlatformModels();
@@ -123,6 +124,11 @@ router.delete('/settings/bank-accounts/:id', platformSettingsController.removeBa
 router.post('/settings/bank-accounts/:id/qr', imageUploadChecked('qrCode'), platformSettingsController.uploadBankAccountQr);
 router.delete('/settings/bank-accounts/:id/qr', platformSettingsController.removeBankAccountQr);
 router.post('/settings/:gatewayId/test', platformSettingsController.testGateway);
+
+// Payments to verify: bank-transfer receipts gyms uploaded to pay GymsPilotPro
+router.get('/payment-requests', paymentRequestsController.list);
+router.post('/payment-requests/:id/approve', paymentRequestsController.approve);
+router.post('/payment-requests/:id/reject', paymentRequestsController.reject);
 
 // Add-ons sold beside the plans
 router.get('/addons', addonsController.list);
