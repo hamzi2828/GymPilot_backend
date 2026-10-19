@@ -5,6 +5,8 @@
 //   GET  /api/pay/:token            the page's data -- public, the link is the key
 //   POST /api/pay/:token/checkout   opens the gym's online checkout for that order
 //   POST /api/gymfolio/package-orders/:id/pay-link   staff: the link, and send it
+//   GET    /api/billing/me/saved-methods      the member's saved cards
+//   DELETE /api/billing/me/saved-methods/:id  remove one: automatic payment stops
 //
 // The public pair sits behind the tenant gate like every gym route: the page
 // is on the gym's own site, and the token is checked against that gym, so a
@@ -22,6 +24,7 @@ const { activeBanks, bankView } = require('../services/billing/banks');
 const { billingSettings } = require('../services/billing/settings');
 const { metadataOf } = require('../services/billing/dueRenewals');
 const { gymName, sendBillingMessage } = require('../services/billing/billingMessages');
+const savedMethods = require('../services/billing/savedMethods');
 
 const PAID = ['paid'];
 const CLOSED = ['refunded', 'cancelled'];
@@ -203,6 +206,33 @@ const payLinkController = {
     } catch (error) {
       console.error('[pay] admin link failed:', error);
       return fail(res, 500, 'SERVER_ERROR', 'The payment link could not be made.');
+    }
+  },
+
+  /** GET /api/billing/me/saved-methods -> { data: [{ id, brand, last4, exp_month, exp_year, auto_pay, consent_at, ... }] } */
+  async listSavedMethods(req, res) {
+    try {
+      const me = req.user ? req.user._id || req.user.id : null;
+      if (!me) return fail(res, 401, 'AUTH_REQUIRED', 'Please sign in.');
+      const methods = await savedMethods.savedMethodsOf(me);
+      return res.json({ success: true, data: methods.map(savedMethods.savedMethodView) });
+    } catch (error) {
+      console.error('[billing] saved cards could not be listed:', error);
+      return fail(res, 500, 'SERVER_ERROR', 'Your saved cards could not be loaded.');
+    }
+  },
+
+  /** DELETE /api/billing/me/saved-methods/:id -> { success } -- automatic payment stops at once. */
+  async removeSavedMethod(req, res) {
+    try {
+      const me = req.user ? req.user._id || req.user.id : null;
+      if (!me) return fail(res, 401, 'AUTH_REQUIRED', 'Please sign in.');
+      const removed = await savedMethods.removeSavedMethod(me, req.params.id);
+      if (!removed) return fail(res, 404, 'SAVED_METHOD_NOT_FOUND', 'That saved card was not found on your account.');
+      return res.json({ success: true, message: 'Card removed. Automatic payments are off.' });
+    } catch (error) {
+      console.error('[billing] saved card could not be removed:', error);
+      return fail(res, 500, 'SERVER_ERROR', 'The card could not be removed. Please try again.');
     }
   }
 };

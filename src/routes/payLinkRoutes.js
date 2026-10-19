@@ -43,6 +43,12 @@ const payCheckoutLimiter = limiter(20, 'Too many payment attempts. Please wait a
 router.get('/api/pay/:token', payPageLimiter, payLinkController.show);
 router.post('/api/pay/:token/checkout', payCheckoutLimiter, payLinkController.checkout);
 
+// The member's own saved cards. /api/billing is also where the gym's own
+// GymsPilotPro subscription lives (platform/routes/billingRoutes.js); none of
+// its routes is under /me, so these are reached past it.
+router.get('/api/billing/me/saved-methods', auth, payLinkController.listSavedMethods);
+router.delete('/api/billing/me/saved-methods/:id', auth, payLinkController.removeSavedMethod);
+
 module.exports = router;
 module.exports.payPageLimiter = payPageLimiter;
 module.exports.payCheckoutLimiter = payCheckoutLimiter;
