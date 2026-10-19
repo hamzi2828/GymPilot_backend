@@ -93,7 +93,8 @@ test('a refusal says what became of the order, in words the desk or the member c
     ['paid', 400, 'ALREADY_PAID', /^This order is already paid$/],
     ['refunded', 409, 'ORDER_CLOSED', /^This order was refunded, so it cannot be opened again\. Start a new order for the package instead\.$/],
     ['failed', 409, 'ORDER_CLOSED', /^This order is closed: its payment was not accepted\. It cannot be opened again; start a new order for the package instead\.$/],
-    ['cancelled', 409, 'ORDER_CLOSED', /^This order is closed/],
+    // Cancelled before it was paid: closed for good, and said so.
+    ['cancelled', 409, 'ORDER_CLOSED', /^This order was cancelled, so no transfer can be sent or confirmed for it\. Start a new order for the package instead\.$/],
     [null, 409, 'ORDER_CLOSED', /^This order is closed/],
     // Still reviewable, so the update lost to an approval holding it.
     ['processing', 409, 'REVIEW_IN_PROGRESS', /^Somebody else is confirming this payment right now\. Reload the order in a moment\.$/],

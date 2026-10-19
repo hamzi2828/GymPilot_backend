@@ -1181,8 +1181,11 @@ function reviewNotClaimed(now) {
   return [{ 'payment.proof.reviewedAt': null }, { 'payment.proof.reviewedAt': { $lt: new Date(now.getTime() - REVIEW_CLAIM_MS) } }];
 }
 
+// ...and the order itself not cancelled: a transfer order cancelled before
+// any money came used to keep its payment 'pending', and a receipt sent
+// after that brought it back to life.
 function reviewable(orderId, now) {
-  return { _id: orderId, 'payment.status': { $in: REVIEWABLE }, $or: reviewNotClaimed(now) };
+  return { _id: orderId, 'payment.status': { $in: REVIEWABLE }, status: { $ne: 'cancelled' }, $or: reviewNotClaimed(now) };
 }
 
 function staffId(by) {
@@ -1191,11 +1194,18 @@ function staffId(by) {
 
 /** Why an order could not be acted on, read from the order as it now is. */
 async function reviewRefusal(orderId) {
-  const fresh = await PackageOrder.findById(orderId).select('payment.status').lean();
+  const fresh = await PackageOrder.findById(orderId).select('payment.status status').lean();
   const status = fresh && fresh.payment ? fresh.payment.status : null;
   if (status === 'paid') return new MembershipError('This order is already paid', 400, 'ALREADY_PAID');
   if (status === 'refunded') {
     return new MembershipError('This order was refunded, so it cannot be opened again. Start a new order for the package instead.', 409, 'ORDER_CLOSED');
+  }
+  if (status !== 'failed' && (status === 'cancelled' || (fresh && fresh.status === 'cancelled'))) {
+    return new MembershipError(
+      'This order was cancelled, so no transfer can be sent or confirmed for it. Start a new order for the package instead.',
+      409,
+      'ORDER_CLOSED'
+    );
   }
   if (!REVIEWABLE.includes(status)) {
     return new MembershipError(
@@ -1575,6 +1585,9 @@ async function resumeDueFreezes(now = new Date()) {
   return { resumed };
 }
 
+// A payment nothing has come in for yet.
+const UNPAID_STATUSES = ['pending', 'processing'];
+
 /**
  * Cancels a membership.
  *
@@ -1610,6 +1623,20 @@ async function cancel(order, { reason = '', by = null, source = 'staff', immedia
     order.status = 'cancelled';
     order.subscription.isActive = false;
     if (immediate && order.payment.status === 'paid') order.subscription.endDate = now;
+  }
+  // An order cancelled before it was paid is closed for its payment too,
+  // never left 'pending' for a receipt or an approval to revive. A card
+  // checkout reads 'failed', as one whose checkout expired: Stripe is the
+  // authority on whether money still arrives for it (activationClaim), and
+  // if it does the member gets what they paid for. Nothing else can be paid
+  // once cancelled, so it reads 'cancelled'. A card payment being recorded
+  // this very moment ('processing' on a Stripe order) is left to finish.
+  if (order.status === 'cancelled' && UNPAID_STATUSES.includes(order.payment.status)) {
+    if (stripeBilled(order)) {
+      if (order.payment.status === 'pending') order.payment.status = 'failed';
+    } else {
+      order.payment.status = 'cancelled';
+    }
   }
   await order.save();
   return order;

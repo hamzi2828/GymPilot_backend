@@ -33,9 +33,11 @@
 //              the member reopening the success page -- is news of money
 //              that has since been returned, not a new payment, and must not
 //              hand the membership back.
-//   cancelled  a payment called off for good. Nothing in this system writes
-//              it today; it is terminal by meaning, so it is treated like
-//              'refunded' rather than revived by whatever arrives later.
+//   cancelled  a payment called off for good: an unpaid order that is not a
+//              card checkout (a bank transfer, a desk order left pending)
+//              cancelled by staff or the member (membershipService.cancel).
+//              Terminal by meaning, so it is treated like 'refunded' rather
+//              than revived by whatever arrives later.
 //
 // 'pending' and 'failed' may still be claimed: Stripe is the authority on
 // whether the money arrived. An order closed because its checkout expired or
@@ -45,8 +47,8 @@
 // The order's own status is not consulted. The lifecycle statuses
 // ('active', 'frozen', 'past_due', 'expired') follow a paid payment, which
 // is blocked above, and a paid membership that is cancelled keeps its
-// payment 'paid'. An unpaid order closed by hand is treated like an expired
-// checkout: if the money then arrives, the order is activated.
+// payment 'paid'. An unpaid card checkout closed by hand reads 'failed', as
+// an expired one does: if the money then arrives, the order is activated.
 const BLOCKING = new Set(['paid', 'processing']);
 const UNDONE = new Set(['refunded', 'cancelled']);
 const REFUSED = [...BLOCKING, ...UNDONE];

@@ -219,3 +219,87 @@ test("the member's own order list carries why their receipt was not accepted", a
     assert.equal(row.payment.proof.rejectionReason, 'Amount does not match');
   });
 });
+
+// ---- A transfer order cancelled before it was paid ---------------------------
+//
+// Cancelling set the order 'cancelled' but left its payment 'pending', and
+// the receipt and approval checks looked at the payment alone: a receipt
+// sent afterwards put the order back to 'pending', and Approve then handed
+// the membership over. Cancelled now closes the payment too, and an order
+// cancelled either way is refused.
+
+const cancelOrder = (order) =>
+  h.call(controller.cancel, { params: { id: String(order._id) }, body: { reason: 'Changed their mind' }, user: asStaff(), roleSlug: 'admin' });
+
+async function transferOrder() {
+  seq += 1;
+  const member = await User.create({ firstName: 'Can', lastName: `Celled${seq}`, email: `cancelled${seq}@transfer.test`, role: 'user' });
+  return service.createBankTransferOrder({ user: member, pkg: monthly });
+}
+
+function refusedAsCancelled(res) {
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal(res.body.code, 'ORDER_CLOSED');
+  assert.match(res.body.message, /^This order was cancelled, so no transfer can be sent or confirmed for it\./);
+}
+
+test('a transfer order cancelled before it was paid takes no receipt and no approval, and stays cancelled', async () => {
+  await h.inGym(gym, async () => {
+    const order = await transferOrder();
+    const cancelled = await cancelOrder(order);
+    assert.equal(cancelled.statusCode, 200, JSON.stringify(cancelled.body));
+
+    let row = await PackageOrder.findById(order._id).lean();
+    assert.deepEqual([row.status, row.payment.status], ['cancelled', 'cancelled'], 'the payment is closed with the order');
+
+    refusedAsCancelled(await sendProof(order, { reference: 'LATE-RECEIPT' }));
+    refusedAsCancelled(await approve(order));
+    refusedAsCancelled(await reject(order));
+
+    row = await PackageOrder.findById(order._id).lean();
+    assert.deepEqual([row.status, row.payment.status, row.subscription.isActive], ['cancelled', 'cancelled', false]);
+    assert.equal(row.payment.proof.reference, '', 'the late receipt was not kept');
+    assert.equal(row.invoice && row.invoice.number, null);
+  });
+});
+
+test('a transfer cancelled while its receipt waited for review cannot then be approved', async () => {
+  await h.inGym(gym, async () => {
+    const order = await awaitingReview();
+    assert.equal(order.payment.status, 'processing');
+    assert.equal((await cancelOrder(order)).statusCode, 200);
+    refusedAsCancelled(await approve(order));
+    const row = await PackageOrder.findById(order._id).lean();
+    assert.deepEqual([row.status, row.payment.status], ['cancelled', 'cancelled']);
+  });
+});
+
+test('an order cancelled before this fix, its payment still pending, is refused all the same', async () => {
+  await h.inGym(gym, async () => {
+    const order = await transferOrder();
+    await PackageOrder.updateOne({ _id: order._id }, { $set: { status: 'cancelled', 'subscription.isActive': false } });
+    refusedAsCancelled(await sendProof(order, { reference: 'REVIVE-ME' }));
+    refusedAsCancelled(await approve(order));
+    const row = await PackageOrder.findById(order._id).lean();
+    assert.deepEqual([row.status, row.payment.status], ['cancelled', 'pending']);
+  });
+});
+
+test('a card checkout cancelled before it was paid reads failed, as an expired one does, so money Stripe still takes is honoured', async () => {
+  await h.inGym(gym, async () => {
+    seq += 1;
+    const member = await User.create({ firstName: 'Card', lastName: `Cancel${seq}`, email: `card-cancel${seq}@transfer.test`, role: 'user' });
+    const order = await PackageOrder.create({
+      orderNumber: `CARD-CANCEL-${seq}`,
+      userId: member._id,
+      packageId: monthly._id,
+      packageDetails: { name: 'Monthly', price: '40', currency: 'gbp', period: 'month' },
+      customerInfo: { fullName: 'Card Cancel', email: member.email },
+      payment: { method: 'stripe', amount: 40, currency: 'gbp', status: 'pending', stripeSessionId: `cs_cancel_${seq}` },
+      status: 'pending'
+    });
+    assert.equal((await cancelOrder(order)).statusCode, 200);
+    const row = await PackageOrder.findById(order._id).lean();
+    assert.deepEqual([row.status, row.payment.status], ['cancelled', 'failed']);
+  });
+});
