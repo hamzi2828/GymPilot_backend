@@ -52,6 +52,19 @@ async function activeAdminCount() {
     return User.countDocuments({ role: guards.ADMIN_SLUG, isActive: true });
 }
 
+// Every front-desk sign-in of the account ends where its website and phone
+// sessions end (a new password, a Google takeover): a desk token is not a
+// JWT, so tokenVersion never reaches it. Logged, not thrown -- the password
+// has changed either way.
+async function endDeskSessions(userId) {
+    try {
+        const DesktopToken = require('../attendance/models/desktopTokenModel');
+        await DesktopToken.revokeAllForUser(userId);
+    } catch (error) {
+        console.error('[users] could not end the desk sign-ins of', String(userId), '-', error.message);
+    }
+}
+
 // What has to happen when an account is deleted, beyond the document going:
 // its username is released in the platform directory (or the phone app keeps
 // resolving it to a gym), its front-desk tokens stop working, and any
@@ -308,6 +321,7 @@ async function linkGoogleAccount(user, { googleId, picture }) {
   );
   if (takeover) {
     forgetSession(user._id);
+    await endDeskSessions(user._id);
     console.log('[auth] Google sign-in linked', user.email, '- its password was cleared and its sessions ended');
   }
   return User.findById(user._id);
@@ -1048,6 +1062,8 @@ const userController = {
             user.passwordResetExpiresAt = null;
             user.passwordChangedAt = new Date();
             await user.save();
+            // The front desks signed in with the old password too.
+            await endDeskSessions(user._id);
 
             // The link only ever went to the account's address (sendResetLink),
             // so whoever used it reads that mailbox: the address is theirs.
@@ -1108,6 +1124,8 @@ const userController = {
             user.passwordResetExpiresAt = null;
             user.passwordChangedAt = new Date();
             await user.save();
+            // The front desks signed in with the old password too.
+            await endDeskSessions(user._id);
 
             return res.status(200).json({ message: 'Password changed' });
         } catch (error) {

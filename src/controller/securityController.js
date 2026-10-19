@@ -13,6 +13,7 @@ const ClassBooking = require('../gymfolio/models/classBookingModel');
 const Attendance = require('../attendance/models/attendanceModel');
 const Fingerprint = require('../attendance/models/fingerprintModel');
 const FaceTemplate = require('../attendance/models/faceTemplateModel');
+const DesktopToken = require('../attendance/models/desktopTokenModel');
 const Contact = require('../models/contactModel');
 const AdminAuditLog = require('../models/adminAuditLogModel');
 const twoFactor = require('../services/twoFactorService');
@@ -243,6 +244,9 @@ module.exports = {
       const { id, jti, exp } = req.user || {};
       if (!jti || !exp) {
         await User.updateOne({ _id: id }, { $inc: { tokenVersion: 1 } });
+        // Every session, the front desks' included: a desk token is not a
+        // JWT, so tokenVersion never reaches it.
+        await DesktopToken.revokeAllForUser(id);
       } else {
         const now = new Date();
         // Kept exactly as long as the token itself would have worked.
@@ -266,6 +270,9 @@ module.exports = {
       const user = await User.findByIdAndUpdate(req.user.id, { $inc: { tokenVersion: 1 } }, { new: true }).select('tokenVersion');
       if (!user) return res.status(404).json({ message: 'Account not found' });
       forgetSession(user._id);
+      // The front desks too: a desk token is not a JWT, so tokenVersion never
+      // reaches it.
+      await DesktopToken.revokeAllForUser(user._id);
       return res.json({ success: true, message: 'Signed out everywhere. Sign in again to continue.' });
     } catch (error) {
       console.error('[security] logout-all failed:', error);
@@ -289,6 +296,8 @@ module.exports = {
       const user = await User.findByIdAndUpdate(target._id, { $inc: { tokenVersion: 1 } }, { new: true }).select('_id');
       if (!user) return res.status(404).json({ message: 'User not found' });
       forgetSession(user._id);
+      // Every device means the front desks too (a desk token is not a JWT).
+      await DesktopToken.revokeAllForUser(user._id);
       return res.json({ success: true, message: `${labelOf(target)} has been signed out of every device.` });
     } catch (error) {
       console.error('[security] force logout failed:', error);

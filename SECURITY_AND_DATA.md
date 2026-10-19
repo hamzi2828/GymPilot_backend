@@ -20,6 +20,13 @@ every request, re-reading the account at most every 30 seconds per process:
   from staff). A token names the role it was signed in with, so a demoted
   manager signs in again rather than keeping "manager" for weeks.
 
+A desk token (the Windows app's and the kiosk's) is not a JWT, so
+`tokenVersion` never reached it. Everything above that ends an account's
+sessions — a password change or reset, setting one, sign out everywhere,
+staff **Sign out**, a Google takeover — revokes its desk tokens as well, and
+the desk is at the sign-in window on its next request. A role change does not
+need to: a desk re-reads its grant on every request.
+
 Google sign-in finds an account by email. Anyone can sign up with any
 address (it is confirmed afterwards, see *Email confirmation*), so the first
 time Google — which has checked the address — links into a password account
