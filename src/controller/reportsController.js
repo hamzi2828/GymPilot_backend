@@ -277,9 +277,18 @@ module.exports = {
           { $sort: { booked: -1 } },
           { $limit: 10 }
         ]),
+        // By currency too: a session's value and commission are money in the
+        // currency it was priced in, and only the gym's own adds up.
         PtSession.aggregate([
           { $match: { date: { $gte: range.from, $lte: range.to } } },
-          { $group: { _id: '$status', n: { $sum: 1 }, value: { $sum: '$price' }, commission: { $sum: '$commission.amount' } } }
+          {
+            $group: {
+              _id: { status: '$status', currency: { $toUpper: { $ifNull: ['$currency', ''] } } },
+              n: { $sum: 1 },
+              value: { $sum: '$price' },
+              commission: { $sum: '$commission.amount' }
+            }
+          }
         ]),
         Lead.aggregate([{ $match: { createdAt: { $gte: range.start, $lt: range.end } } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
         // Distinct members with a live order, the same count the dashboard
@@ -370,14 +379,33 @@ module.exports = {
       const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, label: `${String(h).padStart(2, '0')}:00`, value: 0 }));
       for (const row of hourRows) if (row._id >= 0 && row._id < 24) hours[row._id].value = row.n;
 
-      const pt = { scheduled: 0, completed: 0, cancelled: 0, no_show: 0, value: 0, commission: 0 };
+      // Sessions are counted whatever they were priced in; the value and
+      // commission are the gym's currency only (a session with none is the
+      // gym's, as the accounts read it), and any other currency is listed on
+      // its own -- the same rule as the rest of the ledger.
+      const pt = { scheduled: 0, completed: 0, cancelled: 0, no_show: 0, value: 0, commission: 0, other_currencies: [] };
+      const ptOther = new Map();
       for (const row of ptRows) {
-        pt[row._id] = row.n;
-        if (row._id === 'completed') {
-          pt.value = Math.round(row.value * 100) / 100;
-          pt.commission = Math.round(row.commission * 100) / 100;
+        const { status, currency } = row._id;
+        pt[status] = (pt[status] || 0) + row.n;
+        if (status !== 'completed') continue;
+        if (!currency || currency === base) {
+          pt.value += row.value;
+          pt.commission += row.commission;
+        } else {
+          const entry = ptOther.get(currency) || { currency, sessions: 0, value: 0, commission: 0 };
+          entry.sessions += row.n;
+          entry.value += row.value;
+          entry.commission += row.commission;
+          ptOther.set(currency, entry);
         }
       }
+      pt.value = Math.round(pt.value * 100) / 100;
+      pt.commission = Math.round(pt.commission * 100) / 100;
+      pt.other_currencies = [...ptOther.values()]
+        .sort((a, b) => a.currency.localeCompare(b.currency))
+        .map((r) => ({ ...r, value: Math.round(r.value * 100) / 100, commission: Math.round(r.commission * 100) / 100 }));
+      const otherPtCount = pt.other_currencies.reduce((s, r) => s + r.sessions, 0);
       const leads = { new: 0, contacted: 0, trial: 0, won: 0, lost: 0 };
       for (const row of leadRows) leads[row._id] = row.n;
       const leadTotal = Object.values(leads).reduce((a, b) => a + b, 0);
@@ -423,11 +451,12 @@ module.exports = {
         other_currencies: otherCurrencies.map((r) => ({ currency: String(r._id || '').toUpperCase(), total: Math.round(r.total * 100) / 100, orders: r.n })),
         // Everything the base-currency totals above had to leave out.
         other_currency: {
-          count: otherOrderCount + otherExpenseCount + otherSaleCount,
-          currencies: otherCodes,
+          count: otherOrderCount + otherExpenseCount + otherSaleCount + otherPtCount,
+          currencies: [...new Set([...otherCodes, ...pt.other_currencies.map((r) => r.currency)])].sort(),
           orders: otherOrderCount,
           expenses: otherExpenseCount,
-          shop_sales: otherSaleCount
+          shop_sales: otherSaleCount,
+          pt_sessions: otherPtCount
         },
         // New registrations per day, for the table beside the chart: the
         // days on which somebody joined, oldest first. The Members export

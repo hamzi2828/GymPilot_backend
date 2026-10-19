@@ -151,7 +151,7 @@ test('reports net follows every Accounts outflow line: an asset bought in the ra
 test('reports leave other currencies out of the totals and count them, a blank currency is not one', async () => {
   await h.inGym(gym, async () => {
     const res = await h.call(reports.overview, { query: AUGUST });
-    assert.deepEqual(res.body.other_currency, { count: 3, currencies: ['PKR'], orders: 1, expenses: 1, shop_sales: 1 });
+    assert.deepEqual(res.body.other_currency, { count: 3, currencies: ['PKR'], orders: 1, expenses: 1, shop_sales: 1, pt_sessions: 0 });
     assert.equal(res.body.kpis.shop_revenue, 42);
     assert.equal(res.body.kpis.shop_sales, 2);
   });
@@ -480,5 +480,42 @@ test('a members export called with no role behind it is refused', async () => {
     const res = await h.call(reports.export, { params: { kind: 'members' }, query: AUGUST });
     assert.equal(res.statusCode, 403);
     assert.equal(res.body.code, 'EXPORT_NOT_ALLOWED');
+  });
+});
+
+test("personal training value and commission are the gym's currency only; another currency is listed on its own", async () => {
+  const PtSession = h.src('gymfolio/models/ptSessionModel');
+  const { Types } = h.state.mongoose;
+  const session = (startTime, status, price, currency, commission) => {
+    const doc = { trainerId: new Types.ObjectId(), memberId: new Types.ObjectId(), date: '2026-08-12', startTime, status, price, commission: { amount: commission } };
+    if (currency !== undefined) doc.currency = currency;
+    return doc;
+  };
+  await h.inGym(gym, async () => {
+    const { insertedIds } = await PtSession.collection.insertMany([
+      session('09:00', 'completed', 30, 'GBP', 10),
+      session('10:00', 'completed', 20, undefined, 5),
+      session('11:00', 'completed', 4000, 'PKR', 800),
+      session('12:00', 'completed', 50, 'usd', 15),
+      session('13:00', 'scheduled', 6000, 'PKR', 0)
+    ]);
+    try {
+      const res = await h.call(reports.overview, { query: AUGUST });
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      const pt = res.body.pt;
+      assert.equal(pt.completed, 4, 'every completed session is counted');
+      assert.equal(pt.scheduled, 1);
+      assert.equal(pt.value, 50, "GBP 30 + a session with no currency (the gym's) 20 -- not 4000 rupees");
+      assert.equal(pt.commission, 15);
+      assert.deepEqual(pt.other_currencies, [
+        { currency: 'PKR', sessions: 1, value: 4000, commission: 800 },
+        { currency: 'USD', sessions: 1, value: 50, commission: 15 }
+      ]);
+      assert.equal(res.body.other_currency.pt_sessions, 2);
+      assert.equal(res.body.other_currency.count, 5);
+      assert.deepEqual(res.body.other_currency.currencies, ['PKR', 'USD']);
+    } finally {
+      await PtSession.collection.deleteMany({ _id: { $in: Object.values(insertedIds) } });
+    }
   });
 });
