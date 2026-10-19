@@ -146,49 +146,75 @@ async function memberAppRefusal(decoded, req) {
 //
 // And one 403 that keeps the session: MEMBER_APP_NOT_INCLUDED, for a member
 // app token at a gym that no longer has the app (see memberAppRefusal).
+//
+// A 401 is only ever about the token. When the session cannot be checked at
+// all -- the database is down or slow to answer -- the answer is 503
+// SERVICE_UNAVAILABLE, which no client treats as a sign-out: a phone that
+// signed its member out on every database hiccup made them type their
+// password again for the server's fault.
+const INVALID_TOKEN = { message: 'Invalid or expired token', code: 'TOKEN_INVALID' };
+const SESSION_UNCHECKED = {
+  success: false,
+  code: 'SERVICE_UNAVAILABLE',
+  message: 'We could not check your session just now. Please try again in a moment.'
+};
+
+// A malformed account id in a token is the token's problem, not the server's.
+function isBadIdError(error) {
+  return !!error && (error.name === 'CastError' || error.name === 'BSONError');
+}
+
 module.exports = async function auth(req, res, next) {
-  try {
-    const authHeader = req.headers['authorization'] || '';
-    const token = authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7)
-      : null;
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : null;
 
-    if (!token) {
-      return res.status(401).json({ message: 'Authorization token required', code: 'TOKEN_MISSING' });
-    }
-
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      return res.status(500).json({ message: 'Server misconfiguration: missing JWT secret' });
-    }
-
-    const decoded = jwt.verify(token, secret);
-
-    // A platform (super admin) session is a different kind of thing and
-    // must never pass as a gym account.
-    if (decoded.scope === 'platform') {
-      return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
-    }
-    // Signed with the right secret but naming no account or no gym: not a
-    // session any sign-in here issues.
-    if (!hasSessionClaims(decoded)) {
-      return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
-    }
-    if (tenantMismatch(decoded, req)) {
-      return res.status(401).json({ message: 'This session belongs to a different gym. Please sign in again.', code: 'TOKEN_WRONG_GYM' });
-    }
-
-    const problem = await sessionProblem(decoded);
-    if (problem) return res.status(401).json({ message: problem, code: 'SESSION_ENDED' });
-
-    const refusal = await memberAppRefusal(decoded, req);
-    if (refusal) return res.status(403).json(refusal);
-
-    req.user = decoded;
-    return next();
-  } catch (err) {
-    return res.status(401).json({ message: 'Invalid or expired token', code: 'TOKEN_INVALID' });
+  if (!token) {
+    return res.status(401).json({ message: 'Authorization token required', code: 'TOKEN_MISSING' });
   }
+
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    return res.status(500).json({ message: 'Server misconfiguration: missing JWT secret' });
+  }
+
+  let decoded;
+  try {
+    decoded = jwt.verify(token, secret);
+  } catch {
+    return res.status(401).json(INVALID_TOKEN);
+  }
+
+  // A platform (super admin) session is a different kind of thing and
+  // must never pass as a gym account.
+  if (!decoded || typeof decoded !== 'object' || decoded.scope === 'platform') {
+    return res.status(401).json(INVALID_TOKEN);
+  }
+  // Signed with the right secret but naming no account or no gym: not a
+  // session any sign-in here issues.
+  if (!hasSessionClaims(decoded)) {
+    return res.status(401).json(INVALID_TOKEN);
+  }
+  if (tenantMismatch(decoded, req)) {
+    return res.status(401).json({ message: 'This session belongs to a different gym. Please sign in again.', code: 'TOKEN_WRONG_GYM' });
+  }
+
+  let problem;
+  try {
+    problem = await sessionProblem(decoded);
+  } catch (error) {
+    if (isBadIdError(error)) return res.status(401).json(INVALID_TOKEN);
+    console.error('[auth] could not check a session:', error && error.message);
+    return res.status(503).json(SESSION_UNCHECKED);
+  }
+  if (problem) return res.status(401).json({ message: problem, code: 'SESSION_ENDED' });
+
+  const refusal = await memberAppRefusal(decoded, req);
+  if (refusal) return res.status(403).json(refusal);
+
+  req.user = decoded;
+  return next();
 };
 
 module.exports.tenantMismatch = tenantMismatch;
