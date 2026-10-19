@@ -29,8 +29,9 @@ const { actorAccess, permissionsFor } = require('../services/roleService');
 const BIOMETRIC_CONSENT_VERSION = '2026-09';
 
 // Unexpired signed-out sessions kept per account. Far more than anyone signs
-// out within a token's lifetime; past it the oldest is dropped, which can
-// only revive a token its own owner already threw away.
+// out within a token's lifetime. A sign-out that would go past it ends every
+// session of the account instead (logout below): dropping the oldest entry
+// would let that signed-out token work again.
 const MAX_REVOKED_SESSIONS = 200;
 
 /**
@@ -252,8 +253,19 @@ module.exports = {
         // Kept exactly as long as the token itself would have worked.
         const until = new Date(exp * 1000);
         const live = { $filter: { input: { $ifNull: ['$revokedSessions', []] }, cond: { $gt: ['$$this.exp', now] } } };
+        // A full list is never trimmed -- the entry dropped would be a
+        // signed-out token working again. The account's sessions all end
+        // instead, as logout-all ends them, and the list starts over. One
+        // update, so a sign-out racing this one cannot slip in between.
+        const full = { $gte: [{ $size: live }, MAX_REVOKED_SESSIONS] };
+        const version = { $ifNull: ['$tokenVersion', 0] };
         await User.updateOne({ _id: id }, [
-          { $set: { revokedSessions: { $slice: [{ $concatArrays: [live, [{ jti: String(jti), exp: until }]] }, -MAX_REVOKED_SESSIONS] } } }
+          {
+            $set: {
+              tokenVersion: { $cond: [full, { $add: [version, 1] }, version] },
+              revokedSessions: { $cond: [full, [], { $concatArrays: [live, [{ jti: String(jti), exp: until }]] }] }
+            }
+          }
         ]);
       }
       forgetSession(id);
